@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv / venv
+.venv/
+
+# 자격증명 · 환경변수 (절대 커밋 금지)
+.env
+.env.*
+!.env.example
+*.key
+secrets/
+
+# 메모리 store · 로그 · 데이터 (data/ 는 런타임 산출물)
+data/
+*.sqlite
+*.sqlite-*
+*.db
+logs/
+*.log
+
+# OS / 에디터
+.DS_Store
+.idea/
+.vscode/
+
+# 로컬 전용 — 문서 하네스·설계·연구 노트 (어플리케이션 비필수)
+CLAUDE.md
+docs/
+trading-agent-design.md
+commercial-trading-agents-research.md
+
+# 테스트
+tests/
+.pytest_cache/

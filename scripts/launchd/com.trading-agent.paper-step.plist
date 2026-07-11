@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 일일 페이퍼 스텝 무인 실행 (Phase 0 완료 기준: 무인 동작).
+     23:00 KST = 10:00 ET(미국 개장 중, DST 기준) — 크립토는 24/7이라 무관.
+     KIS(KR) 추가 시 장중(10:00 KST) 별도 잡으로 분리할 것 (docs/PLAN.md).
+     설치: cp 후 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trading-agent.paper-step.plist -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.trading-agent.paper-step</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>scripts/run_paper_step.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/cholhwan/Documents/ai/trading-agent</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/cholhwan/Documents/ai/trading-agent/data/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/cholhwan/Documents/ai/trading-agent/data/logs/launchd.err.log</string>
+</dict>
+</plist>
