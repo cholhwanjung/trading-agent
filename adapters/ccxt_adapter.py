@@ -13,7 +13,6 @@ from datetime import date, datetime, time, timezone
 
 from adapters.allocation import compute_order_deltas
 from adapters.base import (
-    OBSERVATION_LOOKBACK_DAYS,
     Bar,
     MarketAdapter,
     NewsItem,
@@ -49,22 +48,26 @@ class BinanceTestnetAdapter(MarketAdapter):
         await self.ex.close()
         await self.data.close()
 
-    async def get_ohlcv(self, symbols: list[str], asof_day: date) -> dict[str, list[Bar]]:
-        start, end = observation_window(asof_day)
+    async def _fetch_bars(
+        self, symbols: list[str], start: date, end: date
+    ) -> dict[str, list[Bar]]:
+        """메인넷 일봉 조회 후 [start, end] 로 필터 — 진행 중인 당일 봉 차단 (R2)."""
         since = int(datetime.combine(start, time(), tzinfo=timezone.utc).timestamp() * 1000)
+        limit = (end - start).days + 3
         out: dict[str, list[Bar]] = {}
         for symbol in symbols:
-            raw = await with_retry(
-                lambda s=symbol: self.data.fetch_ohlcv(s, "1d", since, OBSERVATION_LOOKBACK_DAYS + 2)
-            )
+            raw = await with_retry(lambda s=symbol: self.data.fetch_ohlcv(s, "1d", since, limit))
             bars = []
             for ts, o, h, lo, c, v in raw:
                 day = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date()
-                # 윈도우 밖(특히 진행 중인 당일 봉)은 여기서 걸러 누출 원천 차단 (R2)
                 if start <= day <= end:
                     bars.append(Bar(day=day, open=o, high=h, low=lo, close=c, volume=v))
             out[symbol] = bars
         return out
+
+    async def get_ohlcv(self, symbols: list[str], asof_day: date) -> dict[str, list[Bar]]:
+        start, end = observation_window(asof_day)
+        return await self._fetch_bars(symbols, start, end)
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
         # 무료 RSS(CoinDesk·Cointelegraph) — 시장 전반 헤드라인, 심볼 필터 없음
@@ -78,21 +81,10 @@ class BinanceTestnetAdapter(MarketAdapter):
     ) -> dict[str, list[Bar]]:
         from datetime import timedelta
 
-        start = asof_day - timedelta(days=lookback_days)
-        end = asof_day - timedelta(days=1)  # 상한 t-1 (ADR-013)
-        since = int(datetime.combine(start, time(), tzinfo=timezone.utc).timestamp() * 1000)
-        out: dict[str, list[Bar]] = {}
-        for symbol in symbols:
-            raw = await with_retry(
-                lambda s=symbol: self.data.fetch_ohlcv(s, "1d", since, lookback_days + 2)
-            )
-            bars = []
-            for ts, o, h, lo, c, v in raw:
-                day = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date()
-                if start <= day <= end:
-                    bars.append(Bar(day=day, open=o, high=h, low=lo, close=c, volume=v))
-            out[symbol] = bars
-        return out
+        # 상한 t-1 (ADR-013)
+        return await self._fetch_bars(
+            symbols, asof_day - timedelta(days=lookback_days), asof_day - timedelta(days=1)
+        )
 
     async def get_equity(self) -> float:
         balance = await with_retry(self.ex.fetch_balance)

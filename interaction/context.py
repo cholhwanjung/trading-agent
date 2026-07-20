@@ -18,7 +18,7 @@ from pathlib import Path
 
 from memory import MemoryStore
 
-MARKETS = ("CRYPTO", "US")
+MARKETS = ("CRYPTO", "US", "KR")
 RECENT_DECISIONS = 5
 RECENT_EPISODIC = 5
 

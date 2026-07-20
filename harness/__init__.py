@@ -1,5 +1,6 @@
 """Paper trading harness — Phase 0: 어댑터 + baseline 정책 + 구조화 로깅."""
 
+from harness.env import load_env
 from harness.jsonlog import JsonlLogger
 from harness.loop import AllocationError, run_daily_step, validate_weights
 from harness.policy import CASH, BuyAndHold, Policy, RandomPolicy
@@ -10,6 +11,7 @@ __all__ = [
     "AllocationError",
     "BuyAndHold",
     "JsonlLogger",
+    "load_env",
     "MarketRun",
     "Policy",
     "RandomPolicy",

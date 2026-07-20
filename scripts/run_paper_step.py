@@ -1,8 +1,10 @@
 """일일 페이퍼 스텝 — 실계좌(Risk-guarded LLM) + 가상 포트폴리오 병행 운용 (Phase 1).
 
 사용법:
-    uv run python scripts/run_paper_step.py            # 실주문 + 가상 A/B
+    uv run python scripts/run_paper_step.py            # 실주문 + 가상 A/B (키 있는 전 시장)
     uv run python scripts/run_paper_step.py --dry-run  # 관측·포지션 조회까지만
+    uv run python scripts/run_paper_step.py --markets CRYPTO,US   # 시장 선택 (KR 은 10:00 KST 별도 잡)
+    uv run python scripts/run_paper_step.py --debate              # debate 강제 소집 (R4 사용자 요청)
 
 구성 (시장별):
 - 실계좌: RiskGuardedPolicy(LLMTrader) — 라이브 페이퍼가 진실 verifier ([ADR-001]).
@@ -23,10 +25,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from eval import VirtualPortfolio  # noqa: E402
-from harness import BuyAndHold, JsonlLogger, MarketRun, RandomPolicy, run_all_markets  # noqa: E402
+from harness import (  # noqa: E402
+    BuyAndHold,
+    JsonlLogger,
+    MarketRun,
+    RandomPolicy,
+    load_env,
+    run_all_markets,
+)
 from llm import LLMRouter  # noqa: E402
 from memory import (  # noqa: E402
     MemoryStore,
+    build_query_text,
     fill_pending_outcomes,
     lessons_payload,
     promote_candidates,
@@ -38,29 +48,28 @@ from memory import (  # noqa: E402
 from risk import RiskEngine, RiskGuardedPolicy, RiskLimits  # noqa: E402
 from trader import LLMTrader  # noqa: E402
 
-# 시장별 유니버스 + Risk limits 초기 캘리브레이션 (좁은 유니버스라 종목당 상한 완화)
-CRYPTO_UNIVERSE = ["BTC/USDT", "ETH/USDT"]
-US_UNIVERSE = ["SPY"]
+# 시장별 유니버스 — 설명 가능한 메이저 집중(2026-07-20, 사용자 승인): 뉴스·데이터
+# 커버리지가 좋은 대형 종목만. 버핏 플레이북(P1 이해·P3 경영진)이 문자 그대로 작동하는 대상.
+CRYPTO_UNIVERSE = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # 메이저 3종 (전부 연구 유니버스 소속)
+US_UNIVERSE = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]  # 나스닥 메가캡 5
+KR_UNIVERSE = ["005930", "000660", "005380", "035420"]  # 삼성전자·SK하이닉스·현대차·NAVER
 LIMITS = {
-    "CRYPTO": RiskLimits(max_weight_per_asset=0.50, min_cash=0.10, max_daily_turnover=0.50, mdd_circuit=0.20),
-    "US": RiskLimits(max_weight_per_asset=0.85, min_cash=0.10, max_daily_turnover=0.50, mdd_circuit=0.15),
+    # 개별 종목은 지수 ETF 보다 변동성이 크다 — 종목당 상한을 유니버스 크기에 맞춰 강화
+    "CRYPTO": RiskLimits(max_weight_per_asset=0.40, min_cash=0.10, max_daily_turnover=0.50, mdd_circuit=0.20),
+    "US": RiskLimits(max_weight_per_asset=0.35, min_cash=0.10, max_daily_turnover=0.50, mdd_circuit=0.15),
+    "KR": RiskLimits(max_weight_per_asset=0.40, min_cash=0.10, max_daily_turnover=0.50, mdd_circuit=0.15),
 }
 STATE_DIR = ROOT / "data" / "state"
-COST_BPS = {"CRYPTO": 10.0, "US": 1.0}  # 가상 포트폴리오 거래비용
+COST_BPS = {"CRYPTO": 10.0, "US": 1.0, "KR": 3.0}  # 가상 포트폴리오 거래비용
 
 
-def load_env(path: Path) -> dict[str, str]:
-    """의존성 없는 .env 파서 (scripts/check_credentials.py 와 동일 규칙)."""
-    env: dict[str, str] = {}
-    if not path.exists():
-        return env
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        env[key.strip()] = value.strip().strip('"').strip("'")
-    return env
+def load_prev_weights(state_path: Path) -> dict[str, float] | None:
+    """리스크 상태 파일에서 직전 목표 배분을 읽는다. 파일 없으면 None."""
+    if state_path.exists():
+        import json
+
+        return json.loads(state_path.read_text(encoding="utf-8")).get("prev_weights")
+    return None
 
 
 def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
@@ -80,6 +89,24 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
         out["US"] = (
             AlpacaPaperAdapter(env["ALPACA_PAPER_API_KEY"], env["ALPACA_PAPER_SECRET"], US_UNIVERSE),
             US_UNIVERSE,
+        )
+    # 계좌 형식(8자리-상품코드 2자리)이 맞을 때만 — 아니면 잔고·주문이 전부 실패한다
+    if (
+        env.get("KIS_PAPER_APP_KEY")
+        and env.get("KIS_PAPER_APP_SECRET")
+        and "-" in env.get("KIS_PAPER_ACCOUNT", "")
+    ):
+        from adapters.kis import KISPaperAdapter
+
+        out["KR"] = (
+            KISPaperAdapter(
+                env["KIS_PAPER_APP_KEY"],
+                env["KIS_PAPER_APP_SECRET"],
+                env["KIS_PAPER_ACCOUNT"],
+                KR_UNIVERSE,
+                token_cache=STATE_DIR / "kis_token.json",
+            ),
+            KR_UNIVERSE,
         )
     return out
 
@@ -134,6 +161,17 @@ async def run_virtual(
 async def main() -> int:
     env = load_env(ROOT / ".env")
     adapters = build_adapters(env)
+    # --markets KR / --markets CRYPTO,US — 장 시간이 다른 시장을 별도 잡으로 분리
+    if "--markets" in sys.argv:
+        wanted = set(sys.argv[sys.argv.index("--markets") + 1].upper().split(","))
+        dropped = wanted - set(adapters)
+        for adapter, _ in (v for k, v in adapters.items() if k not in wanted):
+            close = getattr(adapter, "close", None)
+            if close:
+                await close()
+        adapters = {k: v for k, v in adapters.items() if k in wanted}
+        if dropped:
+            print(f"status=warn detail=요청 시장 키 없음/형식 오류: {sorted(dropped)}")
     if not adapters:
         print("status=fail detail=.env에 사용 가능한 브로커 키 없음 (docs/CREDENTIALS.md)")
         return 1
@@ -161,13 +199,23 @@ async def main() -> int:
         guards: dict[str, RiskGuardedPolicy] = {}
         prev_weights_by_market: dict[str, dict | None] = {}
         for market, (adapter, symbols) in adapters.items():
-            prev_weights_by_market[market] = json_safe_weights_path(
-                STATE_DIR / f"risk_{market}.json"
-            )
+            prev_weights_by_market[market] = load_prev_weights(STATE_DIR / f"risk_{market}.json")
 
             def make_memory_fn(m: str):
-                async def memory_fn(obs) -> list[dict]:
-                    hits = retrieve(memory, m, obs.asof_day, k=5)
+                async def memory_fn(obs, features) -> list[dict]:
+                    # active 교훈이 없으면 임베딩 호출 자체를 생략 (승격 전 매일 낭비 방지)
+                    if not (
+                        memory.query(m, store="semantic", status="active")
+                        or memory.query(m, store="procedural", status="active")
+                    ):
+                        return []
+                    embedding = None
+                    try:
+                        query = build_query_text(m, features)
+                        embedding = (await router.embed([query]))[0]
+                    except Exception:
+                        pass  # relevancy 없이 recency+importance 로 진행 (비치명)
+                    hits = retrieve(memory, m, obs.asof_day, query_embedding=embedding, k=5)
                     return lessons_payload(hits)  # confidence 포함 (R9 블렌딩 입력)
 
                 return memory_fn
@@ -195,6 +243,9 @@ async def main() -> int:
                 router, market, symbols, adapter.get_ohlcv_history,
                 memory_fn=make_memory_fn(market),
                 signals_fn=signals_fn,
+                # R4 debate 트리거 입력: 직전 배분(대형 변경 감지) + --debate(사용자 요청)
+                prev_weights_fn=lambda p=STATE_DIR / f"risk_{market}.json": load_prev_weights(p),
+                debate="always" if "--debate" in sys.argv else "auto",
             )
             guard = RiskGuardedPolicy(
                 trader,
@@ -231,7 +282,7 @@ async def main() -> int:
             llm_weights = None
             llm_base_weights = None
             if not isinstance(results.get(market), Exception) and guard.last_decision:
-                llm_weights = json_safe_weights_path(guard.state_path)
+                llm_weights = load_prev_weights(guard.state_path)
                 llm_base_weights = getattr(guard.inner, "last_base_weights", None)
 
             prices, day = await fetch_prices(adapter, symbols)
@@ -289,14 +340,6 @@ async def main() -> int:
             if close:
                 await close()
         await router.close()
-
-
-def json_safe_weights_path(state_path: Path) -> dict[str, float] | None:
-    if state_path.exists():
-        import json
-
-        return json.loads(state_path.read_text(encoding="utf-8")).get("prev_weights")
-    return None
 
 
 if __name__ == "__main__":

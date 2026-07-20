@@ -38,3 +38,9 @@ commercial-trading-agents-research.md
 # 테스트
 tests/
 .pytest_cache/
+
+# 개인 전략 — 투자 철학 플레이북
+trader/playbook.md
+
+# 기계 종속 운영 설정 — 개인 절대경로 포함 (이식 스케줄링은 scripts/scheduler.py + Docker)
+scripts/launchd/

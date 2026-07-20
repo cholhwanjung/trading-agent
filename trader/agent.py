@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 from datetime import date
+from pathlib import Path
 
 from adapters.allocation import CASH
 from adapters.base import Bar, Observation, Position
@@ -20,6 +21,13 @@ from trader.features import InsufficientHistoryError, compute_features
 from trader.schema import parse_decision
 
 HistoryFn = Callable[[list[str], date], Awaitable[dict[str, list[Bar]]]]
+
+# 베이스 지식 (ADR-020) — 검증 교훈(memory)과 분리된 사전 원칙. 수정은 승인 게이트(하드룰 8).
+PLAYBOOK_PATH = Path(__file__).parent / "playbook.md"
+
+
+def load_playbook() -> str:
+    return PLAYBOOK_PATH.read_text(encoding="utf-8") if PLAYBOOK_PATH.exists() else ""
 
 SYSTEM_PROMPT = """\
 너는 {market} 시장의 포트폴리오 매니저다. 매일 1회, 자산 배분비율만으로 의사를 표현한다.
@@ -52,6 +60,7 @@ def build_user_prompt(
     features: dict[str, dict[str, float] | None],
     lessons: list[dict] | None = None,
     alpha_signals: dict | None = None,
+    debate: dict | None = None,
     max_news: int = 10,
 ) -> str:
     """관측을 구조화 텍스트로 — 자유 산문 없이 JSON 블록 나열 (하드룰 10).
@@ -77,6 +86,11 @@ def build_user_prompt(
         "verified_lessons": lessons or [],
         "alpha_signals": alpha_signals or {},
     }
+    if debate:
+        payload["debate_review"] = {
+            "instruction": "아래 Bull/Bear 토론을 검토해 배분을 재결정하라. 논거가 기존 제안을 지지하면 유지해도 된다.",
+            **debate,
+        }
     return json.dumps(payload, ensure_ascii=False, indent=1)
 
 
@@ -90,8 +104,10 @@ class LLMTrader:
         universe: list[str],
         history_fn: HistoryFn,
         tier: str = "smart",
-        memory_fn: Callable[[Observation], Awaitable[list[dict]]] | None = None,
+        memory_fn: Callable[[Observation, dict], Awaitable[list[dict]]] | None = None,
         signals_fn: Callable[[Observation], Awaitable[dict]] | None = None,
+        prev_weights_fn: Callable[[], dict[str, float] | None] | None = None,
+        debate: str = "auto",  # "auto"(트리거 시만) | "always"(사용자 요청) | "off"
     ) -> None:
         provider, model = router.spec(tier)  # 로그 표기용
         self.name = f"llm_trader:{provider}:{model}"
@@ -102,16 +118,24 @@ class LLMTrader:
         self.tier = tier
         self.memory_fn = memory_fn  # active 교훈만 반환해야 한다 (memory.retrieval)
         self.signals_fn = signals_fn  # OOS 검증 팩터 스코어 (alpha_lab.signals)
+        self.prev_weights_fn = prev_weights_fn  # 대형 포지션 변경 트리거 기준 (R4)
+        self.debate = debate
+        self.playbook = load_playbook()
         self.last_decision: dict | None = None
 
-    async def _decide_once(self, obs, positions, features, lessons: list[dict], signals: dict):
+    async def _decide_once(
+        self, obs, positions, features, lessons: list[dict], signals: dict, debate: dict | None = None
+    ):
+        system = SYSTEM_PROMPT.format(market=self.market, universe=self.universe)
+        if self.playbook:
+            system += "\n\n" + self.playbook
         resp = await self.router.complete(
             self.tier,
-            system=SYSTEM_PROMPT.format(market=self.market, universe=self.universe),
+            system=system,
             messages=[
                 {
                     "role": "user",
-                    "content": build_user_prompt(obs, positions, features, lessons, signals),
+                    "content": build_user_prompt(obs, positions, features, lessons, signals, debate),
                 }
             ],
             max_tokens=4096,
@@ -135,7 +159,8 @@ class LLMTrader:
             except InsufficientHistoryError:
                 features[symbol] = None  # 계산 불가를 명시 — LLM 이 불확실성으로 취급
 
-        lessons = await self.memory_fn(obs) if self.memory_fn else []
+        # features 를 함께 넘긴다 — retrieval 이 관측 상태로 relevancy 질의를 만들 수 있게
+        lessons = await self.memory_fn(obs, features) if self.memory_fn else []
         signals = {}
         if self.signals_fn:
             try:
@@ -172,12 +197,35 @@ class LLMTrader:
             if blend.applied:
                 final, decision = blend.weights, mem_decision
 
+        # 조건부 debate (R4) — 트리거 밖에서는 절대 소집되지 않는다
+        debate_meta = None
+        if self.debate != "off":
+            from trader.debate import debate_trigger, run_debate
+
+            prev = self.prev_weights_fn() if self.prev_weights_fn else None
+            trigger = debate_trigger(final, prev, signals, forced=(self.debate == "always"))
+            if trigger:
+                payload = build_user_prompt(obs, positions, features, lessons, signals)
+                debate_meta, d_tokens = await run_debate(
+                    self.router, self.market, payload, final, trigger
+                )
+                tokens["in"] += d_tokens["in"]
+                tokens["out"] += d_tokens["out"]
+                re_alloc, re_decision, re_resp = await self._decide_once(
+                    obs, positions, features, lessons, signals, debate=debate_meta
+                )
+                tokens["in"] += re_resp.input_tokens or 0
+                tokens["out"] += re_resp.output_tokens or 0
+                debate_meta["allocation_after"] = re_alloc
+                final, decision = re_alloc, re_decision
+
         self.last_base_weights = base_alloc  # ablation 병행용 (무메모리 arm)
         self.last_decision = {
             "features": features,  # 감사·pattern_key 계산용
             "alpha_signals_provided": sorted(signals),
             "retrieved_memory_ids": [le["id"] for le in lessons],
             "influence": influence,
+            "debate": debate_meta,  # None = 미소집 (R4 verify 로그)
             "rationale": decision.rationale,
             "cited_signal_ids": decision.cited_signal_ids,
             "cited_memory_ids": decision.cited_memory_ids,

@@ -20,24 +20,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from harness import load_env  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 from memory import MemoryStore  # noqa: E402
 
 PROPOSAL_DIR = ROOT / "data" / "proposals"
-MARKETS = ("CRYPTO", "US")
-
-
-def load_env(path: Path) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if not path.exists():
-        return env
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        env[key.strip()] = value.strip().strip('"').strip("'")
-    return env
+MARKETS = ("CRYPTO", "US", "KR")
 
 
 def gather_evidence(memory: MemoryStore) -> dict:

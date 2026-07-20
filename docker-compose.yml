@@ -1,0 +1,20 @@
+# trading-agent 배포 — gateway(:8721) + scheduler(일일 23:00 / 일요일 22:00 / 매월 1일 21:00 KST)
+# 주의: 호스트 launchd 잡(com.trading-agent.*)과 동시 가동 금지 — 이중 실행된다.
+services:
+  gateway:
+    build: .
+    command: ["uv", "run", "uvicorn", "interaction.api:app", "--host", "0.0.0.0", "--port", "8721"]
+    ports:
+      - "8721:8721"
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  scheduler:
+    build: .
+    command: ["uv", "run", "python", "scripts/scheduler.py"]
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

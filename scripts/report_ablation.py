@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 STATE = ROOT / "data" / "state" / "virtual"
 
 
@@ -69,6 +70,39 @@ def main() -> int:
             print(f"memory_delta_pct={llm['ret_pct'] - base['ret_pct']:+.4f}  # llm − llm_base (R9)")
         if llm and bh:
             print(f"alpha_vs_bh_pct={llm['ret_pct'] - bh['ret_pct']:+.4f}  # PRD 성공기준 분자")
+
+        # rolling-k delta — 승격 판정 입력 (일관성: 누적치 1개가 아니라 창 승률)
+        from eval.rolling import ROLLING_K, rolling_report
+
+        rolled = rolling_report(STATE, market)
+        for name, r in (("memory", rolled["memory"]), ("alpha", rolled["alpha"])):
+            if r is None:
+                print(f"rolling_{name} status=insufficient need_days>={ROLLING_K + 1}")
+                continue
+            p = f"{r['p_value']:.4f}" if r["p_value"] is not None else f"n/a(청크 {r['n_chunks']}<5)"
+            print(
+                f"rolling_{name} k={r['k']} win_rate={r['win_rate']:.2f}"
+                f" mean={r['mean_delta_pct']:+.3f}% latest={r['latest_delta_pct']:+.3f}%"
+                f" sign_p={p}  # 비중첩 {r['n_chunks']}청크 중 양성 {r['chunks_positive']}"
+            )
+
+    # 상위 결합 지수 — 고정비율 가상 배분 (Phase 4 v1, ADR-018)
+    from eval.meta import combined_index
+
+    meta = {a: combined_index(STATE, a) for a in ("llm", "llm_base", "bh")}
+    if any(meta.values()):
+        markets = next(s for s in meta.values() if s)["markets"]
+        print(f"\n=== META (고정비율 결합: {markets}) ===")
+        for name, s in meta.items():
+            if s is None:
+                print(f"arm={name} status=no_data")
+                continue
+            print(
+                f"arm={name} days={s['days']} index={s['index']:.4f}"
+                f" ret={s['ret_pct']:+.3f}% mdd={s['mdd_pct']:.3f}%"
+            )
+        if meta["llm"] and meta["bh"]:
+            print(f"meta_alpha_vs_bh_pct={meta['llm']['ret_pct'] - meta['bh']['ret_pct']:+.4f}")
     print(
         "\nnote=단기 표본은 통계력 없음 — 보조 지표(메모리 승격/퇴출률·인용 기여)와 함께 볼 것 (PRD)"
     )

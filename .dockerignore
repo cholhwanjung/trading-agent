@@ -1,0 +1,15 @@
+.git
+.venv
+data/
+.env
+.env.*
+!.env.example
+tests/
+docs/
+CLAUDE.md
+*.md
+!README.md
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.DS_Store

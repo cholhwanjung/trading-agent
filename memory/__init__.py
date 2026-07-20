@@ -4,7 +4,7 @@ from memory.admission import promote_candidates, review_probation, sign_test_p
 from memory.influence import blend_allocations, lesson_confidence, lessons_payload
 from memory.journal import fill_pending_outcomes, pattern_key, record_decision
 from memory.retention import review_retention
-from memory.retrieval import ScoredMemory, retrieve
+from memory.retrieval import ScoredMemory, build_query_text, retrieve
 from memory.store import MemoryEntry, MemoryStore
 
 __all__ = [
@@ -12,6 +12,7 @@ __all__ = [
     "MemoryStore",
     "ScoredMemory",
     "blend_allocations",
+    "build_query_text",
     "fill_pending_outcomes",
     "lesson_confidence",
     "lessons_payload",

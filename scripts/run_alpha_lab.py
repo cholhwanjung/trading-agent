@@ -22,23 +22,10 @@ sys.path.insert(0, str(ROOT))
 
 from alpha_lab import FactorLibrary, generate_candidates  # noqa: E402
 from alpha_lab.data import fetch_crypto_panel  # noqa: E402
-from harness import JsonlLogger  # noqa: E402
+from harness import JsonlLogger, load_env  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 
 LIBRARY_PATH = ROOT / "data" / "state" / "alpha_library_CRYPTO.json"
-
-
-def load_env(path: Path) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if not path.exists():
-        return env
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        env[key.strip()] = value.strip().strip('"').strip("'")
-    return env
 
 
 async def main() -> int:

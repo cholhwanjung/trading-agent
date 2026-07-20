@@ -11,7 +11,7 @@ import httpx
 from adapters.retry import with_retry
 from llm.base import LLMBackend, LLMError, LLMResponse
 
-TIMEOUT = 60.0
+TIMEOUT = 180.0  # reasoning 모델(smart tier)은 60s 를 종종 초과 — 7/19 무인 실행 ReadTimeout 재발 방지
 ANTHROPIC_VERSION = "2023-06-01"
 
 
@@ -24,6 +24,22 @@ def _check_status(resp: httpx.Response, provider: str) -> None:
         resp.raise_for_status()
     if resp.status_code >= 400:
         raise LLMError(f"provider={provider} http={resp.status_code} body={resp.text[:200]}")
+
+
+async def _post_json(client: httpx.AsyncClient, path: str, body: dict, provider: str) -> dict:
+    """POST + 재시도(429/5xx) + 소진 시 LLMError 변환 — 백엔드 공용 경로."""
+
+    async def call():
+        resp = await client.post(path, json=body)
+        _check_status(resp, provider)
+        return resp.json()
+
+    try:
+        return await with_retry(call, exceptions=(httpx.HTTPError,))
+    except httpx.HTTPStatusError as e:
+        raise LLMError(
+            f"provider={provider} http={e.response.status_code} body={e.response.text[:200]}"
+        ) from e
 
 
 class AnthropicBackend(LLMBackend):
@@ -57,16 +73,7 @@ class AnthropicBackend(LLMBackend):
         if system:
             body["system"] = system
 
-        async def call():
-            resp = await self._client.post("/v1/messages", json=body)
-            _check_status(resp, self.provider)
-            return resp.json()
-
-        try:
-            data = await with_retry(call, exceptions=(httpx.HTTPError,))
-        except httpx.HTTPStatusError as e:
-            raise LLMError(f"provider=anthropic http={e.response.status_code} body={e.response.text[:200]}") from e
-
+        data = await _post_json(self._client, "/v1/messages", body, self.provider)
         text = "".join(part["text"] for part in data["content"] if part["type"] == "text")
         usage = data.get("usage", {})
         return LLMResponse(
@@ -108,18 +115,7 @@ class OpenAICompatBackend(LLMBackend):
         if json_mode:
             body["response_format"] = {"type": "json_object"}
 
-        async def call():
-            resp = await self._client.post("/chat/completions", json=body)
-            _check_status(resp, self.provider)
-            return resp.json()
-
-        try:
-            data = await with_retry(call, exceptions=(httpx.HTTPError,))
-        except httpx.HTTPStatusError as e:
-            raise LLMError(
-                f"provider={self.provider} http={e.response.status_code} body={e.response.text[:200]}"
-            ) from e
-
+        data = await _post_json(self._client, "/chat/completions", body, self.provider)
         text = data["choices"][0]["message"]["content"] or ""
         usage = data.get("usage") or {}
         return LLMResponse(
@@ -132,16 +128,7 @@ class OpenAICompatBackend(LLMBackend):
 
     async def embed(self, model: str, texts: list[str]) -> list[list[float]]:
         """OpenAI 호환 /embeddings — 메모리 relevancy·중복체크용 (R8)."""
-
-        async def call():
-            resp = await self._client.post("/embeddings", json={"model": model, "input": texts})
-            _check_status(resp, self.provider)
-            return resp.json()
-
-        try:
-            data = await with_retry(call, exceptions=(httpx.HTTPError,))
-        except httpx.HTTPStatusError as e:
-            raise LLMError(
-                f"provider={self.provider} http={e.response.status_code} body={e.response.text[:200]}"
-            ) from e
+        data = await _post_json(
+            self._client, "/embeddings", {"model": model, "input": texts}, self.provider
+        )
         return [item["embedding"] for item in data["data"]]
