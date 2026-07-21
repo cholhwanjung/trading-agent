@@ -148,6 +148,14 @@ class MarketAdapter(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__}는 get_ohlcv_history 미구현")
 
+    async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
+        """현재 체결가(same-day, 실시간). **행동 전용** — 관측·feature·학습에 쓰지 말 것
+        (하드룰 7 · [ADR-013]). 실시간 이벤트 트리거([ADR-021])와 주문 집행 용도.
+
+        기본 미구현 — 트리거 대상 어댑터만 구현.
+        """
+        raise NotImplementedError(f"{type(self).__name__}는 get_current_prices 미구현")
+
     @abstractmethod
     async def submit_allocation(self, weights: dict[str, float]) -> OrderResult:
         """배분비율 벡터(∑=1, 현금 포함)를 받아 주문(Δq)으로 변환·제출 (R6).

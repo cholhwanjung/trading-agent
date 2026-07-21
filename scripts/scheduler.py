@@ -24,10 +24,11 @@ KST = ZoneInfo("Asia/Seoul")
 class Job:
     name: str
     script: str
-    hour: int
+    hour: int = 0
     minute: int = 0
     weekday: int | None = None  # 0=월 .. 6=일 (None = 매일)
     monthday: int | None = None  # 1..31 (None = 매일)
+    every_minutes: int | None = None  # 설정 시 N분마다 (hour/weekday/monthday 무시)
     args: tuple[str, ...] = ()
 
 
@@ -37,11 +38,15 @@ JOBS = [
     Job("paper_step", "scripts/run_paper_step.py", hour=23, args=("--markets", "CRYPTO,US")),
     Job("alpha_lab", "scripts/run_alpha_lab.py", hour=22, weekday=6),  # 일요일
     Job("monthly_proposal", "scripts/propose_improvements.py", hour=21, monthday=1),
+    # 실시간 이벤트 트리거([ADR-021]) — 15분마다 급변 점검, CRYPTO 전용(24/7)
+    Job("watcher_crypto", "scripts/run_watcher.py", every_minutes=15, args=("--market", "CRYPTO")),
 ]
 
 
 def next_run_at(job: Job, now: datetime) -> datetime:
     """now(tz-aware) 이후 첫 실행 시각. 순수 함수 — 테스트 대상."""
+    if job.every_minutes is not None:  # interval 잡 — 다음 실행은 now + N분
+        return now + timedelta(minutes=job.every_minutes)
     candidate = now.replace(hour=job.hour, minute=job.minute, second=0, microsecond=0)
     for _ in range(370):  # 최악(월 1일 잡)도 1년 내 반드시 존재
         ok = candidate > now

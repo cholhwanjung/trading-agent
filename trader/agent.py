@@ -53,6 +53,17 @@ SYSTEM_PROMPT = """\
   }}
 }}"""
 
+# 실시간 트리거([ADR-021]) 소집 시에만 시스템 프롬프트에 덧붙는다 — 일간 경로는 불변.
+# "오늘의 가격은 알 수 없다"는 기본 전제를 이 결정에 한해 예외 처리하고, 하방 방어를
+# 기본값으로 지시(하드룰 6). 당일 정보는 행동 판단에만, 학습·재해석에 쓰지 않는다.
+TRIGGER_SYSTEM_CLAUSE = (
+    "[실시간 트리거 모드] 이번 결정은 장중 급변 이벤트로 소집됐다. user 메시지의 "
+    "realtime_trigger 에 당일 가격·변동이 제공된다 — '오늘의 가격은 알 수 없다'는 기본 "
+    "전제의 예외다. 이 정보로 현재 배분이 여전히 유효한지 재판단하라. 하방 방어(현금 확대)가 "
+    "기본 선택지이며, 확신 없는 추격 매수는 금지한다. 이 당일 정보로 과거 관측·feature 를 "
+    "재해석하지 말 것."
+)
+
 
 def build_user_prompt(
     obs: Observation,
@@ -61,6 +72,7 @@ def build_user_prompt(
     lessons: list[dict] | None = None,
     alpha_signals: dict | None = None,
     debate: dict | None = None,
+    trigger: dict | None = None,
     max_news: int = 10,
 ) -> str:
     """관측을 구조화 텍스트로 — 자유 산문 없이 JSON 블록 나열 (하드룰 10).
@@ -90,6 +102,13 @@ def build_user_prompt(
         payload["debate_review"] = {
             "instruction": "아래 Bull/Bear 토론을 검토해 배분을 재결정하라. 논거가 기존 제안을 지지하면 유지해도 된다.",
             **debate,
+        }
+    if trigger:
+        # 관측 윈도우 밖(당일) 신호 — 분리된 라벨 채널(하드룰 7 격리 · [ADR-021])
+        payload["realtime_trigger"] = {
+            "note": "장중 실시간 이벤트로 소집됨. 아래는 관측 윈도우 밖(당일) 정보 — 현재 "
+            "배분의 유효성 재판단에만 쓰고, 이 정보로 과거 관측·feature 를 재해석하지 말 것.",
+            **trigger,
         }
     return json.dumps(payload, ensure_ascii=False, indent=1)
 
@@ -124,18 +143,23 @@ class LLMTrader:
         self.last_decision: dict | None = None
 
     async def _decide_once(
-        self, obs, positions, features, lessons: list[dict], signals: dict, debate: dict | None = None
+        self, obs, positions, features, lessons: list[dict], signals: dict,
+        debate: dict | None = None, trigger: dict | None = None,
     ):
         system = SYSTEM_PROMPT.format(market=self.market, universe=self.universe)
         if self.playbook:
             system += "\n\n" + self.playbook
+        if trigger:
+            system += "\n\n" + TRIGGER_SYSTEM_CLAUSE
         resp = await self.router.complete(
             self.tier,
             system=system,
             messages=[
                 {
                     "role": "user",
-                    "content": build_user_prompt(obs, positions, features, lessons, signals, debate),
+                    "content": build_user_prompt(
+                        obs, positions, features, lessons, signals, debate, trigger
+                    ),
                 }
             ],
             max_tokens=4096,
@@ -146,9 +170,15 @@ class LLMTrader:
         allocation.setdefault(CASH, 0.0)
         return allocation, decision, resp
 
-    async def decide(self, obs: Observation, positions: list[Position]) -> dict[str, float]:
+    async def decide(
+        self, obs: Observation, positions: list[Position], trigger: dict | None = None
+    ) -> dict[str, float]:
         """2-pass residual (R9): base(교훈 없음) 대비 mem(교훈 주입)의 편차만
-        confidence·bounded 로 반영. active 교훈이 없으면 base 1회 호출로 끝."""
+        confidence·bounded 로 반영. active 교훈이 없으면 base 1회 호출로 끝.
+
+        trigger 가 있으면 실시간 이벤트 소집([ADR-021]) — 당일 급변 컨텍스트를 모든
+        결정 pass 에 라벨 채널로 주입. 학습 파이프라인은 호출부(watcher)가 생략한다.
+        """
         history = await self.history_fn(self.universe, obs.asof_day)
         features: dict[str, dict[str, float] | None] = {}
         for symbol in self.universe:
@@ -168,7 +198,7 @@ class LLMTrader:
             except Exception:
                 signals = {}  # 신호는 관측 보조 — 실패해도 결정은 진행
         base_alloc, base_decision, base_resp = await self._decide_once(
-            obs, positions, features, [], signals
+            obs, positions, features, [], signals, trigger=trigger
         )
 
         tokens = {"in": base_resp.input_tokens or 0, "out": base_resp.output_tokens or 0}
@@ -179,7 +209,7 @@ class LLMTrader:
             from memory.influence import blend_allocations
 
             mem_alloc, mem_decision, mem_resp = await self._decide_once(
-                obs, positions, features, lessons, signals
+                obs, positions, features, lessons, signals, trigger=trigger
             )
             tokens["in"] += mem_resp.input_tokens or 0
             tokens["out"] += mem_resp.output_tokens or 0
@@ -203,16 +233,17 @@ class LLMTrader:
             from trader.debate import debate_trigger, run_debate
 
             prev = self.prev_weights_fn() if self.prev_weights_fn else None
-            trigger = debate_trigger(final, prev, signals, forced=(self.debate == "always"))
-            if trigger:
-                payload = build_user_prompt(obs, positions, features, lessons, signals)
+            # 실시간 trigger 파라미터와 이름 충돌 방지 — debate 소집 사유는 debate_reason
+            debate_reason = debate_trigger(final, prev, signals, forced=(self.debate == "always"))
+            if debate_reason:
+                payload = build_user_prompt(obs, positions, features, lessons, signals, trigger=trigger)
                 debate_meta, d_tokens = await run_debate(
-                    self.router, self.market, payload, final, trigger
+                    self.router, self.market, payload, final, debate_reason
                 )
                 tokens["in"] += d_tokens["in"]
                 tokens["out"] += d_tokens["out"]
                 re_alloc, re_decision, re_resp = await self._decide_once(
-                    obs, positions, features, lessons, signals, debate=debate_meta
+                    obs, positions, features, lessons, signals, debate=debate_meta, trigger=trigger
                 )
                 tokens["in"] += re_resp.input_tokens or 0
                 tokens["out"] += re_resp.output_tokens or 0
@@ -226,6 +257,7 @@ class LLMTrader:
             "retrieved_memory_ids": [le["id"] for le in lessons],
             "influence": influence,
             "debate": debate_meta,  # None = 미소집 (R4 verify 로그)
+            "realtime_trigger": trigger,  # None = 일간 스텝 / dict = 이벤트 소집 ([ADR-021])
             "rationale": decision.rationale,
             "cited_signal_ids": decision.cited_signal_ids,
             "cited_memory_ids": decision.cited_memory_ids,

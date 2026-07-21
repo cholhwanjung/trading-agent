@@ -20,6 +20,16 @@ MAX_SIGNALS = 3  # R17 정신 — 정예만 주입
 SIGNAL_LOOKBACK_DAYS = 200  # 팩터 워밍업(MAX_WINDOW=120) + 여유
 
 
+def _effective_ic(factor) -> float:
+    """랭킹 기준 — 라이브 IC 가 갱신됐으면 그것을(감쇠 반영), 없으면 admission OOS IC.
+
+    알파는 감쇠하므로([ADR-022]) 최신 라이브 추정치가 우선. 주간 review_decay 가
+    live_ic 를 갱신하고 우위 소멸분은 이미 retire 하므로, 여기선 살아남은 팩터의
+    현재 강도로 top-3 를 고른다.
+    """
+    return abs(factor.live_ic) if factor.live_ic is not None else abs(factor.oos_ic)
+
+
 async def compute_alpha_signals(
     library_path: Path | str,
     trading_universe: list[str],
@@ -33,7 +43,7 @@ async def compute_alpha_signals(
     if not library_path.exists():
         return {"asof": None, "signals": {}}
     library = FactorLibrary(library_path)
-    top = sorted(library.active(), key=lambda f: abs(f.oos_icir), reverse=True)[:MAX_SIGNALS]
+    top = sorted(library.active(), key=_effective_ic, reverse=True)[:MAX_SIGNALS]
     if not top:
         return {"asof": None, "signals": {}}
 
@@ -54,6 +64,7 @@ async def compute_alpha_signals(
         z = (row - mean) / std
         signals[f"alpha:{factor.name}"] = {
             "oos_ic": factor.oos_ic,
+            "live_ic": factor.live_ic,  # None = 아직 라이브 표본 부족 (감쇠 미평가)
             "hypothesis": factor.hypothesis,
             "scores": {
                 s: round(float(z[idx[s]]) * factor.sign, 3)

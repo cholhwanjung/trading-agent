@@ -86,6 +86,14 @@ class BinanceTestnetAdapter(MarketAdapter):
             symbols, asof_day - timedelta(days=lookback_days), asof_day - timedelta(days=1)
         )
 
+    async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
+        """실시간 체결가 — 메인넷 공개 티커(당일, 행동 전용 · [ADR-021])."""
+        out: dict[str, float] = {}
+        for symbol in symbols:
+            ticker = await with_retry(lambda s=symbol: self.data.fetch_ticker(s))
+            out[symbol] = float(ticker["last"])
+        return out
+
     async def get_equity(self) -> float:
         balance = await with_retry(self.ex.fetch_balance)
         equity = float(balance.get("total", {}).get(self.quote) or 0)

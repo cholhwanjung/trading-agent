@@ -16,8 +16,14 @@ from pathlib import Path
 
 import numpy as np
 
-from alpha_lab.backtest import BacktestResult, run_backtest, score_correlation
-from alpha_lab.dsl import DSLError
+from alpha_lab.backtest import (
+    BacktestResult,
+    daily_rank_ic,
+    forward_returns,
+    run_backtest,
+    score_correlation,
+)
+from alpha_lab.dsl import DSLError, evaluate
 
 # admission 임계 — ADR-012: 목표는 IC 0.03~0.05 보조 신호
 MIN_TRAIN_IC = 0.02
@@ -25,6 +31,11 @@ MIN_TRAIN_DAYS = 100
 MIN_OOS_IC = 0.01
 MAX_LIBRARY_CORR = 0.70
 MAX_BATCH_CORR = 0.85
+
+# 라이브 감쇠 퇴출 ([ADR-022]) — 알파는 crowding 으로 감쇠한다. admission 이후 실현
+# IC 가 우위 방향을 잃으면(방향성 IC ≤ DECAY_FLOOR) retire. 메모리 retention 과 대칭.
+MIN_LIVE_DAYS = 20  # post-admission 최소 표본일 — 미만이면 판단 보류(유지, diversity 보존)
+DECAY_FLOOR = 0.0  # 방향성 라이브 IC ≤ 이 값이면 우위 소멸 → retire
 
 
 @dataclass
@@ -48,6 +59,10 @@ class FactorRecord:
     oos_icir: float
     admitted_day: str
     sign: int = field(default=1)  # IC 부호 — 신호 방향
+    # 라이브 감쇠 추적 ([ADR-022]) — 주간 review_decay 가 갱신. 기존 JSON 은 기본값으로 로드.
+    live_ic: float | None = field(default=None)  # 최근 post-admission 실현 rank-IC
+    live_ic_n: int = field(default=0)  # 라이브 IC 표본일 수
+    live_ic_day: str | None = field(default=None)  # 마지막 갱신일
 
 
 class FactorLibrary:
@@ -173,5 +188,46 @@ class FactorLibrary:
                 )
         # Forbidden 경험은 최근 30건만 유지 (프롬프트 크기 통제)
         self.experience["forbidden"] = self.experience["forbidden"][-30:]
+        self.save()
+        return events
+
+    def review_decay(
+        self, panel: dict[str, np.ndarray], dates: list[date], asof_day: date
+    ) -> list[dict]:
+        """active 팩터의 라이브(post-admission) 실현 IC 를 갱신하고, 우위가 감쇠한
+        팩터를 retire ([ADR-022] — 알파 crowding 감쇠. 메모리 retention 과 대칭).
+
+        라이브 IC 는 admission 이후 날짜의 rank-IC 만 집계 — 승격 표본과 분리(ADR-002).
+        표본일 < MIN_LIVE_DAYS 면 증거 부족으로 유지(diversity 보존, 하드룰). 방향성
+        라이브 IC(live_ic × sign)가 DECAY_FLOOR 이하로 떨어지면 우위 소멸 → retire.
+        """
+        fwd = forward_returns(panel["close"])
+        events: list[dict] = []
+        for f in self.active():
+            try:
+                scores = evaluate(f.expression, panel)
+            except DSLError:
+                continue
+            ics = daily_rank_ic(scores, fwd)
+            admitted = date.fromisoformat(f.admitted_day)
+            live = np.array(
+                [ics[i] for i, d in enumerate(dates) if d > admitted and not np.isnan(ics[i])]
+            )
+            if len(live) < MIN_LIVE_DAYS:
+                continue  # 표본 부족 — 판단 보류(유지)
+            f.live_ic = round(float(live.mean()), 5)
+            f.live_ic_n = int(len(live))
+            f.live_ic_day = asof_day.isoformat()
+            if f.live_ic * f.sign <= DECAY_FLOOR:
+                f.status = "retired"
+                events.append(
+                    {
+                        "event": "factor_decayed",
+                        "name": f.name,
+                        "live_ic": f.live_ic,
+                        "live_n": f.live_ic_n,
+                        "admission_oos_ic": f.oos_ic,
+                    }
+                )
         self.save()
         return events

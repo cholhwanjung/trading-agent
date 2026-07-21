@@ -41,6 +41,14 @@ async def main() -> int:
         panel, symbols, dates = await fetch_crypto_panel()
         print(f"panel: {len(dates)}일 × {len(symbols)}종 ({dates[0]} ~ {dates[-1]})")
 
+        # 라이브 감쇠 퇴출 먼저 ([ADR-022]) — writer 가 살아있는 라이브러리만 보게
+        decayed = library.review_decay(panel, dates, today)
+        for e in decayed:
+            name, live_ic, oos_ic = e["name"], e["live_ic"], e["admission_oos_ic"]
+            print(f"  DECAYED name={name} live_ic={live_ic} (admission oos_ic={oos_ic})")
+            logger.log("ALPHA", e.pop("event"), e | {"cycle_day": str(today)})
+        print(f"decay_review retired={len(decayed)} active_remaining={len(library.active())}")
+
         candidates = await generate_candidates(router, library, n=n)
         print(f"writer: {len(candidates)}개 생성, judge/dsl 기각 "
               f"{sum(1 for c in candidates if c.rejected)}개")

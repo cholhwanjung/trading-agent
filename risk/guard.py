@@ -47,8 +47,16 @@ class RiskGuardedPolicy:
             json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8"
         )
 
-    async def decide(self, obs: Observation, positions: list[Position]) -> dict[str, float]:
-        raw = await self.inner.decide(obs, positions)
+    async def decide(
+        self, obs: Observation, positions: list[Position], trigger: dict | None = None
+    ) -> dict[str, float]:
+        # trigger 는 실시간 이벤트 소집([ADR-021]) 시에만 전달 — 일간 경로는 kwarg 없이
+        # 호출해 기존 동작을 그대로 유지(baseline 정책 래핑 호환).
+        raw = await (
+            self.inner.decide(obs, positions, trigger=trigger)
+            if trigger
+            else self.inner.decide(obs, positions)
+        )
         state = self._load_state()
 
         # Forbidden 패턴 하드 veto — 결정의 패턴이 검증된 실패 패턴이면 직전 배분 동결
