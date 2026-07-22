@@ -238,14 +238,24 @@ async def main() -> int:
 
                 return forbidden_patterns
 
+            # Alpha 신호: 시장별 연구 패널로 active 팩터 top-3 z-score 주입 (US 는 Alpaca 키 필요)
+            from alpha_lab.data import fetch_crypto_panel, make_us_panel_fn
+
+            alpha_panel_fn = {
+                "CRYPTO": fetch_crypto_panel,
+                "US": make_us_panel_fn(env),
+            }.get(market)
             signals_fn = None
-            if market == "CRYPTO":  # 연구 유니버스가 크립토뿐, US 는 확장 후
+            if alpha_panel_fn is not None:
                 from alpha_lab.signals import compute_alpha_signals
 
-                async def signals_fn(obs, _syms=symbols):
-                    return await compute_alpha_signals(
-                        STATE_DIR / "alpha_library_CRYPTO.json", _syms, obs.asof_day
-                    )
+                async def signals_fn(
+                    obs,
+                    _syms=symbols,
+                    _lib=STATE_DIR / f"alpha_library_{market}.json",
+                    _pf=alpha_panel_fn,
+                ):
+                    return await compute_alpha_signals(_lib, _syms, obs.asof_day, panel_fn=_pf)
 
             trader = LLMTrader(
                 router, market, symbols, adapter.get_ohlcv_history,

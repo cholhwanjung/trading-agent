@@ -15,7 +15,7 @@ from alpha_lab.library import FactorCandidate, FactorLibrary
 from llm import LLMRouter
 
 WRITER_PROMPT = """\
-너는 퀀트 팩터 연구자다. 아래 DSL 로 크립토 일간 횡단면 팩터 후보 {n}개를 제안하라.
+너는 퀀트 팩터 연구자다. 아래 DSL 로 {asset} 일간 횡단면 팩터 후보 {n}개를 제안하라.
 
 {dsl_spec}
 
@@ -54,7 +54,7 @@ def _extract_json(text: str) -> dict:
 
 
 async def generate_candidates(
-    router: LLMRouter, library: FactorLibrary, n: int = 5
+    router: LLMRouter, library: FactorLibrary, n: int = 5, asset_label: str = "크립토"
 ) -> list[FactorCandidate]:
     """writer → judge → DSL 검증. 반환 후보의 rejected 필드에 1차 필터 결과 반영."""
     existing = [f.expression for f in library.active()] or ["(없음)"]
@@ -68,6 +68,7 @@ async def generate_candidates(
                 "role": "user",
                 "content": WRITER_PROMPT.format(
                     n=n,
+                    asset=asset_label,
                     dsl_spec=DSL_SPEC,
                     existing=json.dumps(existing, ensure_ascii=False),
                     successful=json.dumps(successful, ensure_ascii=False),

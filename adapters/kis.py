@@ -171,7 +171,10 @@ class KISPaperAdapter(MarketAdapter):
         )
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
-        return []  # KR 무료 뉴스 원천 미정 — DART 공시는 향후 작업
+        from adapters.news_kr import fetch_kr_news
+
+        start, end = observation_window(asof_day)
+        return await fetch_kr_news(symbols, start, end)
 
     # ── 계좌 ──
 

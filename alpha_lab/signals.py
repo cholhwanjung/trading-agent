@@ -34,9 +34,11 @@ async def compute_alpha_signals(
     library_path: Path | str,
     trading_universe: list[str],
     asof_day: date | None = None,
+    panel_fn=fetch_crypto_panel,
 ) -> dict:
     """{"asof": day, "signals": {"alpha:<name>": {"oos_ic":…, "scores": {sym: z}}}}.
 
+    panel_fn 은 시장별 연구 패널 소스(CRYPTO=fetch_crypto_panel · US=make_us_panel_fn).
     라이브러리 없음/팩터 없음/계산 실패 → 빈 signals (비치명, 관측 보조일 뿐).
     """
     library_path = Path(library_path)
@@ -47,7 +49,7 @@ async def compute_alpha_signals(
     if not top:
         return {"asof": None, "signals": {}}
 
-    panel, symbols, dates = await fetch_crypto_panel(
+    panel, symbols, dates = await panel_fn(
         lookback_days=SIGNAL_LOOKBACK_DAYS, asof_day=asof_day
     )
     idx = {s: j for j, s in enumerate(symbols)}
