@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from alpha_lab import FactorLibrary, generate_candidates  # noqa: E402
 from alpha_lab.data import fetch_crypto_panel  # noqa: E402
-from harness import JsonlLogger, load_env  # noqa: E402
+from harness import JsonlLogger, load_env, wait_for_network  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 
 LIBRARY_PATH = ROOT / "data" / "state" / "alpha_library_CRYPTO.json"
@@ -31,6 +31,12 @@ LIBRARY_PATH = ROOT / "data" / "state" / "alpha_library_CRYPTO.json"
 async def main() -> int:
     n = int(sys.argv[sys.argv.index("--n") + 1]) if "--n" in sys.argv else 5
     env = load_env(ROOT / ".env")
+
+    # wake/부팅 직후 실행 시 네트워크(DNS+TCP) 준비 대기 — LLM·패널 수집 조기 실패 방지.
+    if not await wait_for_network():
+        print("status=fail event=network_unavailable detail=네트워크 게이트 타임아웃(10분)")
+        return 1
+
     router = LLMRouter(env)
     logger = JsonlLogger(ROOT / "data" / "logs")
     library = FactorLibrary(LIBRARY_PATH)

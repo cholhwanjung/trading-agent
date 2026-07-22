@@ -32,6 +32,7 @@ from harness import (  # noqa: E402
     RandomPolicy,
     load_env,
     run_all_markets,
+    wait_for_network,
 )
 from llm import LLMRouter  # noqa: E402
 from memory import (  # noqa: E402
@@ -175,6 +176,12 @@ async def main() -> int:
             print(f"status=warn detail=요청 시장 키 없음/형식 오류: {sorted(dropped)}")
     if not adapters:
         print("status=fail detail=.env에 사용 가능한 브로커 키 없음")
+        return 1
+
+    # wake/부팅 직후(launchd 캘린더 catch-up) 네트워크 스택이 올라오기 전 조기 실행이면
+    # 브로커 호출이 DNS 실패로 죽는다 — 준비될 때까지 대기. 같은 거래일 지연이라 누출 무관.
+    if not await wait_for_network():
+        print("status=fail event=network_unavailable detail=네트워크 게이트 타임아웃(10분)")
         return 1
 
     router = LLMRouter(env)

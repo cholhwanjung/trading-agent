@@ -3,6 +3,7 @@
 from harness.env import load_env
 from harness.jsonlog import JsonlLogger
 from harness.loop import AllocationError, run_daily_step, validate_weights
+from harness.netgate import wait_for_network
 from harness.policy import CASH, BuyAndHold, Policy, RandomPolicy
 from harness.runner import MarketRun, run_all_markets
 
@@ -18,4 +19,5 @@ __all__ = [
     "run_all_markets",
     "run_daily_step",
     "validate_weights",
+    "wait_for_network",
 ]
