@@ -1,12 +1,12 @@
-"""실시간 이벤트 트리거 워커 — 스케줄 밖 급변 감지·재결정 (단계 1, [ADR-021]).
+"""실시간 이벤트 트리거 워커 — 스케줄 밖 급변 감지·재결정 (단계 1).
 
 주기 check-once: launchd StartInterval 이 이 스크립트를 15분마다 실행한다(상주 데몬
 아님 — 무상태·재시작안전). 현재가를 조회해 직전 참조가 대비 급변이면 트리거를 발동,
 기존 RiskGuardedPolicy(LLMTrader) 결정 경로를 당일 컨텍스트와 함께 호출하고 주문한다.
 
 **학습 제외**: 트리거 결정은 메모리 파이프라인(record/promote/probation/outcome/
-reflection)을 호출하지 않는다 — 당일 정보 기반 결정을 admission 에 넣으면 leakage 오염
-(하드룰 7 · [ADR-013]). 승격 교훈이 0인 v1 은 memory_fn 도 생략(방어 반응 우선).
+reflection)을 호출하지 않는다 — 당일 정보 기반 결정을 admission 에 넣으면 leakage 오염.
+승격 교훈이 0인 v1 은 memory_fn 도 생략(방어 반응 우선).
 
 유니버스·리스크 한도·어댑터 구성은 run_paper_step 에서 import — 단일 출처 유지.
 

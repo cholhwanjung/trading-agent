@@ -1,4 +1,4 @@
-"""Chat 엔진 — grounded 답변(R15 강제) + 전략 토론 모드 (설계 §3.7).
+"""Chat 엔진 — grounded 답변(인용 강제) + 전략 토론 모드.
 
 - 답변의 모든 주장은 context 항목 인용으로 뒷받침되어야 한다. cited_ids 가 비었거나
   context 밖 id 면 GroundingError — 게이트웨이는 이를 5xx 로 노출한다(조용한 환각 금지).
@@ -38,7 +38,7 @@ context:
 
 
 class GroundingError(RuntimeError):
-    """R15 위반 — 인용 없음 또는 context 밖 인용."""
+    """grounding 위반 — 인용 없음 또는 context 밖 인용."""
 
 
 @dataclass
@@ -73,7 +73,7 @@ def enforce_grounding(answer: ChatAnswer, allowed: set[str]) -> None:
     if not answer.answer:
         raise GroundingError("빈 답변")
     if not answer.cited_ids:
-        raise GroundingError("인용 없음 (R15)")
+        raise GroundingError("인용 없음")
     unknown = set(answer.cited_ids) - allowed
     if unknown:
         raise GroundingError(f"context 밖 인용: {sorted(unknown)}")

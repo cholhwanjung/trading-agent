@@ -1,7 +1,7 @@
-"""Phase 0 baseline 정책 — 에이전트 없이 페이퍼 루프를 돌리기 위한 기준선.
+"""baseline 정책 — 에이전트 없이 페이퍼 루프를 돌리기 위한 기준선.
 
-정책은 관측을 받아 배분비율 벡터(∑=1, 현금 포함, long-only)를 반환한다 (R6).
-LLM 없음 — B&H와 랜덤은 이후 모든 에이전트 성과의 비교 기준선이다 (docs/PLAN.md Phase 0).
+정책은 관측을 받아 배분비율 벡터(∑=1, 현금 포함, long-only)를 반환한다.
+LLM 없음 — B&H와 랜덤은 이후 모든 에이전트 성과의 비교 기준선이다.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from adapters.base import Observation, Position
 
 
 class Policy(Protocol):
-    """배분 정책 계약. Trader(Phase 1+)도 이 계약을 따른다 (LLM 정책 때문에 async)."""
+    """배분 정책 계약. Trader 도 이 계약을 따른다 (LLM 정책 때문에 async)."""
 
     name: str
 

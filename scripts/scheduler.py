@@ -38,7 +38,7 @@ JOBS = [
     Job("paper_step", "scripts/run_paper_step.py", hour=23, args=("--markets", "CRYPTO,US")),
     Job("alpha_lab", "scripts/run_alpha_lab.py", hour=22, weekday=6),  # 일요일
     Job("monthly_proposal", "scripts/propose_improvements.py", hour=21, monthday=1),
-    # 실시간 이벤트 트리거([ADR-021]) — 15분마다 급변 점검, CRYPTO 전용(24/7)
+    # 실시간 이벤트 트리거 — 15분마다 급변 점검, CRYPTO 전용(24/7)
     Job("watcher_crypto", "scripts/run_watcher.py", every_minutes=15, args=("--market", "CRYPTO")),
 ]
 

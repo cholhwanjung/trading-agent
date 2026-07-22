@@ -1,7 +1,7 @@
-"""LLM Trader — Phase 1 stateless 단일 에이전트 (R3, [ADR-009] 메모리 없음 기준선).
+"""LLM Trader — stateless 단일 에이전트 (메모리 없음 기준선).
 
 관측(feature 7종 + [t-3,t-1] 봉·뉴스 + 포지션)을 구조화 프롬프트로 만들어
-smart tier LLM 1회 호출 → 결정 스키마(R5) 검증 → 배분 벡터 반환.
+smart tier LLM 1회 호출 → 결정 스키마 검증 → 배분 벡터 반환.
 
 실패 시 예외를 올린다 — 러너가 스텝을 격리 실패시키므로 주문 없는 안전 no-op 이 된다.
 last_decision 에 근거·인용 ID·시나리오가 남아 loop 가 감사 로그에 포함한다.
@@ -22,7 +22,7 @@ from trader.schema import parse_decision
 
 HistoryFn = Callable[[list[str], date], Awaitable[dict[str, list[Bar]]]]
 
-# 베이스 지식 (ADR-020) — 검증 교훈(memory)과 분리된 사전 원칙. 수정은 승인 게이트(하드룰 8).
+# 베이스 지식 — 검증 교훈(memory)과 분리된 사전 원칙. 수정은 승인 게이트.
 PLAYBOOK_PATH = Path(__file__).parent / "playbook.md"
 
 
@@ -53,9 +53,9 @@ SYSTEM_PROMPT = """\
   }}
 }}"""
 
-# 실시간 트리거([ADR-021]) 소집 시에만 시스템 프롬프트에 덧붙는다 — 일간 경로는 불변.
+# 실시간 트리거 소집 시에만 시스템 프롬프트에 덧붙는다 — 일간 경로는 불변.
 # "오늘의 가격은 알 수 없다"는 기본 전제를 이 결정에 한해 예외 처리하고, 하방 방어를
-# 기본값으로 지시(하드룰 6). 당일 정보는 행동 판단에만, 학습·재해석에 쓰지 않는다.
+# 기본값으로 지시. 당일 정보는 행동 판단에만, 학습·재해석에 쓰지 않는다.
 TRIGGER_SYSTEM_CLAUSE = (
     "[실시간 트리거 모드] 이번 결정은 장중 급변 이벤트로 소집됐다. user 메시지의 "
     "realtime_trigger 에 당일 가격·변동이 제공된다 — '오늘의 가격은 알 수 없다'는 기본 "
@@ -75,9 +75,9 @@ def build_user_prompt(
     trigger: dict | None = None,
     max_news: int = 10,
 ) -> str:
-    """관측을 구조화 텍스트로 — 자유 산문 없이 JSON 블록 나열 (하드룰 10).
+    """관측을 구조화 텍스트로 — 자유 산문 없이 JSON 블록 나열.
 
-    lessons 는 admission+probation 을 통과한 active 교훈만 (하드룰 3 — 검증 전 개입 금지).
+    lessons 는 admission+probation 을 통과한 active 교훈만 (검증 전 개입 금지).
     """
 
     recent = {
@@ -104,7 +104,7 @@ def build_user_prompt(
             **debate,
         }
     if trigger:
-        # 관측 윈도우 밖(당일) 신호 — 분리된 라벨 채널(하드룰 7 격리 · [ADR-021])
+        # 관측 윈도우 밖(당일) 신호 — 분리된 라벨 채널(당일 정보 격리)
         payload["realtime_trigger"] = {
             "note": "장중 실시간 이벤트로 소집됨. 아래는 관측 윈도우 밖(당일) 정보 — 현재 "
             "배분의 유효성 재판단에만 쓰고, 이 정보로 과거 관측·feature 를 재해석하지 말 것.",
@@ -137,7 +137,7 @@ class LLMTrader:
         self.tier = tier
         self.memory_fn = memory_fn  # active 교훈만 반환해야 한다 (memory.retrieval)
         self.signals_fn = signals_fn  # OOS 검증 팩터 스코어 (alpha_lab.signals)
-        self.prev_weights_fn = prev_weights_fn  # 대형 포지션 변경 트리거 기준 (R4)
+        self.prev_weights_fn = prev_weights_fn  # 대형 포지션 변경 트리거 기준
         self.debate = debate
         self.playbook = load_playbook()
         self.last_decision: dict | None = None
@@ -173,10 +173,10 @@ class LLMTrader:
     async def decide(
         self, obs: Observation, positions: list[Position], trigger: dict | None = None
     ) -> dict[str, float]:
-        """2-pass residual (R9): base(교훈 없음) 대비 mem(교훈 주입)의 편차만
+        """2-pass residual: base(교훈 없음) 대비 mem(교훈 주입)의 편차만
         confidence·bounded 로 반영. active 교훈이 없으면 base 1회 호출로 끝.
 
-        trigger 가 있으면 실시간 이벤트 소집([ADR-021]) — 당일 급변 컨텍스트를 모든
+        trigger 가 있으면 실시간 이벤트 소집 — 당일 급변 컨텍스트를 모든
         결정 pass 에 라벨 채널로 주입. 학습 파이프라인은 호출부(watcher)가 생략한다.
         """
         history = await self.history_fn(self.universe, obs.asof_day)
@@ -227,7 +227,7 @@ class LLMTrader:
             if blend.applied:
                 final, decision = blend.weights, mem_decision
 
-        # 조건부 debate (R4) — 트리거 밖에서는 절대 소집되지 않는다
+        # 조건부 debate — 트리거 밖에서는 절대 소집되지 않는다
         debate_meta = None
         if self.debate != "off":
             from trader.debate import debate_trigger, run_debate
@@ -256,8 +256,8 @@ class LLMTrader:
             "alpha_signals_provided": sorted(signals),
             "retrieved_memory_ids": [le["id"] for le in lessons],
             "influence": influence,
-            "debate": debate_meta,  # None = 미소집 (R4 verify 로그)
-            "realtime_trigger": trigger,  # None = 일간 스텝 / dict = 이벤트 소집 ([ADR-021])
+            "debate": debate_meta,  # None = 미소집 (verify 로그)
+            "realtime_trigger": trigger,  # None = 일간 스텝 / dict = 이벤트 소집
             "rationale": decision.rationale,
             "cited_signal_ids": decision.cited_signal_ids,
             "cited_memory_ids": decision.cited_memory_ids,

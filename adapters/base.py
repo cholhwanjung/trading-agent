@@ -1,11 +1,11 @@
-"""Market Adapter 통일 인터페이스 (R1).
+"""Market Adapter 통일 인터페이스.
 
 모든 시장(KIS/Alpaca/ccxt)은 이 인터페이스를 구현한다. Trader는 어댑터 구현을
 알지 못한 채 배분비율 벡터만 넘기고, 배분비율 → 주문(Δq) 변환은 어댑터 책임이다
-(LiveTradeBench 방식, [docs/ARCHITECTURE.md] · [ADR-006]).
+(LiveTradeBench 방식).
 
-하드룰 (CLAUDE.md (C)):
-- 관측 윈도우는 [t-3, t-1]로 고정, same-day leakage 차단 (R2).
+불변 제약:
+- 관측 윈도우는 [t-3, t-1]로 고정, same-day leakage 차단.
 - 모든 관측에 수집 타임스탬프 기록 → 사후 감사 가능.
 """
 
@@ -92,7 +92,7 @@ class LeakageError(AssertionError):
 
 
 def assert_no_leakage(obs: Observation) -> None:
-    """Observation 이 same-day leakage 없이 [t-3, t-1] 안에 있는지 검증 (R2 verify).
+    """Observation 이 same-day leakage 없이 [t-3, t-1] 안에 있는지 검증 (verify).
 
     위반 시 LeakageError. 하니스·테스트가 모든 관측에 대해 호출한다.
     """
@@ -117,16 +117,16 @@ def assert_no_leakage(obs: Observation) -> None:
 class MarketAdapter(ABC):
     """시장 어댑터 계약. 구현체는 market 이름과 4개 메서드를 제공한다."""
 
-    #: "KR" | "US" | "CRYPTO" — 메모리 네임스페이스 키로도 쓰인다 (ADR-007).
+    #: "KR" | "US" | "CRYPTO" — 메모리 네임스페이스 키로도 쓰인다.
     market: str
 
     @abstractmethod
     async def get_ohlcv(self, symbols: list[str], asof_day: date) -> dict[str, list[Bar]]:
-        """[t-3, t-1] 구간의 일봉을 symbol별로 반환. same-day(t) 봉 포함 금지 (R2)."""
+        """[t-3, t-1] 구간의 일봉을 symbol별로 반환. same-day(t) 봉 포함 금지."""
 
     @abstractmethod
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
-        """[t-3, t-1] 구간에 발행된 뉴스만 반환. published_at >= t 인 건 제외 (R2)."""
+        """[t-3, t-1] 구간에 발행된 뉴스만 반환. published_at >= t 인 건 제외."""
 
     @abstractmethod
     async def get_positions(self) -> list[Position]:
@@ -142,7 +142,7 @@ class MarketAdapter(ABC):
     async def get_ohlcv_history(
         self, symbols: list[str], asof_day: date, lookback_days: int = 90
     ) -> dict[str, list[Bar]]:
-        """feature 계산용 장기 일봉 [t-lookback, t-1] ([ADR-013] — 상한 t-1 은 동일 강제).
+        """feature 계산용 장기 일봉 [t-lookback, t-1] (상한 t-1 은 동일 강제).
 
         기본 미구현 — 실브로커 어댑터만 구현하면 된다(Mock/baseline 은 불필요).
         """
@@ -150,7 +150,7 @@ class MarketAdapter(ABC):
 
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         """현재 체결가(same-day, 실시간). **행동 전용** — 관측·feature·학습에 쓰지 말 것
-        (하드룰 7 · [ADR-013]). 실시간 이벤트 트리거([ADR-021])와 주문 집행 용도.
+        실시간 이벤트 트리거와 주문 집행 용도.
 
         기본 미구현 — 트리거 대상 어댑터만 구현.
         """
@@ -158,7 +158,7 @@ class MarketAdapter(ABC):
 
     @abstractmethod
     async def submit_allocation(self, weights: dict[str, float]) -> OrderResult:
-        """배분비율 벡터(∑=1, 현금 포함)를 받아 주문(Δq)으로 변환·제출 (R6).
+        """배분비율 벡터(∑=1, 현금 포함)를 받아 주문(Δq)으로 변환·제출.
 
         weights 예: {"BTC/USDT": 0.4, "ETH/USDT": 0.2, "CASH": 0.4}
         """

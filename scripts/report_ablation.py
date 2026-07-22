@@ -1,4 +1,4 @@
-"""ablation 델타 리포트 — 가상 arm equity 곡선 비교 (Phase 2 완료 기준 측정 도구).
+"""ablation 델타 리포트 — 가상 arm equity 곡선 비교 측정 도구.
 
 사용법:
     uv run python scripts/report_ablation.py
@@ -8,8 +8,8 @@ arm 의미:
     llm_base  = 무메모리 base 배분 (No-Memory ablation arm)
     bh        = Buy&Hold 균등 배분 / random = 무작위(일별 seed)
 
-핵심 지표: memory_delta = llm − llm_base (메모리 영향력의 순기여, R9 ablation)
-           alpha_vs_bh = llm − bh (PRD 성공기준의 분자)
+핵심 지표: memory_delta = llm − llm_base (메모리 영향력의 순기여, ablation)
+           alpha_vs_bh = llm − bh (성공기준의 분자)
 """
 
 from __future__ import annotations
@@ -67,9 +67,9 @@ def main() -> int:
             )
         llm, base, bh = arms.get("llm"), arms.get("llm_base"), arms.get("bh")
         if llm and base:
-            print(f"memory_delta_pct={llm['ret_pct'] - base['ret_pct']:+.4f}  # llm − llm_base (R9)")
+            print(f"memory_delta_pct={llm['ret_pct'] - base['ret_pct']:+.4f}  # llm − llm_base")
         if llm and bh:
-            print(f"alpha_vs_bh_pct={llm['ret_pct'] - bh['ret_pct']:+.4f}  # PRD 성공기준 분자")
+            print(f"alpha_vs_bh_pct={llm['ret_pct'] - bh['ret_pct']:+.4f}  # 성공기준 분자")
 
         # rolling-k delta — 승격 판정 입력 (일관성: 누적치 1개가 아니라 창 승률)
         from eval.rolling import ROLLING_K, rolling_report
@@ -86,7 +86,7 @@ def main() -> int:
                 f" sign_p={p}  # 비중첩 {r['n_chunks']}청크 중 양성 {r['chunks_positive']}"
             )
 
-    # 상위 결합 지수 — 고정비율 가상 배분 (Phase 4 v1, ADR-018)
+    # 상위 결합 지수 — 고정비율 가상 배분
     from eval.meta import combined_index
 
     meta = {a: combined_index(STATE, a) for a in ("llm", "llm_base", "bh")}
@@ -104,7 +104,7 @@ def main() -> int:
         if meta["llm"] and meta["bh"]:
             print(f"meta_alpha_vs_bh_pct={meta['llm']['ret_pct'] - meta['bh']['ret_pct']:+.4f}")
     print(
-        "\nnote=단기 표본은 통계력 없음 — 보조 지표(메모리 승격/퇴출률·인용 기여)와 함께 볼 것 (PRD)"
+        "\nnote=단기 표본은 통계력 없음 — 보조 지표(메모리 승격/퇴출률·인용 기여)와 함께 볼 것"
     )
     return 0
 

@@ -1,10 +1,10 @@
-"""Trader 관측 feature — 정예 7종 (R17: 5~8개 한정, 60종 주입 금지 · [ADR-012]).
+"""Trader 관측 feature — 정예 7종 (5~8개 한정, 60종 주입 금지).
 
 Alpha Arena 근거(단순 지표 우승 패턴)에 따라 검증된 고전 지표만.
 알파 원천이 아니라 관측 보조 — LLM 에게 구조화 숫자로 주입된다.
 
 누출 규약: 입력 봉은 asof_day 전일(t-1)까지의 과거 시계열. 지표 lookback 은
-[t-3, t-1] 결정 컨텍스트 윈도우와 별개다(하드룰 7의 본질은 same-day 차단).
+[t-3, t-1] 결정 컨텍스트 윈도우와 별개다(본질은 same-day 차단).
 t 이후 봉이 섞이면 LeakageError.
 """
 
@@ -15,7 +15,7 @@ from datetime import date, timedelta
 
 from adapters.base import Bar, LeakageError
 
-# 정예 feature 목록 — 이 튜플이 유일한 진실. 8개 초과 금지 (R17).
+# 정예 feature 목록 — 이 튜플이 유일한 진실. 8개 초과 금지.
 FEATURE_NAMES: tuple[str, ...] = (
     "rsi_14",          # 모멘텀 과열/침체 (0~100)
     "macd_hist",       # 추세 모멘텀 (종가 대비 정규화)
@@ -25,7 +25,7 @@ FEATURE_NAMES: tuple[str, ...] = (
     "vol_ratio_20d",   # 거래량/20일 평균 — 참여 강도
     "drawdown_60d",    # 60일 고점 대비 낙폭 — 리스크 상태
 )
-assert len(FEATURE_NAMES) <= 8, "R17 위반: 관측 feature 는 8개 이하"
+assert len(FEATURE_NAMES) <= 8, "관측 feature 는 8개 이하"
 
 MIN_BARS = 40  # MACD(26)+signal(9) 안정 계산 하한
 
@@ -90,7 +90,7 @@ def _atr(bars: list[Bar], period: int = 14) -> float:
 def compute_features(symbol: str, bars: list[Bar], asof_day: date) -> FeatureSet:
     """t-1 까지의 일봉 시계열에서 정예 feature 7종 계산.
 
-    - bars 는 day 오름차순이어야 하며 asof_day 이후(당일 포함) 봉은 LeakageError (R2).
+    - bars 는 day 오름차순이어야 하며 asof_day 이후(당일 포함) 봉은 LeakageError.
     - MIN_BARS 미만이면 InsufficientHistoryError — NaN 침묵 전파 금지.
     """
 

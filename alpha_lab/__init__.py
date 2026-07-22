@@ -1,4 +1,4 @@
-"""Alpha Lab — 신호 self-improve: writer→judge→백테스트→admission (Phase 3, R11)."""
+"""Alpha Lab — 신호 self-improve: writer→judge→백테스트→admission."""
 
 from alpha_lab.backtest import BacktestResult, ICStats, run_backtest, score_correlation
 from alpha_lab.dsl import DSL_SPEC, DSLError, evaluate, validate

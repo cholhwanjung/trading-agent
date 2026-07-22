@@ -29,7 +29,7 @@ logs/
 .idea/
 .vscode/
 
-# 로컬 전용 — 문서 하네스·설계·연구 노트 (어플리케이션 비필수)
+# 로컬 전용 — 개인 문서·노트 (어플리케이션 비필수)
 CLAUDE.md
 docs/
 trading-agent-design.md

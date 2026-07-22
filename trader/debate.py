@@ -1,4 +1,4 @@
-"""조건부 Bull/Bear debate (R4 · [ADR-009]) — 상시 멀티에이전트 배제.
+"""조건부 Bull/Bear debate — 상시 멀티에이전트 배제.
 
 소집 트리거(결정론, 이 밖에서는 절대 미발생):
 ① signal_conflict — alpha 신호에 유의 크기(|z|≥0.5)의 양·음수가 혼재
@@ -47,7 +47,7 @@ def debate_trigger(
     signals: dict,
     forced: bool = False,
 ) -> str | None:
-    """소집 사유 반환, 조건 밖이면 None (R4 verify 의 원천)."""
+    """소집 사유 반환, 조건 밖이면 None (verify 의 원천)."""
     if forced:
         return "user_request"
     scores = _signal_scores(signals)

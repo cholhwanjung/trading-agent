@@ -1,11 +1,11 @@
-"""MCP 서버 (stdio) — Claude Code/Desktop 에서 실행 중 에이전트와 대화 (설계 §3.7).
+"""MCP 서버 (stdio) — Claude Code/Desktop 에서 실행 중 에이전트와 대화.
 
 등록 (Claude Code):
     claude mcp add trading-agent -- uv run --directory /Users/cholhwan/Documents/ai/trading-agent \
         python scripts/run_mcp_server.py
 
 도구: ask_trader(질문/토론) · conclude_discussion(결론 기록) · get_briefing(일일 브리핑)
-모든 답변은 R15 grounding — 인용 ID 가 함께 반환된다.
+모든 답변은 grounding — 인용 ID 가 함께 반환된다.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ async def ask_trader(question: str, session_id: str = "", market: str = "") -> s
     try:
         answer, sid = await _engine.ask(question, session_id or None, market or None)
     except GroundingError as e:
-        return f"[grounding 실패 — R15] {e}"
+        return f"[grounding 실패] {e}"
     return f"{answer.answer}\n\n[인용: {', '.join(answer.cited_ids)}]\n[session_id: {sid}]"
 
 

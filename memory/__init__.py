@@ -1,4 +1,4 @@
-"""Memory System — 3-store + admission/retention 게이트 (Phase 2, R7–R10)."""
+"""Memory System — 3-store + admission/retention 게이트."""
 
 from memory.admission import promote_candidates, review_probation, sign_test_p
 from memory.influence import blend_allocations, lesson_confidence, lessons_payload

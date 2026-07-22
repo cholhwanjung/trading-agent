@@ -1,4 +1,4 @@
-"""공식형 팩터 DSL — AST 화이트리스트 안전 평가기 (R11 · [ADR-016]).
+"""공식형 팩터 DSL — AST 화이트리스트 안전 평가기.
 
 writer LLM 이 생성하는 표현식을 파이썬 eval 없이 AST 로 파싱·검증·평가한다.
 팩터는 *수식*이라 lookahead 민감도가 낮다(FactorMiner 논리) — 단 DSL 자체가

@@ -1,13 +1,13 @@
-"""일일 페이퍼 스텝 — 실계좌(Risk-guarded LLM) + 가상 포트폴리오 병행 운용 (Phase 1).
+"""일일 페이퍼 스텝 — 실계좌(Risk-guarded LLM) + 가상 포트폴리오 병행 운용.
 
 사용법:
     uv run python scripts/run_paper_step.py            # 실주문 + 가상 A/B (키 있는 전 시장)
     uv run python scripts/run_paper_step.py --dry-run  # 관측·포지션 조회까지만
     uv run python scripts/run_paper_step.py --markets CRYPTO,US   # 시장 선택 (KR 은 10:00 KST 별도 잡)
-    uv run python scripts/run_paper_step.py --debate              # debate 강제 소집 (R4 사용자 요청)
+    uv run python scripts/run_paper_step.py --debate              # debate 강제 소집 (사용자 요청)
 
 구성 (시장별):
-- 실계좌: RiskGuardedPolicy(LLMTrader) — 라이브 페이퍼가 진실 verifier ([ADR-001]).
+- 실계좌: RiskGuardedPolicy(LLMTrader) — 라이브 페이퍼가 진실 verifier.
 - 가상 3종(llm/bh/random): 동일 관측·t-1 종가 forward 시뮬레이션 → 델타 측정 기준선.
   가상 llm 은 실계좌와 같은 목표 배분을 사용(추가 LLM 호출 없음).
 
@@ -45,11 +45,12 @@ from memory import (  # noqa: E402
     review_probation,
     review_retention,
 )
+from regime import INDEX_PROXY, compute_regime  # noqa: E402
 from risk import RiskEngine, RiskGuardedPolicy, RiskLimits  # noqa: E402
 from trader import LLMTrader  # noqa: E402
 
 # 시장별 유니버스 — 설명 가능한 메이저 집중(2026-07-20, 사용자 승인): 뉴스·데이터
-# 커버리지가 좋은 대형 종목만. 버핏 플레이북(P1 이해·P3 경영진)이 문자 그대로 작동하는 대상.
+# 커버리지가 좋은 대형 종목만. 버핏식 원칙(사업 이해·경영진)이 문자 그대로 작동하는 대상.
 CRYPTO_UNIVERSE = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # 메이저 3종 (전부 연구 유니버스 소속)
 US_UNIVERSE = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]  # 나스닥 메가캡 5
 KR_UNIVERSE = ["005930", "000660", "005380", "035420"]  # 삼성전자·SK하이닉스·현대차·NAVER
@@ -132,7 +133,7 @@ async def run_virtual(
     """가상 4종 스텝 — t-1 종가로 마킹.
 
     llm = 메모리 블렌딩 최종 배분(실계좌와 동일) / llm_base = 무메모리 base 배분.
-    두 arm 의 equity 델타가 Phase 2 ablation 의 측정치다 (No-Memory vs +Memory).
+    두 arm 의 equity 델타가 ablation 의 측정치다 (No-Memory vs +Memory).
     """
     if len(prices) < len(symbols) or day is None:
         logger.log(market, "virtual_skip", {"reason": "missing_prices", "have": list(prices)})
@@ -173,7 +174,7 @@ async def main() -> int:
         if dropped:
             print(f"status=warn detail=요청 시장 키 없음/형식 오류: {sorted(dropped)}")
     if not adapters:
-        print("status=fail detail=.env에 사용 가능한 브로커 키 없음 (docs/CREDENTIALS.md)")
+        print("status=fail detail=.env에 사용 가능한 브로커 키 없음")
         return 1
 
     router = LLMRouter(env)
@@ -194,7 +195,7 @@ async def main() -> int:
 
         memory = MemoryStore(ROOT / "data" / "memory.sqlite")
 
-        # 실계좌: Risk-guarded LLM (+ 검증 통과 교훈만 주입 — 하드룰 3)
+        # 실계좌: Risk-guarded LLM (+ 검증 통과 교훈만 주입)
         runs = []
         guards: dict[str, RiskGuardedPolicy] = {}
         prev_weights_by_market: dict[str, dict | None] = {}
@@ -216,7 +217,7 @@ async def main() -> int:
                     except Exception:
                         pass  # relevancy 없이 recency+importance 로 진행 (비치명)
                     hits = retrieve(memory, m, obs.asof_day, query_embedding=embedding, k=5)
-                    return lessons_payload(hits)  # confidence 포함 (R9 블렌딩 입력)
+                    return lessons_payload(hits)  # confidence 포함 (블렌딩 입력)
 
                 return memory_fn
 
@@ -231,7 +232,7 @@ async def main() -> int:
                 return forbidden_patterns
 
             signals_fn = None
-            if market == "CRYPTO":  # 연구 유니버스가 크립토뿐 (ADR-017), US 는 확장 후
+            if market == "CRYPTO":  # 연구 유니버스가 크립토뿐, US 는 확장 후
                 from alpha_lab.signals import compute_alpha_signals
 
                 async def signals_fn(obs, _syms=symbols):
@@ -243,7 +244,7 @@ async def main() -> int:
                 router, market, symbols, adapter.get_ohlcv_history,
                 memory_fn=make_memory_fn(market),
                 signals_fn=signals_fn,
-                # R4 debate 트리거 입력: 직전 배분(대형 변경 감지) + --debate(사용자 요청)
+                # debate 트리거 입력: 직전 배분(대형 변경 감지) + --debate(사용자 요청)
                 prev_weights_fn=lambda p=STATE_DIR / f"risk_{market}.json": load_prev_weights(p),
                 debate="always" if "--debate" in sys.argv else "auto",
             )
@@ -287,6 +288,16 @@ async def main() -> int:
 
             prices, day = await fetch_prices(adapter, symbols)
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)
+
+            # 시장 국면 (shadow) — 계산·로깅만, 결정/리스크 미개입. 검증 후 승격.
+            regime = await compute_regime(adapter, market, today)
+            if regime is not None:
+                logger.log(market, "regime", {
+                    "state": regime.state, "distribution_days": regime.distribution_days,
+                    "drawdown": regime.drawdown, "proxy": INDEX_PROXY.get(market),
+                })
+                print(f"market={market} regime={regime.state} dd={regime.distribution_days}"
+                      f" drawdown={regime.drawdown}")
 
             # ── 메모리: 결과 소급 기입 → 오늘 결정 기록 → admission → probation ──
             try:

@@ -1,10 +1,10 @@
-"""주간 reflection (FinMem extended · 설계 §3.5) — 주 단위 성과·근거 재평가.
+"""주간 reflection (FinMem extended) — 주 단위 성과·근거 재평가.
 
 - 기여 계측은 이미 일간에 계산된 outcome(행동−무행동)을 인용 단위로 집계한다.
 - **credit assignment**: 인용된 memory 의 importance 를 결과 방향으로 소폭 갱신
   (bounded 0.1~0.9) — retrieval 순위에 반영될 뿐, admission/veto 게이트와 무관.
 - 요약은 LLM(fast) 이 쓰되 실패해도 통계 리포트는 저장된다.
-- semantic 승격은 여기서 하지 않는다 — admission 게이트 단일 경로 (ADR-004).
+- semantic 승격은 여기서 하지 않는다 — admission 게이트 단일 경로.
 """
 
 from __future__ import annotations

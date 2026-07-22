@@ -1,7 +1,7 @@
-"""결정 출력 스키마 (R5) — LLM 출력을 구조화 검증한다.
+"""결정 출력 스키마 — LLM 출력을 구조화 검증한다.
 
-인용 memory/신호 ID 는 credit assignment 의 원천 데이터(하드룰 10) — 필드 자체를
-스키마에 강제해 Phase 2+ 에서 소급 가능하게 한다 (Phase 1 은 빈 리스트 허용).
+인용 memory/신호 ID 는 credit assignment 의 원천 데이터 — 필드 자체를
+스키마에 강제해 이후 소급 가능하게 한다 (초기에는 빈 리스트 허용).
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def _extract_json(text: str) -> dict:
 def parse_decision(text: str, universe: list[str]) -> TradeDecision:
     """LLM 텍스트 → 검증된 TradeDecision.
 
-    검증: 필수 필드 존재 · 배분 대상 ⊆ universe ∪ {CASH} · ∑=1 · long-only (R5, R6).
+    검증: 필수 필드 존재 · 배분 대상 ⊆ universe ∪ {CASH} · ∑=1 · long-only.
     """
 
     data = _extract_json(text)

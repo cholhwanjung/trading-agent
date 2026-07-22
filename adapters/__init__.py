@@ -1,4 +1,4 @@
-"""Market Adapters — 시장별 데이터 수집 + 배분비율→주문 변환 (R1)."""
+"""Market Adapters — 시장별 데이터 수집 + 배분비율→주문 변환."""
 
 from adapters.base import (
     Bar,

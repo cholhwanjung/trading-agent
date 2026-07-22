@@ -1,4 +1,4 @@
-# trading-agent — gateway/scheduler 공용 이미지 (ADR-008: 개인 사용 → 배포 경로 동일)
+# trading-agent — gateway/scheduler 공용 이미지 (개인 사용 → 배포 경로 동일)
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app

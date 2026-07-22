@@ -1,4 +1,4 @@
-"""Retention — diversity 우선 퇴출 게이트 ([ADR-005] · QuantaAlpha 실증).
+"""Retention — diversity 우선 퇴출 게이트 (QuantaAlpha 실증).
 
 퇴출 기준은 두 가지뿐:
 1. **중복성** — active 엔트리끼리 임베딩 유사도가 임계 초과면 신뢰도 낮은 쪽 퇴출.
@@ -6,7 +6,7 @@
 2. **최근 라이브 유효성** — 승격 후 축적된 최근 OOS 표본이 기대 부호와 반대로
    유의하게 뒤집히면 퇴출.
 
-recency 단독 퇴출은 구현하지 않는다 — 오래됐지만 유일한 교훈은 살아남는다(하드룰).
+recency 단독 퇴출은 구현하지 않는다 — 오래됐지만 유일한 교훈은 살아남는다(불변 규칙).
 """
 
 from __future__ import annotations

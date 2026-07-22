@@ -3,9 +3,9 @@
 사용법:
     uv run python scripts/check_credentials.py
 
-- 대상: docs/CREDENTIALS.md의 Phase 0 3종 (Binance testnet / Alpaca paper / KIS 모의투자).
-- 키가 비어 있으면 status=skip (실패 아님). Phase 1+/3+ 키는 설정 여부만 보고.
-- 출력: key=value 구조화 로그 (CLAUDE.md (A) 산출물 가독성 준수).
+- 대상: 3종 (Binance testnet / Alpaca paper / KIS 모의투자).
+- 키가 비어 있으면 status=skip (실패 아님). 확장 시장 키는 설정 여부만 보고.
+- 출력: key=value 구조화 로그.
 - 종료코드: 설정된 키 중 하나라도 인증 실패 시 1, 아니면 0.
 - 주의: KIS 토큰 발급은 분당 1회 제한 — 연속 실행 시 EGW00133류 오류는 재시도로 해석.
 - 의존성: ccxt(기존 의존성) + 표준 라이브러리만. 외부 추가 설치 불필요.
@@ -121,7 +121,7 @@ def check_kis_paper(env: dict[str, str]) -> str:
 
 
 def check_optional(env: dict[str, str]) -> None:
-    """Phase 1+/3+ 키 — 설정 여부만 보고 (인증 핑 안 함)."""
+    """확장 시장 키 — 설정 여부만 보고 (인증 핑 안 함)."""
     for name, phase in [
         ("ANTHROPIC_API_KEY", "phase1"),
         ("FRED_API_KEY", "phase3"),
@@ -133,7 +133,7 @@ def check_optional(env: dict[str, str]) -> None:
 
 def main() -> int:
     if not ENV_PATH.exists():
-        report("env_file", "fail", ".env 없음 — .env.example을 복사해 키 기입 (docs/CREDENTIALS.md)")
+        report("env_file", "fail", ".env 없음 — .env.example을 복사해 키 기입")
         return 1
     env = load_env(ENV_PATH)
     report("env_file", "ok", str(ENV_PATH))

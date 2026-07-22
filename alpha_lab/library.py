@@ -1,4 +1,4 @@
-"""팩터 라이브러리 + 4단계 admission (R11 · FactorMiner 이식).
+"""팩터 라이브러리 + 4단계 admission (FactorMiner 이식).
 
 admission: ① IC 스크리닝 → ② 기존 라이브러리 상관 체크 → ③ 배치 중복 제거
 → ④ OOS 견고성. 통과분만 active. 경험 메모리(Successful/Forbidden)를 함께 영속.
@@ -25,14 +25,14 @@ from alpha_lab.backtest import (
 )
 from alpha_lab.dsl import DSLError, evaluate
 
-# admission 임계 — ADR-012: 목표는 IC 0.03~0.05 보조 신호
+# admission 임계 — 목표는 IC 0.03~0.05 보조 신호
 MIN_TRAIN_IC = 0.02
 MIN_TRAIN_DAYS = 100
 MIN_OOS_IC = 0.01
 MAX_LIBRARY_CORR = 0.70
 MAX_BATCH_CORR = 0.85
 
-# 라이브 감쇠 퇴출 ([ADR-022]) — 알파는 crowding 으로 감쇠한다. admission 이후 실현
+# 라이브 감쇠 퇴출 — 알파는 crowding 으로 감쇠한다. admission 이후 실현
 # IC 가 우위 방향을 잃으면(방향성 IC ≤ DECAY_FLOOR) retire. 메모리 retention 과 대칭.
 MIN_LIVE_DAYS = 20  # post-admission 최소 표본일 — 미만이면 판단 보류(유지, diversity 보존)
 DECAY_FLOOR = 0.0  # 방향성 라이브 IC ≤ 이 값이면 우위 소멸 → retire
@@ -59,7 +59,7 @@ class FactorRecord:
     oos_icir: float
     admitted_day: str
     sign: int = field(default=1)  # IC 부호 — 신호 방향
-    # 라이브 감쇠 추적 ([ADR-022]) — 주간 review_decay 가 갱신. 기존 JSON 은 기본값으로 로드.
+    # 라이브 감쇠 추적 — 주간 review_decay 가 갱신. 기존 JSON 은 기본값으로 로드.
     live_ic: float | None = field(default=None)  # 최근 post-admission 실현 rank-IC
     live_ic_n: int = field(default=0)  # 라이브 IC 표본일 수
     live_ic_day: str | None = field(default=None)  # 마지막 갱신일
@@ -99,7 +99,7 @@ class FactorLibrary:
         """4단계 admission. 이벤트 리스트 반환(로그용). 통과분은 라이브러리에 추가."""
         events: list[dict] = []
 
-        # 백테스트 (스크리닝 전용 — ADR-002)
+        # 백테스트 (스크리닝 전용)
         for c in candidates:
             if c.rejected:
                 continue
@@ -195,10 +195,10 @@ class FactorLibrary:
         self, panel: dict[str, np.ndarray], dates: list[date], asof_day: date
     ) -> list[dict]:
         """active 팩터의 라이브(post-admission) 실현 IC 를 갱신하고, 우위가 감쇠한
-        팩터를 retire ([ADR-022] — 알파 crowding 감쇠. 메모리 retention 과 대칭).
+        팩터를 retire (알파 crowding 감쇠. 메모리 retention 과 대칭).
 
-        라이브 IC 는 admission 이후 날짜의 rank-IC 만 집계 — 승격 표본과 분리(ADR-002).
-        표본일 < MIN_LIVE_DAYS 면 증거 부족으로 유지(diversity 보존, 하드룰). 방향성
+        라이브 IC 는 admission 이후 날짜의 rank-IC 만 집계 — 승격 표본과 분리.
+        표본일 < MIN_LIVE_DAYS 면 증거 부족으로 유지(diversity 보존). 방향성
         라이브 IC(live_ic × sign)가 DECAY_FLOOR 이하로 떨어지면 우위 소멸 → retire.
         """
         fwd = forward_returns(panel["close"])

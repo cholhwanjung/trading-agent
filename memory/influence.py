@@ -1,4 +1,4 @@
-"""영향력 제어 — residual + confidence gating + bounded deviation (R9 · [ADR-003]).
+"""영향력 제어 — residual + confidence gating + bounded deviation.
 
 메모리는 base 정책에 대한 *calibrated residual* 이다:
     final = base + scale · (mem − base),  scale = confidence (상한: max_deviation)

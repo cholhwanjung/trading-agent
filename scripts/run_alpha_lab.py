@@ -1,11 +1,11 @@
-"""Alpha Lab 1사이클 — writer→judge→백테스트→admission (Phase 3, R11).
+"""Alpha Lab 1사이클 — writer→judge→백테스트→admission.
 
 사용법:
     uv run python scripts/run_alpha_lab.py [--n 5]
 
-- 시장: CRYPTO 만 (선봉 — 연구 유니버스 10종, [ADR-017]). US 는 유니버스 확장 후.
+- 시장: CRYPTO 만 (선봉 — 연구 유니버스 10종). US 는 유니버스 확장 후.
 - 라이브러리: data/state/alpha_library_CRYPTO.json (경험 메모리 포함)
-- 백테스트는 스크리닝 전용 ([ADR-002]) — 라이브 기여는 Trader 인용→reflection 으로 계측.
+- 백테스트는 스크리닝 전용 — 라이브 기여는 Trader 인용→reflection 으로 계측.
 - 개선 곡선 포화(QuantaAlpha ~11-12 iteration decay) 모니터링을 위해 사이클 이벤트를
   data/logs/ALPHA/ 에 구조화 기록한다.
 """
@@ -41,7 +41,7 @@ async def main() -> int:
         panel, symbols, dates = await fetch_crypto_panel()
         print(f"panel: {len(dates)}일 × {len(symbols)}종 ({dates[0]} ~ {dates[-1]})")
 
-        # 라이브 감쇠 퇴출 먼저 ([ADR-022]) — writer 가 살아있는 라이브러리만 보게
+        # 라이브 감쇠 퇴출 먼저 — writer 가 살아있는 라이브러리만 보게
         decayed = library.review_decay(panel, dates, today)
         for e in decayed:
             name, live_ic, oos_ic = e["name"], e["live_ic"], e["admission_oos_ic"]

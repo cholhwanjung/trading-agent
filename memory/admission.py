@@ -1,7 +1,7 @@
-"""Admission 게이트 — episodic → semantic/procedural 승격 (R8 · [ADR-004]).
+"""Admission 게이트 — episodic → semantic/procedural 승격.
 
 4단계: ① 반복 n≥5 ② 부호검정 p≤0.05 ③ 임베딩 중복 기각 ④ probation(라이브 OOS 유예).
-비대칭(APV, [ADR-003]): 유의한 성공 패턴 → semantic(소프트 프라이어),
+비대칭(APV): 유의한 성공 패턴 → semantic(소프트 프라이어),
 유의한 실패 패턴 → procedural Forbidden(고신뢰 시 하드 veto 소스).
 단일 매매 승격은 구조적으로 불가 — n 과 유의성이 게이트다.
 """

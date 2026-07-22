@@ -1,4 +1,4 @@
-"""크립토 어댑터 — ccxt + Binance Spot Testnet (Phase 0 선봉 시장).
+"""크립토 어댑터 — ccxt + Binance Spot Testnet (선봉 시장).
 
 24/7 시장이라 표본 축적이 가장 빠르다. universe 는 생성자에서 고정 —
 잔고에 잡히는 무관한 testnet 자산 수백 종을 평가 대상에서 배제하기 위함.
@@ -51,7 +51,7 @@ class BinanceTestnetAdapter(MarketAdapter):
     async def _fetch_bars(
         self, symbols: list[str], start: date, end: date
     ) -> dict[str, list[Bar]]:
-        """메인넷 일봉 조회 후 [start, end] 로 필터 — 진행 중인 당일 봉 차단 (R2)."""
+        """메인넷 일봉 조회 후 [start, end] 로 필터 — 진행 중인 당일 봉 차단."""
         since = int(datetime.combine(start, time(), tzinfo=timezone.utc).timestamp() * 1000)
         limit = (end - start).days + 3
         out: dict[str, list[Bar]] = {}
@@ -81,13 +81,13 @@ class BinanceTestnetAdapter(MarketAdapter):
     ) -> dict[str, list[Bar]]:
         from datetime import timedelta
 
-        # 상한 t-1 (ADR-013)
+        # 상한 t-1
         return await self._fetch_bars(
             symbols, asof_day - timedelta(days=lookback_days), asof_day - timedelta(days=1)
         )
 
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
-        """실시간 체결가 — 메인넷 공개 티커(당일, 행동 전용 · [ADR-021])."""
+        """실시간 체결가 — 메인넷 공개 티커(당일, 행동 전용)."""
         out: dict[str, float] = {}
         for symbol in symbols:
             ticker = await with_retry(lambda s=symbol: self.data.fetch_ticker(s))

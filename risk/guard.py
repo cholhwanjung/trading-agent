@@ -1,4 +1,4 @@
-"""RiskGuardedPolicy — 정책(LLM 포함)을 감싸 Risk Engine 통과를 강제 (R14, 하드룰 5).
+"""RiskGuardedPolicy — 정책(LLM 포함)을 감싸 Risk Engine 통과를 강제.
 
 LLM 은 이 레이어의 존재를 모른다 — 정책 출력이 무엇이든 enforce 후의 배분만 어댑터로
 간다. 직전 목표 배분·평가액 고점은 시장별 상태 파일(JSON)에 영속 — turnover·MDD 입력.
@@ -31,7 +31,7 @@ class RiskGuardedPolicy:
         self.equity_fn = equity_fn
         self.forbidden = forbidden
         # admission 통과(active) Forbidden 패턴 집합 — 당일 결정의 pattern_key 가
-        # 여기 걸리면 직전 배분으로 동결 (ADR-003 APV 하드 veto)
+        # 여기 걸리면 직전 배분으로 동결 (APV 하드 veto)
         self.forbidden_patterns_fn = forbidden_patterns_fn
         self.name = f"risk_guarded({inner.name})"
         self.last_decision: dict | None = None
@@ -50,7 +50,7 @@ class RiskGuardedPolicy:
     async def decide(
         self, obs: Observation, positions: list[Position], trigger: dict | None = None
     ) -> dict[str, float]:
-        # trigger 는 실시간 이벤트 소집([ADR-021]) 시에만 전달 — 일간 경로는 kwarg 없이
+        # trigger 는 실시간 이벤트 소집 시에만 전달 — 일간 경로는 kwarg 없이
         # 호출해 기존 동작을 그대로 유지(baseline 정책 래핑 호환).
         raw = await (
             self.inner.decide(obs, positions, trigger=trigger)

@@ -1,8 +1,8 @@
-"""inner loop — writer(smart) 팩터 생성 → judge(fast) 리뷰 → 프로그래매틱 검증 (R11).
+"""inner loop — writer(smart) 팩터 생성 → judge(fast) 리뷰 → 프로그래매틱 검증.
 
 QuantAgent inner/outer 결합: LLM 은 가설과 수식만 내고, 진짜 판정은 outer
 (백테스트 admission, library.admit)가 한다. judge 는 경제적 타당성·단순성의
-저비용 1차 필터일 뿐 — judge 통과가 승격 근거가 아니다 ([ADR-001] 비대칭).
+저비용 1차 필터일 뿐 — judge 통과가 승격 근거가 아니다 (비대칭).
 """
 
 from __future__ import annotations

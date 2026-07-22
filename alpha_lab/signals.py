@@ -1,6 +1,6 @@
-"""active 팩터 → Trader 관측 신호 주입 (설계 §3.4 · R17 정신: top-3 상한).
+"""active 팩터 → Trader 관측 신호 주입 (정예만: top-3 상한).
 
-팩터 스코어는 관측 보조 신호일 뿐 알파 원천이 아니다 ([ADR-012]). 주입 형식은
+팩터 스코어는 관측 보조 신호일 뿐 알파 원천이 아니다. 주입 형식은
 당일 횡단면 z-score × IC 부호 — 값이 클수록 "팩터가 기대하는 익일 상대 우위".
 Trader 는 signal id (`alpha:<name>`) 로 인용한다 (credit assignment).
 """
@@ -16,14 +16,14 @@ from alpha_lab.data import fetch_crypto_panel
 from alpha_lab.dsl import DSLError, evaluate
 from alpha_lab.library import FactorLibrary
 
-MAX_SIGNALS = 3  # R17 정신 — 정예만 주입
+MAX_SIGNALS = 3  # 정예만 주입
 SIGNAL_LOOKBACK_DAYS = 200  # 팩터 워밍업(MAX_WINDOW=120) + 여유
 
 
 def _effective_ic(factor) -> float:
     """랭킹 기준 — 라이브 IC 가 갱신됐으면 그것을(감쇠 반영), 없으면 admission OOS IC.
 
-    알파는 감쇠하므로([ADR-022]) 최신 라이브 추정치가 우선. 주간 review_decay 가
+    알파는 감쇠하므로 최신 라이브 추정치가 우선. 주간 review_decay 가
     live_ic 를 갱신하고 우위 소멸분은 이미 retire 하므로, 여기선 살아남은 팩터의
     현재 강도로 top-3 를 고른다.
     """

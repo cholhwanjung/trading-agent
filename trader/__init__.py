@@ -1,4 +1,4 @@
-"""Trader — 매매 에이전트 (Phase 1): feature 관측(R17) + LLM 결정(R3·R5)."""
+"""Trader — 매매 에이전트: feature 관측 + LLM 결정."""
 
 from trader.agent import LLMTrader
 from trader.features import (

@@ -1,4 +1,4 @@
-"""LLM 백본 추상화 계약 ([ADR-008] · [ADR-014]).
+"""LLM 백본 추상화 계약.
 
 Trader/Alpha Lab/Reflection 은 이 계약만 본다 — 프로바이더 교체는 env 설정만으로.
 이중 속도(smart=결정·reflection / fast=요약·정리)는 tier 이름으로 노출된다.

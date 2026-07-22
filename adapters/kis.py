@@ -1,10 +1,10 @@
-"""한국 주식 어댑터 — KIS(한국투자증권) 모의투자 (Phase 0 마지막 시장).
+"""한국 주식 어댑터 — KIS(한국투자증권) 모의투자 (마지막 시장).
 
 - 토큰: 발급 분당 1회 제한 + 24h 유효 → 파일 캐시(data/state/kis_token.json)로
   일일 루프·검증 스크립트가 재발급 제한에 걸리지 않게 한다.
 - 시세: 기간별 일봉(FHKST03010100) — 모의/실전 동일 데이터. 수정주가 기준.
 - 잔고 VTTC8434R · 시장가 현금주문 VTTC0802U(매수)/VTTC0801U(매도) — 모의 전용 tr_id.
-- 뉴스: 무료 원천 미정 — 빈 리스트 (DART 공시 연동은 Phase 3, docs/PLAN.md).
+- 뉴스: 무료 원천 미정 — 빈 리스트 (DART 공시 연동은 향후 작업).
 - KR 은 정수 주식 수만 주문 가능 — qty < 1주 는 dust 로 스킵.
 """
 
@@ -119,7 +119,7 @@ class KISPaperAdapter(MarketAdapter):
 
     @staticmethod
     def _parse_daily(rows: list[dict], start: date, end: date) -> list[Bar]:
-        """output2 일봉 행 → [start, end] 윈도우 Bar 오름차순 (R2 — 당일 봉 차단)."""
+        """output2 일봉 행 → [start, end] 윈도우 Bar 오름차순 (당일 봉 차단)."""
         bars = []
         for r in rows:
             if not r.get("stck_bsop_date"):
@@ -165,13 +165,13 @@ class KISPaperAdapter(MarketAdapter):
     async def get_ohlcv_history(
         self, symbols: list[str], asof_day: date, lookback_days: int = 90
     ) -> dict[str, list[Bar]]:
-        # 상한 t-1 (ADR-013). API 1회 응답 최대 100행 — lookback 90 은 1회로 충분
+        # 상한 t-1. API 1회 응답 최대 100행 — lookback 90 은 1회로 충분
         return await self._fetch_bars(
             symbols, asof_day - timedelta(days=lookback_days), asof_day - timedelta(days=1)
         )
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
-        return []  # KR 무료 뉴스 원천 미정 — DART 공시는 Phase 3 (docs/PLAN.md)
+        return []  # KR 무료 뉴스 원천 미정 — DART 공시는 향후 작업
 
     # ── 계좌 ──
 

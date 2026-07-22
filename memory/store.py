@@ -1,7 +1,7 @@
-"""메모리 3-store — SQLite 단일 파일, 시장별 네임스페이스 격리 (R7 · [ADR-007]).
+"""메모리 3-store — SQLite 단일 파일, 시장별 네임스페이스 격리.
 
 한 테이블 + (market, store) 네임스페이스. 임베딩은 float32 blob — 규모가 수백 건
-수준이라 코사인은 Python 으로 충분(sqlite-vec/FAISS 는 규모 커지면, ADR-008).
+수준이라 코사인은 Python 으로 충분(sqlite-vec/FAISS 는 규모 커지면).
 
 store 종류:
 - episodic   — 매매 1건 전체 맥락 (원천 기록, outcome 은 다음 날 소급 기입)
@@ -132,7 +132,7 @@ class MemoryStore:
         day: date | None = None,
         outcome_missing: bool = False,
     ) -> list[MemoryEntry]:
-        """네임스페이스(market) 필수 — 시장 간 교차 읽기는 API 레벨에서 불가 (R7)."""
+        """네임스페이스(market) 필수 — 시장 간 교차 읽기는 API 레벨에서 불가."""
         sql, params = "SELECT * FROM memories WHERE market=?", [market]
         if store:
             sql += " AND store=?"

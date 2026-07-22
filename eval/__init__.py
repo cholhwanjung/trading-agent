@@ -1,4 +1,4 @@
-"""Eval — 병행 페이퍼 운용·ablation 측정 + 상위 결합 지수 (Phase 1·4)."""
+"""Eval — 병행 페이퍼 운용·ablation 측정 + 상위 결합 지수."""
 
 from eval.meta import MARKET_CAPITAL_WEIGHTS, combined_index
 from eval.paper_portfolio import VirtualPortfolio

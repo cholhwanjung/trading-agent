@@ -1,4 +1,4 @@
-"""Paper trading harness — Phase 0: 어댑터 + baseline 정책 + 구조화 로깅."""
+"""Paper trading harness — 어댑터 + baseline 정책 + 구조화 로깅."""
 
 from harness.env import load_env
 from harness.jsonlog import JsonlLogger

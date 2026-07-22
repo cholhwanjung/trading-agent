@@ -1,4 +1,4 @@
-"""실시간 이벤트 트리거 (단계 1, [ADR-021]) — 순수 판정 로직.
+"""실시간 이벤트 트리거 (단계 1) — 순수 판정 로직.
 
 가격 급변만 감지한다: 직전 참조가(reference) 대비 |move| 가 임계 이상이면 트리거.
 참조가는 롤링 윈도우 — 트리거 발동 또는 ref TTL 경과 시 현재가로 갱신되어
@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 @dataclass(frozen=True)
 class TriggerConfig:
-    """시장별 트리거 파라미터. 개별 종목 변동성에 맞춰 조정 (하드룰 5 정신)."""
+    """시장별 트리거 파라미터. 개별 종목 변동성에 맞춰 조정 (리스크 한도 정신)."""
 
     move_threshold: float  # |Δ| ≥ 이 값이면 발동 (예: 0.08 = 8%)
     cooldown_s: int  # 직전 발동 후 이 시간 내 재발동 금지

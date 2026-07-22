@@ -127,7 +127,7 @@ class OpenAICompatBackend(LLMBackend):
         )
 
     async def embed(self, model: str, texts: list[str]) -> list[list[float]]:
-        """OpenAI 호환 /embeddings — 메모리 relevancy·중복체크용 (R8)."""
+        """OpenAI 호환 /embeddings — 메모리 relevancy·중복체크용."""
         data = await _post_json(
             self._client, "/embeddings", {"model": model, "input": texts}, self.provider
         )

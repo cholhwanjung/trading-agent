@@ -1,4 +1,4 @@
-"""LiveTradeBench 플러그인 스캐폴드 ([ADR-015]) — 우리 Trader 를 벤치 에이전트로 노출.
+"""LiveTradeBench 플러그인 스캐폴드 — 우리 Trader 를 벤치 에이전트로 노출.
 
 live-trade-bench 는 프로젝트 의존성이 아니다(벤치 실행 시에만):
     uv run --with live-trade-bench python -c "from eval.ltb_agent import make_ltb_agent; ..."

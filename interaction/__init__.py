@@ -1,4 +1,4 @@
-"""Interaction Layer — Chat Gateway·토론·브리핑 (Phase 5, R15)."""
+"""Interaction Layer — Chat Gateway·토론·브리핑."""
 
 from interaction.briefing import build_briefing, write_briefing
 from interaction.chat import ChatAnswer, ChatEngine, GroundingError, enforce_grounding

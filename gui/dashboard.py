@@ -1,12 +1,12 @@
-"""GUI 대시보드 v1 — Streamlit (옵션 A · [ADR-019]).
+"""GUI 대시보드 v1 — Streamlit (옵션 A).
 
 실행:
     uv run --group gui streamlit run gui/dashboard.py
 
 원칙 (GUI 계획 검토에서 확정):
-- **읽기 전용 + 대화만** — 리스크 한도·프롬프트·메모리 수정 UI 를 두지 않는다 (하드룰 5·8).
+- **읽기 전용 + 대화만** — 리스크 한도·프롬프트·메모리 수정 UI 를 두지 않는다.
 - 브로커 API 를 직접 치지 않는다 — 일일 루프가 갱신한 로그·상태 파일만 읽는다.
-- 챗은 게이트웨이 /chat 프록시 — R15 grounding 집행 지점을 게이트웨이 하나로 유지.
+- 챗은 게이트웨이 /chat 프록시 — grounding 집행 지점을 게이트웨이 하나로 유지.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ with tab_dash:
             cols[2].metric("META α vs B&H", f"{meta['ret_pct'] - bh_meta['ret_pct']:+.3f}%p")
         base_meta = combined_index(VIRTUAL, "llm_base")
         if base_meta:
-            cols[3].metric("메모리 델타 (R9)", f"{meta['ret_pct'] - base_meta['ret_pct']:+.3f}%p")
+            cols[3].metric("메모리 델타", f"{meta['ret_pct'] - base_meta['ret_pct']:+.3f}%p")
 
     for market in MARKETS:
         frame = load_equity_frame(market)
@@ -112,7 +112,7 @@ with tab_dash:
 
 with tab_chat:
     st.caption(
-        "게이트웨이 `/chat` 프록시 — 답변은 R15 grounding(근거 ID 인용) 강제. "
+        "게이트웨이 `/chat` 프록시 — 답변은 grounding(근거 ID 인용) 강제. "
         "게이트웨이 실행: `uv run uvicorn interaction.api:app --port 8721`"
     )
     gateway = st.text_input("게이트웨이 URL", value="http://localhost:8721")
@@ -194,7 +194,7 @@ with tab_ops:
         factors = json.loads(lib_path.read_text(encoding="utf-8"))["factors"]
         st.dataframe(pd.DataFrame(factors), use_container_width=True, hide_index=True)
 
-    st.subheader("월간 self-improve 제안서 (승인은 코드/문서 경로로만 — R12)")
+    st.subheader("월간 self-improve 제안서 (승인은 코드/문서 경로로만)")
     proposals = sorted((ROOT / "data" / "proposals").glob("*.md")) if (ROOT / "data" / "proposals").exists() else []
     if proposals:
         pick = st.selectbox("제안서", [p.name for p in proposals])

@@ -1,4 +1,4 @@
-"""월간 self-improve 제안 생성 (R12 · 하드룰 8) — **자동 적용 경로 없음**.
+"""월간 self-improve 제안 생성 — **자동 적용 경로 없음**.
 
 사용법:
     uv run python scripts/propose_improvements.py
@@ -89,8 +89,8 @@ async def main() -> int:
         PROPOSAL_DIR.mkdir(parents=True, exist_ok=True)
         header = (
             f"# Self-improve 제안 {month}\n\n"
-            "> **자동 적용되지 않는다** (R12). 검토 후 채택분만 사용자가 직접 반영하고,\n"
-            "> 반영 시 CLAUDE.md 변경 로그에 기록할 것. 정책 변경의 최종 판정은 라이브 A/B.\n\n"
+            "> **자동 적용되지 않는다**. 검토 후 채택분만 사용자가 직접 반영하고,\n"
+            "> 반영 시 변경 로그에 기록할 것. 정책 변경의 최종 판정은 라이브 A/B.\n\n"
         )
         out_path.write_text(header + resp.text, encoding="utf-8")
         print(f"status=ok proposal={out_path} lessons={n_lessons} weekly={n_weekly}")

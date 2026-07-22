@@ -1,6 +1,6 @@
-"""outer loop verifier — 경량 IC 백테스터 ([ADR-016] · R11).
+"""outer loop verifier — 경량 IC 백테스터.
 
-백테스트는 **신호 스크리닝 전용**([ADR-002]) — 승격 근거가 아니다.
+백테스트는 **신호 스크리닝 전용** — 승격 근거가 아니다.
 지표: 일별 횡단면 rank IC(스피어만) vs 익일 수익률 → mean IC · ICIR.
 train/OOS 시계열 분할(70/30)로 admission 4단계 중 OOS 검증을 수행한다.
 """

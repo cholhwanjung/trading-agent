@@ -62,7 +62,7 @@ class AlpacaPaperAdapter(MarketAdapter):
     ) -> dict[str, list[Bar]]:
         from datetime import timedelta
 
-        # 상한 t-1 (ADR-013)
+        # 상한 t-1
         return await self._fetch_bars(
             symbols, asof_day - timedelta(days=lookback_days), asof_day - timedelta(days=1)
         )
@@ -77,7 +77,7 @@ class AlpacaPaperAdapter(MarketAdapter):
                 "timeframe": "1Day",
                 "start": f"{start.isoformat()}T00:00:00Z",
                 "end": f"{end.isoformat()}T23:59:59Z",
-                "feed": "iex",  # 무료 피드 (ADR-011: 유료 데이터 미사용)
+                "feed": "iex",  # 무료 피드 (유료 데이터 미사용)
                 "limit": 1000,
             },
         )
@@ -85,7 +85,7 @@ class AlpacaPaperAdapter(MarketAdapter):
         for symbol, raw_bars in (data.get("bars") or {}).items():
             for rb in raw_bars:
                 day = datetime.fromisoformat(rb["t"].replace("Z", "+00:00")).date()
-                if start <= day <= end:  # 구간 재확인 (R2/ADR-013)
+                if start <= day <= end:  # 구간 재확인
                     out[symbol].append(
                         Bar(
                             day=day,
@@ -112,7 +112,7 @@ class AlpacaPaperAdapter(MarketAdapter):
         items = []
         for n in data.get("news") or []:
             published = datetime.fromisoformat(n["created_at"].replace("Z", "+00:00"))
-            if start <= published.date() <= end:  # 윈도우 재확인 (R2)
+            if start <= published.date() <= end:  # 윈도우 재확인
                 items.append(
                     NewsItem(
                         published_at=published,

@@ -1,4 +1,4 @@
-"""구조화 JSON Lines 로거 — 하드룰 10: 자유 텍스트 로그 금지, grep 가능해야 한다.
+"""구조화 JSON Lines 로거 — 자유 텍스트 로그 금지, grep 가능해야 한다.
 
 한 줄 = JSON 객체 1개. 파일은 data/logs/{market}/{YYYY-MM-DD}.jsonl 로 일 단위 분리.
 """

@@ -1,4 +1,4 @@
-"""Chat Gateway — FastAPI (R15 · 설계 §3.7).
+"""Chat Gateway — FastAPI.
 
 실행:
     uv run uvicorn interaction.api:app --host 0.0.0.0 --port 8721
@@ -68,7 +68,7 @@ def create_app(engine: ChatEngine | None = None, token: str | None = None, root:
         try:
             answer, session_id = await engine.ask(req.question, req.session_id, req.market)
         except GroundingError as e:
-            raise HTTPException(502, f"grounding 실패 (R15): {e}") from e
+            raise HTTPException(502, f"grounding 실패: {e}") from e
         return {"answer": answer.answer, "cited_ids": answer.cited_ids, "session_id": session_id}
 
     @app.post("/discuss/conclude", dependencies=[Depends(auth)])
