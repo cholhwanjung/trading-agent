@@ -275,7 +275,8 @@ async def main() -> int:
             guards[market] = guard
             runs.append(MarketRun(adapter, guard, symbols))
 
-        results = await run_all_markets(runs, logger)
+        # 관측 스냅샷 영속화(시각화·감사) — 순수 append, 결정/리스크 미개입
+        results = await run_all_markets(runs, logger, snapshot_dir=STATE_DIR / "observations")
         exit_code = 0
         for market, outcome in results.items():
             if isinstance(outcome, Exception):

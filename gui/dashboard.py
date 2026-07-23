@@ -24,12 +24,21 @@ sys.path.insert(0, str(ROOT))
 
 from eval.meta import combined_index  # noqa: E402
 from eval.rolling import ROLLING_K, rolling_report  # noqa: E402
+from gui.panels import (  # noqa: E402
+    decision_for_day,
+    list_observation_days,
+    load_observation,
+    read_recent_decisions,
+    veto_rows,
+)
 from harness.env import load_env  # noqa: E402
 from interaction.briefing import build_briefing  # noqa: E402
 from interaction.context import build_context  # noqa: E402
 
 STATE = ROOT / "data" / "state"
 VIRTUAL = STATE / "virtual"
+OBS_DIR = STATE / "observations"
+LOG_DIR = ROOT / "data" / "logs"
 MARKETS = ("CRYPTO", "US", "KR")
 ARMS = ("llm", "llm_base", "bh", "random")
 
@@ -56,7 +65,7 @@ def load_context() -> dict:
     return build_context(ROOT)
 
 
-tab_dash, tab_chat, tab_ops = st.tabs(["📊 대시보드", "💬 챗", "🔧 운영"])
+tab_dash, tab_obs, tab_chat, tab_ops = st.tabs(["📊 대시보드", "🔭 관측", "💬 챗", "🔧 운영"])
 
 
 # ── 대시보드 ──
@@ -106,6 +115,94 @@ with tab_dash:
 
     st.subheader("오늘 브리핑")
     st.markdown(build_briefing(ROOT))
+
+
+# ── 관측 (에이전트가 그때 본 것 + 그 관측이 낳은 결정) ──
+
+with tab_obs:
+    st.caption(
+        "에이전트가 그때 본 관측(OHLC·뉴스·feature)과 그 관측이 낳은 결정을 나란히. "
+        "스냅샷은 일일 루프가 결정 시점에 기록 — 브로커 API 미호출, 읽기 전용."
+    )
+    obs_market = st.selectbox("시장", MARKETS, key="obs_market")
+    days = list_observation_days(OBS_DIR, obs_market)
+    decisions = read_recent_decisions(LOG_DIR, obs_market)
+
+    if not days:
+        st.info(f"{obs_market} 관측 스냅샷이 아직 없음 — 다음 스케줄 런부터 기록됩니다.")
+    else:
+        day = st.selectbox("관측일 (asof)", days, key="obs_day")
+        snap = load_observation(OBS_DIR, obs_market, day)
+        decision = decision_for_day(decisions, day)
+
+        col_obs, col_dec = st.columns(2)
+        with col_obs:
+            st.markdown(f"#### 🔭 관측 — window `{snap['window'][0]} ~ {snap['window'][1]}`")
+            closes = {
+                sym: {b["day"]: b["close"] for b in bars}
+                for sym, bars in snap["bars"].items() if bars
+            }
+            if closes:
+                st.caption("종가 (관측 윈도우)")
+                st.line_chart(pd.DataFrame(closes))
+            for sym, bars in snap["bars"].items():
+                if bars:
+                    st.caption(f"`{sym}` OHLCV")
+                    st.dataframe(pd.DataFrame(bars).set_index("day"), use_container_width=True)
+            st.markdown("**뉴스**")
+            if snap["news"]:
+                for n in snap["news"]:
+                    pub = n["published_at"][:10]
+                    if n.get("url"):
+                        st.markdown(f"- `{pub}` [{n['headline']}]({n['url']}) · _{n['source']}_")
+                    else:
+                        st.markdown(f"- `{pub}` {n['headline']} · _{n['source']}_")
+            else:
+                st.caption("이 윈도우에 수집된 뉴스 없음")
+
+        with col_dec:
+            st.markdown("#### 🎯 이 관측이 낳은 결정")
+            if decision is None:
+                st.caption("이 날짜의 결정 로그 없음 (관측만 기록되었거나 결정 실패).")
+            else:
+                feats = decision["features"]
+                if feats:
+                    st.caption("관측 feature (심볼 × 정예 지표)")
+                    # features 는 {심볼: {지표: 값}} 중첩 — 심볼을 행, 지표를 열로
+                    if all(isinstance(v, dict) for v in feats.values()):
+                        st.dataframe(pd.DataFrame(feats).T.round(4), use_container_width=True)
+                    else:
+                        st.dataframe(pd.DataFrame([feats]), use_container_width=True, hide_index=True)
+                st.caption("목표 배분 (risk 통과 후)")
+                st.json(decision["weights"])
+                if decision.get("weights_pre_risk"):
+                    st.caption(f"risk 전 제안 배분: `{decision['weights_pre_risk']}`")
+                if decision["rationale"]:
+                    st.markdown(f"**근거**: {decision['rationale']}")
+                cites = decision["cited_signal_ids"] + decision["cited_memory_ids"]
+                if cites:
+                    st.caption("인용: " + " · ".join(f"`{c}`" for c in cites))
+                if decision["risk_violations"]:
+                    st.warning("risk 위반 → 클램프: " + "; ".join(decision["risk_violations"]))
+                if decision["debate"]:
+                    with st.expander(f"🗣 debate ({decision['debate'].get('trigger')})"):
+                        st.json(decision["debate"])
+
+        st.divider()
+        st.subheader("배분 변화 타임라인")
+        if decisions:
+            wide: dict[str, dict[str, float]] = {}
+            for r in decisions:
+                for sym, w in r["weights"].items():
+                    wide.setdefault(sym, {})[r["day"]] = w
+            st.area_chart(pd.DataFrame(wide).fillna(0.0))
+
+        st.subheader("risk veto/클램프 타임라인")
+        vr = veto_rows(decisions)
+        if vr:
+            st.dataframe(pd.DataFrame(vr), use_container_width=True, hide_index=True)
+        else:
+            st.caption("최근 창에 risk 위반 없음")
 
 
 # ── 챗 (게이트웨이 프록시) ──

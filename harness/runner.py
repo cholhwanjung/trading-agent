@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 
 from adapters.base import MarketAdapter, OrderResult
 from harness.jsonlog import JsonlLogger
@@ -29,14 +30,18 @@ async def run_all_markets(
     runs: list[MarketRun],
     logger: JsonlLogger,
     asof_day: date | None = None,
+    snapshot_dir: Path | None = None,
 ) -> dict[str, OrderResult | Exception]:
     """모든 시장의 일일 스텝을 동시 실행. 시장별 성공(OrderResult)/실패(Exception) 반환.
 
     실패한 시장은 daily_step_error 이벤트로 로그에 남는다 — 무인 운용 시 사후 감사용.
+    snapshot_dir 지정 시 각 시장의 관측 스냅샷을 기록한다(시각화·감사용).
     """
 
     async def _one(run: MarketRun) -> OrderResult:
-        return await run_daily_step(run.adapter, run.policy, run.symbols, logger, asof_day)
+        return await run_daily_step(
+            run.adapter, run.policy, run.symbols, logger, asof_day, snapshot_dir
+        )
 
     outcomes = await asyncio.gather(*(_one(r) for r in runs), return_exceptions=True)
 
