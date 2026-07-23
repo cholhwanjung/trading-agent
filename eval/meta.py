@@ -70,3 +70,76 @@ def combined_index(
         "mdd_pct": mdd * 100,
         "curve": curve,
     }
+
+
+def _eq_at(history: list[dict], day: str) -> float | None:
+    """day 이하 최신 equity (step). 시작 전이면 None. 수백 건 선형 탐색 충분."""
+    val = None
+    for p in history:
+        if p["day"] <= day:
+            val = p["equity"]
+        else:
+            break
+    return val
+
+
+def combined_index_dynamic(
+    state_dir: Path | str,
+    arm: str,
+    weights_by_day: dict[str, dict[str, float]],
+) -> dict | None:
+    """날짜별 메타 가중치로 **리밸런싱**한 결합 지수 ([ADR-025] verify).
+
+    index_0 = 1.0; index_t = index_{t-1} · (1 + Σ_m w_m,t · r_m,t),
+    r_m,t = 시장 m 일간 수익률(step equity). 미시작 시장은 수익 0 기여(현금 대기).
+
+    weights_by_day: {proposal_day(iso): {market: weight}} — 각 거래일은 그 이하 최신
+    제안 적용(step). **빈 dict 또는 첫 제안 이전 구간은 균등 anchor** → 고정 균등 baseline.
+
+    주의: 리밸런싱 포트폴리오다. 공정 baseline 은 같은 함수에 빈 dict(상수 균등)를 넣은
+    것 — buy&hold 인 combined_index 와 방법이 다르다(리밸런싱 효과와 배분 스킬 분리).
+    """
+    state_dir = Path(state_dir)
+    markets = sorted({m for w in weights_by_day.values() for m in w})
+    if not markets:  # 균등 baseline — 시장은 상태파일에서 유추
+        markets = [m for m in MARKET_CAPITAL_WEIGHTS if _load_history(state_dir, m, arm)]
+    histories = {m: h for m in markets if (h := _load_history(state_dir, m, arm))}
+    if not histories:
+        return None
+
+    days = sorted({p["day"] for h in histories.values() for p in h})
+    prop_days = sorted(weights_by_day)
+
+    def weights_for(day: str) -> dict[str, float]:
+        applicable = [pd for pd in prop_days if pd <= day]
+        if applicable:
+            return weights_by_day[applicable[-1]]
+        return {m: 1.0 / len(histories) for m in histories}  # 제안 전 = 균등 anchor
+
+    index = 1.0
+    curve = [{"day": days[0], "index": 1.0}]
+    for prev_day, day in zip(days, days[1:]):
+        w = weights_for(day)
+        port_ret = 0.0
+        for m, h in histories.items():
+            e0, e1 = _eq_at(h, prev_day), _eq_at(h, day)
+            if e0 and e1 and e0 > 0:
+                port_ret += w.get(m, 0.0) * (e1 / e0 - 1.0)
+        index *= 1.0 + port_ret
+        curve.append({"day": day, "index": round(index, 6)})
+
+    peak, mdd = curve[0]["index"], 0.0
+    for point in curve:
+        peak = max(peak, point["index"])
+        mdd = max(mdd, 1 - point["index"] / peak)
+    return {
+        "arm": arm,
+        "days": len(curve),
+        "markets": sorted(histories),
+        "first_day": curve[0]["day"],
+        "last_day": curve[-1]["day"],
+        "index": curve[-1]["index"],
+        "ret_pct": (curve[-1]["index"] - 1) * 100,
+        "mdd_pct": mdd * 100,
+        "curve": curve,
+    }

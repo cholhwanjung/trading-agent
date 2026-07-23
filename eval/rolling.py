@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from eval.meta import _load_history
+from eval.meta import _load_history, combined_index_dynamic
 from memory.admission import sign_test_p
 
 ROLLING_K = 20  # 거래일 기준 ~1개월
@@ -64,3 +64,24 @@ def rolling_report(state_dir: Path | str, market: str, k: int = ROLLING_K) -> di
         "memory": rolling_delta(hists["llm"], hists["llm_base"], k) if hists["llm"] else None,
         "alpha": rolling_delta(hists["llm"], hists["bh"], k) if hists["llm"] else None,
     }
+
+
+def meta_shadow_delta(
+    state_dir: Path | str,
+    arm: str,
+    weights_by_day: dict[str, dict[str, float]],
+    k: int = ROLLING_K,
+) -> dict | None:
+    """동적 메타 배분 vs 고정 균등의 rolling delta ([ADR-025] verify).
+
+    두 지수를 **같은 리밸런싱 방법**(combined_index_dynamic)으로 산출 — 가중치만 달라
+    배분 스킬을 분리 측정한다. dynamic − equal 의 창 승률·비중첩 청크 부호검정.
+    집행 승격은 이 델타>0·유의 + 실계좌 전환 후([ADR-026]). 데이터 부족 시 None.
+    """
+    dyn = combined_index_dynamic(state_dir, arm, weights_by_day)
+    fixed = combined_index_dynamic(state_dir, arm, {})  # 빈 dict = 고정 균등 baseline
+    if dyn is None or fixed is None:
+        return None
+    dyn_hist = [{"day": p["day"], "equity": p["index"]} for p in dyn["curve"]]
+    fixed_hist = [{"day": p["day"], "equity": p["index"]} for p in fixed["curve"]]
+    return rolling_delta(dyn_hist, fixed_hist, k)
