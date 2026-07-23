@@ -83,3 +83,14 @@ def veto_rows(rows: list[dict]) -> list[dict]:
         for r in rows
         if r["risk_violations"]
     ]
+
+
+def load_latest_requests(requests_dir: Path) -> dict | None:
+    """가장 최근 달의 능력 갭 요구 파일({YYYY-MM}.json)을 읽는다. 없으면 None."""
+
+    if not requests_dir.exists():
+        return None
+    files = sorted(requests_dir.glob("*.json"), reverse=True)
+    if not files:
+        return None
+    return json.loads(files[0].read_text(encoding="utf-8"))

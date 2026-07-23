@@ -27,6 +27,7 @@ from eval.rolling import ROLLING_K, rolling_report  # noqa: E402
 from gui.panels import (  # noqa: E402
     decision_for_day,
     list_observation_days,
+    load_latest_requests,
     load_observation,
     read_recent_decisions,
     veto_rows,
@@ -39,6 +40,7 @@ STATE = ROOT / "data" / "state"
 VIRTUAL = STATE / "virtual"
 OBS_DIR = STATE / "observations"
 LOG_DIR = ROOT / "data" / "logs"
+REQUESTS_DIR = ROOT / "data" / "requests"
 MARKETS = ("CRYPTO", "US", "KR")
 ARMS = ("llm", "llm_base", "bh", "random")
 
@@ -298,3 +300,26 @@ with tab_ops:
         st.markdown((ROOT / "data" / "proposals" / pick).read_text(encoding="utf-8"))
     else:
         st.caption("아직 없음 — 매월 1일 21:00 자동 생성.")
+
+    st.subheader("에이전트 능력 갭 요구 (조달·배선은 사용자 경로로만)")
+    st.caption(
+        "에이전트가 측정된 갭을 근거로 요구하는 데이터/도구. 정책 외(유료·틱·고빈도)는 "
+        "'의도적으로 회피하는 게임'으로 라벨링 — 자동 획득 없음, 읽기 전용."
+    )
+    reqs = load_latest_requests(REQUESTS_DIR)
+    if not reqs or not reqs.get("requests"):
+        st.caption("아직 없음 — 측정된 갭 신호가 쌓이면 생성된다 (근거 없으면 미생성).")
+    else:
+        st.caption(f"생성월: {reqs.get('month', '?')}")
+        for r in reqs["requests"]:
+            out = r.get("policy_class") == "out"
+            badge = "⚠️ 회피 게임 (정책 외)" if out else "✅ 정책 내 (무료·일간)"
+            with st.expander(f"{badge} · {r.get('proposed_capability', '(제안 미상)')}"):
+                if out and r.get("policy_note"):
+                    st.warning(r["policy_note"])
+                st.markdown(f"**갭**: {r.get('gap', '')}")
+                st.markdown(f"**측정 영향**: {r.get('measured_impact', '')}")
+                st.markdown(f"**예상 비용**: {r.get('est_cost', '')}")
+                cites = r.get("evidence_ids") or []
+                if cites:
+                    st.caption("근거: " + " · ".join(f"`{c}`" for c in cites))
