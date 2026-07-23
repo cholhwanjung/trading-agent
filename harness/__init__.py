@@ -1,5 +1,6 @@
 """Paper trading harness — 어댑터 + baseline 정책 + 구조화 로깅."""
 
+from harness.deadline import DEFAULT_DEADLINE_S, run_deadline_s, with_deadline
 from harness.env import load_env
 from harness.jsonlog import JsonlLogger
 from harness.loop import AllocationError, run_daily_step, validate_weights
@@ -9,6 +10,7 @@ from harness.runner import MarketRun, run_all_markets
 
 __all__ = [
     "CASH",
+    "DEFAULT_DEADLINE_S",
     "AllocationError",
     "BuyAndHold",
     "JsonlLogger",
@@ -18,6 +20,8 @@ __all__ = [
     "RandomPolicy",
     "run_all_markets",
     "run_daily_step",
+    "run_deadline_s",
     "validate_weights",
     "wait_for_network",
+    "with_deadline",
 ]

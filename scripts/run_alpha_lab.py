@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from alpha_lab import FactorLibrary, generate_candidates  # noqa: E402
 from alpha_lab.data import fetch_crypto_panel, make_us_panel_fn  # noqa: E402
-from harness import JsonlLogger, load_env, wait_for_network  # noqa: E402
+from harness import JsonlLogger, load_env, wait_for_network, with_deadline  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 
 STATE_DIR = ROOT / "data" / "state"
@@ -109,4 +109,5 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    # 런 전체 데드라인 — 느린 reasoning 응답 누적(07-20 ReadTimeout×3 유형) 총량 차단.
+    sys.exit(asyncio.run(with_deadline(main(), label="alpha_lab")))

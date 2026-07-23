@@ -33,6 +33,7 @@ from harness import (  # noqa: E402
     load_env,
     run_all_markets,
     wait_for_network,
+    with_deadline,
 )
 from llm import LLMRouter  # noqa: E402
 from memory import (  # noqa: E402
@@ -372,4 +373,6 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    # 런 전체 데드라인 — per-call timeout 이 못 막는 총량 지연(무한대기·느린 LLM 누적)을
+    # 상한으로 차단. 초과 시 취소→finally 정리→exit 1 로 락을 확실히 해제한다.
+    sys.exit(asyncio.run(with_deadline(main(), label="paper_step")))

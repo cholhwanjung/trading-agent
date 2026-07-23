@@ -36,9 +36,10 @@ class BinanceTestnetAdapter(MarketAdapter):
     ) -> None:
         import ccxt.async_support as ccxt_async
 
-        self.ex = ccxt_async.binance({"apiKey": api_key, "secret": secret})
+        # timeout(ms) 명시 — 무설정 시 라이브러리 기본에 의존하지 않도록 브로커 REST(15s)와 통일
+        self.ex = ccxt_async.binance({"apiKey": api_key, "secret": secret, "timeout": 15000})
         self.ex.set_sandbox_mode(True)  # testnet.binance.vision 라우팅 (주문·잔고)
-        self.data = ccxt_async.binance()  # 메인넷 공개 API (시세 — 키 불필요)
+        self.data = ccxt_async.binance({"timeout": 15000})  # 메인넷 공개 API (시세 — 키 불필요)
         self.universe = universe
         self.quote = quote
         self.min_notional = min_notional
