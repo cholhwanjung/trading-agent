@@ -2,5 +2,13 @@
 
 from risk.engine import RiskDecision, RiskEngine, RiskLimits
 from risk.guard import RiskGuardedPolicy
+from risk.live import LiveCaps, LiveGuard
 
-__all__ = ["RiskDecision", "RiskEngine", "RiskGuardedPolicy", "RiskLimits"]
+__all__ = [
+    "LiveCaps",
+    "LiveGuard",
+    "RiskDecision",
+    "RiskEngine",
+    "RiskGuardedPolicy",
+    "RiskLimits",
+]

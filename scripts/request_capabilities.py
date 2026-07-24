@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from harness import iter_events, load_env  # noqa: E402
+from harness import iter_events, load_env, wait_for_network  # noqa: E402
 from llm import LLMRouter, extract_json  # noqa: E402
 
 REQUEST_DIR = ROOT / "data" / "requests"
@@ -155,6 +155,11 @@ async def main() -> int:
     if not has_signal(signals):
         print("status=skip detail=측정된 능력 갭 신호 없음 — 요구할 근거가 없다")
         return 0
+
+    # wake/부팅 직후(launchd 캘린더 catch-up) LLM 호출이 DNS 실패로 죽지 않게 대기
+    if not await wait_for_network():
+        print("status=fail event=network_unavailable detail=네트워크 게이트 타임아웃(10분)")
+        return 1
 
     router = LLMRouter(env)
     try:

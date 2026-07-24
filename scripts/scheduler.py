@@ -37,6 +37,8 @@ JOBS = [
     Job("paper_step_kr", "scripts/run_paper_step.py", hour=10, args=("--markets", "KR")),
     Job("paper_step", "scripts/run_paper_step.py", hour=23, args=("--markets", "CRYPTO,US")),
     Job("alpha_lab", "scripts/run_alpha_lab.py", hour=22, weekday=6),  # 일요일
+    # 능력 갭 요구 — 매월 1일 20:30, 제안서(21:00) 직전 생성. 신호 없으면 스크립트가 skip.
+    Job("capability_requests", "scripts/request_capabilities.py", hour=20, minute=30, monthday=1),
     Job("monthly_proposal", "scripts/propose_improvements.py", hour=21, monthday=1),
     # 실시간 이벤트 트리거 — 15분마다 급변 점검, CRYPTO 전용(24/7)
     Job("watcher_crypto", "scripts/run_watcher.py", every_minutes=15, args=("--market", "CRYPTO")),

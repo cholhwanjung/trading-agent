@@ -32,6 +32,7 @@ from harness import (  # noqa: E402
     MarketRun,
     RandomPolicy,
     load_env,
+    notify,
     run_all_markets,
     wait_for_network,
     with_deadline,
@@ -93,7 +94,38 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
             ),
             CRYPTO_UNIVERSE,
         )
-    if env.get("ALPACA_PAPER_API_KEY") and env.get("ALPACA_PAPER_SECRET"):
+    # US: 실전 KIS 해외주식 키가 있으면 실계좌(실자금)로, 없으면 Alpaca 페이퍼로.
+    # 실전은 비율 Risk Engine 이 못 막는 절대 금액을 LiveGuard(1회/일일 상한 + kill switch)로
+    # 보완한다. 실전 토큰은 전용 캐시 파일로 재사용(발급 분당 1회·잦은 발급 제한 회피).
+    if (
+        env.get("KIS_REAL_APP_KEY")
+        and env.get("KIS_REAL_APP_SECRET")
+        and "-" in env.get("KIS_REAL_ACCOUNT", "")
+    ):
+        from adapters.kis_overseas import KISOverseasAdapter
+        from risk import LiveCaps, LiveGuard
+
+        guard = LiveGuard(
+            LiveCaps(
+                max_order_notional=float(env.get("LIVE_MAX_ORDER_USD") or 200),
+                max_daily_notional=float(env.get("LIVE_MAX_DAILY_USD") or 500),
+                kill_switch_path=STATE_DIR / "KILL_SWITCH",
+                state_path=STATE_DIR / "live_notional_US.json",
+            )
+        )
+        out["US"] = (
+            KISOverseasAdapter(
+                env["KIS_REAL_APP_KEY"],
+                env["KIS_REAL_APP_SECRET"],
+                env["KIS_REAL_ACCOUNT"],
+                US_UNIVERSE,
+                token_cache=STATE_DIR / "kis_real_token.json",
+                mode="real",
+                live_guard=guard,
+            ),
+            US_UNIVERSE,
+        )
+    elif env.get("ALPACA_PAPER_API_KEY") and env.get("ALPACA_PAPER_SECRET"):
         from adapters.alpaca import AlpacaPaperAdapter
 
         out["US"] = (
@@ -350,9 +382,13 @@ async def main() -> int:
         results = await run_all_markets(runs, logger, snapshot_dir=STATE_DIR / "observations")
         exit_code = 0
         for market, outcome in results.items():
+            # 실자금 시장(mode=real)만 push 대상 — 페이퍼 실패는 로그로 족하다.
+            is_live = getattr(adapters[market][0], "mode", None) == "real"
             if isinstance(outcome, Exception):
                 print(f"market={market} status=error error={type(outcome).__name__}: {outcome}")
                 exit_code = 1
+                if is_live:
+                    await notify(env, f"{market} 실계좌 오류", f"{type(outcome).__name__}: {outcome}")
             else:
                 meta = guards[market].last_decision or {}
                 print(
@@ -364,6 +400,11 @@ async def main() -> int:
                 )
                 if not outcome.accepted:
                     exit_code = 1
+                    if is_live:
+                        await notify(env, f"{market} 실계좌 주문 거부", outcome.error or "accepted=False")
+                elif is_live and meta.get("circuit_open"):
+                    # MDD 서킷 발동 — 주문은 동결됐지만 실자금 드로다운이라 즉시 통지.
+                    await notify(env, f"{market} 실계좌 MDD 서킷", f"mdd={meta.get('mdd')}")
 
         # 가상 병행 운용 + 메모리 파이프라인 (실스텝 성공 여부와 무관하게 baseline 은 쌓인다)
         today = datetime.now(timezone.utc).date()

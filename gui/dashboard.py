@@ -310,7 +310,7 @@ with tab_ops:
             st.caption("launchd 로그 없음 — 스케줄 잡이 로그를 남기면 여기 표시된다.")
             return
         names = {"main": "paper_step (CRYPTO/US · 23:00)", "kr": "paper_step (KR · 10:00)",
-                 "alpha": "alpha_lab (일요일)"}
+                 "alpha": "alpha_lab (일요일)", "requests": "request_capabilities (매월 1일 20:30)"}
         badge = {"ok": "✅ 성공", "error": "⚠️ 오류", "unknown": "❓ 불명"}
         for j in jobs:
             title = names.get(j["job"], j["job"])

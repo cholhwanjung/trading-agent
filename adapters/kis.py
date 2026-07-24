@@ -23,29 +23,25 @@ from adapters.base import Bar, MarketAdapter, NewsItem, OrderResult, Position, o
 from adapters.retry import with_retry
 
 PAPER_BASE = "https://openapivts.koreainvestment.com:29443"
+REAL_BASE = "https://openapi.koreainvestment.com:9443"
 TOKEN_SAFETY_S = 600  # 만료 10분 전부터 재발급
 RATE_GAP_S = 0.6  # 모의투자 초당 2건 제한(EGW00201) — 요청 간 최소 간격
 
 
-class KISPaperAdapter(MarketAdapter):
-    market = "KR"
+class KISSession:
+    """KIS REST 세션 — 토큰 캐시·스로틀·공통 요청. 국내/해외 어댑터가 공유한다.
+
+    토큰은 파일 캐시(발급 분당 1회 제한 + 24h 유효). 같은 앱 키를 쓰는 어댑터끼리는
+    같은 캐시 파일을 공유해야 재발급 제한에 안 걸린다(키가 다르면 파일도 분리할 것).
+    """
 
     def __init__(
-        self,
-        app_key: str,
-        app_secret: str,
-        account: str,  # "12345678-01" (계좌 8자리-상품코드 2자리)
-        universe: list[str],  # 예: ["069500"] (KODEX 200)
-        token_cache: Path,
-        min_notional: float = 10_000.0,  # KRW — 1주 미만 잔주문 방지
+        self, app_key: str, app_secret: str, token_cache: Path, base_url: str = PAPER_BASE
     ) -> None:
         self.app_key = app_key
         self.app_secret = app_secret
-        self.cano, _, self.prdt = account.partition("-")
-        self.universe = universe
         self.token_cache = Path(token_cache)
-        self.min_notional = min_notional
-        self._client = httpx.AsyncClient(base_url=PAPER_BASE, timeout=15.0)
+        self._client = httpx.AsyncClient(base_url=base_url, timeout=15.0)
         self._last_request = 0.0
 
     async def close(self) -> None:
@@ -57,8 +53,6 @@ class KISPaperAdapter(MarketAdapter):
         if wait > 0:
             await asyncio.sleep(wait)
         self._last_request = time.monotonic()
-
-    # ── 인증 ──
 
     async def _token(self) -> str:
         if self.token_cache.exists():
@@ -92,7 +86,7 @@ class KISPaperAdapter(MarketAdapter):
         )
         return data["access_token"]
 
-    async def _headers(self, tr_id: str) -> dict[str, str]:
+    async def headers(self, tr_id: str) -> dict[str, str]:
         return {
             "authorization": f"Bearer {await self._token()}",
             "appkey": self.app_key,
@@ -101,8 +95,8 @@ class KISPaperAdapter(MarketAdapter):
             "custtype": "P",  # 개인
         }
 
-    async def _get(self, path: str, tr_id: str, params: dict) -> dict:
-        headers = await self._headers(tr_id)
+    async def get(self, path: str, tr_id: str, params: dict) -> dict:
+        headers = await self.headers(tr_id)
 
         async def call():
             await self._throttle()
@@ -114,6 +108,33 @@ class KISPaperAdapter(MarketAdapter):
             return data
 
         return await with_retry(call, exceptions=(httpx.HTTPError,))
+
+    async def post(self, path: str, tr_id: str, body: dict) -> httpx.Response:
+        """스로틀 + 인증 POST. 상태 해석·재시도는 호출부 책임(주문 규약이 어댑터별)."""
+        headers = await self.headers(tr_id)
+        await self._throttle()
+        return await self._client.post(path, headers=headers, json=body)
+
+
+class KISPaperAdapter(MarketAdapter):
+    market = "KR"
+
+    def __init__(
+        self,
+        app_key: str,
+        app_secret: str,
+        account: str,  # "12345678-01" (계좌 8자리-상품코드 2자리)
+        universe: list[str],  # 예: ["069500"] (KODEX 200)
+        token_cache: Path,
+        min_notional: float = 10_000.0,  # KRW — 1주 미만 잔주문 방지
+    ) -> None:
+        self.session = KISSession(app_key, app_secret, Path(token_cache), PAPER_BASE)
+        self.cano, _, self.prdt = account.partition("-")
+        self.universe = universe
+        self.min_notional = min_notional
+
+    async def close(self) -> None:
+        await self.session.close()
 
     # ── 관측 ──
 
@@ -144,7 +165,7 @@ class KISPaperAdapter(MarketAdapter):
         # API 1회 응답 최대 100행 — 기본 lookback(90일)은 1회 조회로 충분
         out: dict[str, list[Bar]] = {}
         for symbol in symbols:
-            data = await self._get(
+            data = await self.session.get(
                 "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
                 tr_id="FHKST03010100",
                 params={
@@ -168,7 +189,7 @@ class KISPaperAdapter(MarketAdapter):
     # ── 계좌 ──
 
     async def _balance(self) -> dict:
-        return await self._get(
+        return await self.session.get(
             "/uapi/domestic-stock/v1/trading/inquire-balance",
             tr_id="VTTC8434R",  # 모의투자 잔고조회
             params={
@@ -211,7 +232,7 @@ class KISPaperAdapter(MarketAdapter):
     # ── 주문 ──
 
     async def _current_price(self, symbol: str) -> float:
-        data = await self._get(
+        data = await self.session.get(
             "/uapi/domestic-stock/v1/quotations/inquire-price",
             tr_id="FHKST01010100",
             params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
@@ -222,7 +243,6 @@ class KISPaperAdapter(MarketAdapter):
         """시장가 현금주문. EGW00201(초당 제한)은 게이트웨이 선차단 = 주문 미접수라
         재시도가 안전. 그 외 오류는 본문 포함해 즉시 실패 — 맹목 재시도는 중복 주문 위험."""
         tr_id = "VTTC0802U" if side == "buy" else "VTTC0801U"  # 모의 매수/매도
-        headers = await self._headers(tr_id)
         body = {
             "CANO": self.cano,
             "ACNT_PRDT_CD": self.prdt,
@@ -232,9 +252,8 @@ class KISPaperAdapter(MarketAdapter):
             "ORD_UNPR": "0",
         }
         for _ in range(3):
-            await self._throttle()
-            resp = await self._client.post(
-                "/uapi/domestic-stock/v1/trading/order-cash", headers=headers, json=body
+            resp = await self.session.post(
+                "/uapi/domestic-stock/v1/trading/order-cash", tr_id, body
             )
             if "EGW00201" in resp.text:
                 await asyncio.sleep(1.0)
