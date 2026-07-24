@@ -97,6 +97,8 @@ class ChatEngine:
         session.messages.append({"role": "user", "content": question})
         resp = await self.router.complete(
             "smart",
+            purpose="chat",
+            market=session.market or "",
             system=SYSTEM_PROMPT + json.dumps(context, ensure_ascii=False, indent=1),
             messages=session.messages,
             max_tokens=4096,
@@ -115,6 +117,8 @@ class ChatEngine:
 
         resp = await self.router.complete(
             "fast",
+            purpose="chat_conclude",
+            market=session.market or "",
             messages=[
                 {
                     "role": "user",

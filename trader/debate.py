@@ -90,11 +90,11 @@ async def run_debate(
     )
     bull_resp, bear_resp = await asyncio.gather(
         router.complete(
-            "fast", system=BULL_SYSTEM.format(market=market),
+            "fast", purpose="debate", market=market, system=BULL_SYSTEM.format(market=market),
             messages=[{"role": "user", "content": content}], max_tokens=1024,
         ),
         router.complete(
-            "fast", system=BEAR_SYSTEM.format(market=market),
+            "fast", purpose="debate", market=market, system=BEAR_SYSTEM.format(market=market),
             messages=[{"role": "user", "content": content}], max_tokens=1024,
         ),
     )

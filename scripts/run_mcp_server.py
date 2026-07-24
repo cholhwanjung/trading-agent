@@ -19,12 +19,13 @@ sys.path.insert(0, str(ROOT))
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from harness.env import load_env  # noqa: E402
+from harness.usage import make_usage_sink  # noqa: E402
 from interaction.briefing import build_briefing  # noqa: E402
 from interaction.chat import ChatEngine, GroundingError  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 
 mcp = FastMCP("trading-agent")
-_engine = ChatEngine(LLMRouter(load_env(ROOT / ".env")), ROOT)
+_engine = ChatEngine(LLMRouter(load_env(ROOT / ".env"), usage_sink=make_usage_sink(ROOT)), ROOT)
 
 
 @mcp.tool()

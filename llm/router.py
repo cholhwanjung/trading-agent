@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from typing import Literal
 
 from llm.backends import AnthropicBackend, OpenAICompatBackend
-from llm.base import LLMBackend, LLMError, LLMResponse
+from llm.base import LLMBackend, LLMError, LLMResponse, Usage, UsageSink
 
 # 프로바이더 카탈로그 — kind=openai 는 전부 OpenAICompatBackend 로 처리
 PROVIDERS: dict[str, dict] = {
@@ -66,6 +66,7 @@ class LLMRouter:
         env: Mapping[str, str],
         smart: str | None = None,
         fast: str | None = None,
+        usage_sink: UsageSink | None = None,
     ) -> None:
         self._env = env
         self._specs: dict[Tier, tuple[str, str]] = {
@@ -73,6 +74,7 @@ class LLMRouter:
             "fast": parse_spec(fast or env.get("LLM_FAST") or DEFAULT_FAST),
         }
         self._backends: dict[str, LLMBackend] = {}
+        self._usage_sink = usage_sink  # None = 사용량 미기록 (테스트·경량 경로)
 
     def spec(self, tier: Tier) -> tuple[str, str]:
         return self._specs[tier]
@@ -82,9 +84,25 @@ class LLMRouter:
             self._backends[provider] = make_backend(provider, self._env)
         return self._backends[provider]
 
-    async def complete(self, tier: Tier, **kwargs) -> LLMResponse:
+    async def complete(
+        self, tier: Tier, *, purpose: str = "", market: str = "", **kwargs
+    ) -> LLMResponse:
+        """purpose·market 는 사용량 귀속 라벨 — 백엔드로 넘기지 않고 싱크에만 기록한다."""
         provider, model = self._specs[tier]
-        return await self._backend(provider).complete(model=model, **kwargs)
+        resp = await self._backend(provider).complete(model=model, **kwargs)
+        if self._usage_sink is not None:
+            self._usage_sink(
+                Usage(
+                    provider=resp.provider,
+                    model=resp.model,
+                    input_tokens=resp.input_tokens or 0,
+                    output_tokens=resp.output_tokens or 0,
+                    tier=tier,
+                    purpose=purpose,
+                    market=market,
+                )
+            )
+        return resp
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """임베딩 — LLM_EMBED 스펙(기본 openai:text-embedding-3-small) 사용."""

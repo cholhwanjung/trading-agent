@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from harness import load_env  # noqa: E402
+from harness import load_env, make_usage_sink  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 from memory import MemoryStore  # noqa: E402
 
@@ -55,7 +55,7 @@ def gather_evidence(memory: MemoryStore) -> dict:
 async def main() -> int:
     env = load_env(ROOT / ".env")
     memory = MemoryStore(ROOT / "data" / "memory.sqlite")
-    router = LLMRouter(env)
+    router = LLMRouter(env, usage_sink=make_usage_sink(ROOT))
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     out_path = PROPOSAL_DIR / f"{month}.md"
 
@@ -69,6 +69,7 @@ async def main() -> int:
 
         resp = await router.complete(
             "smart",
+            purpose="self_improve",
             system=(
                 "너는 트레이딩 에이전트의 self-improve 리뷰어다. 검증된 증거에서만 개선안을 "
                 "도출하라. 각 제안은 [근거 → 제안 diff → 예상 효과 → 리스크] 구조. "

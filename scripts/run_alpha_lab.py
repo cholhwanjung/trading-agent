@@ -22,7 +22,13 @@ sys.path.insert(0, str(ROOT))
 
 from alpha_lab import FactorLibrary, generate_candidates  # noqa: E402
 from alpha_lab.data import fetch_crypto_panel, make_us_panel_fn  # noqa: E402
-from harness import JsonlLogger, load_env, wait_for_network, with_deadline  # noqa: E402
+from harness import (  # noqa: E402
+    JsonlLogger,
+    load_env,
+    make_usage_sink,
+    wait_for_network,
+    with_deadline,
+)
 from llm import LLMRouter  # noqa: E402
 
 STATE_DIR = ROOT / "data" / "state"
@@ -94,7 +100,7 @@ async def main() -> int:
         print("status=fail event=network_unavailable detail=네트워크 게이트 타임아웃(10분)")
         return 1
 
-    router = LLMRouter(env)
+    router = LLMRouter(env, usage_sink=make_usage_sink(ROOT))
     logger = JsonlLogger(ROOT / "data" / "logs")
     today = datetime.now(timezone.utc).date()
     try:

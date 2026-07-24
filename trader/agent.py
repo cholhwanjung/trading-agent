@@ -153,6 +153,8 @@ class LLMTrader:
             system += "\n\n" + TRIGGER_SYSTEM_CLAUSE
         resp = await self.router.complete(
             self.tier,
+            purpose="decision",
+            market=self.market,
             system=system,
             messages=[
                 {

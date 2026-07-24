@@ -33,10 +33,11 @@ class ConcludeRequest(BaseModel):
 
 def create_app(engine: ChatEngine | None = None, token: str | None = None, root: Path = ROOT) -> FastAPI:
     if engine is None:
+        from harness.usage import make_usage_sink
         from llm import LLMRouter
 
         env = load_env(root / ".env")
-        engine = ChatEngine(LLMRouter(env), root)
+        engine = ChatEngine(LLMRouter(env, usage_sink=make_usage_sink(root)), root)
         token = env.get("INTERACTION_API_TOKEN") or None
 
     app = FastAPI(title="trading-agent gateway")

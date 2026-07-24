@@ -101,6 +101,8 @@ async def run_weekly(
 
             resp = await router.complete(
                 "fast",
+                purpose="reflection",
+                market=market,
                 messages=[
                     {
                         "role": "user",

@@ -176,3 +176,82 @@ def load_launchd_jobs(log_dir: Path, tail_lines: int = 20) -> list[dict]:
             "has_stderr": bool(err_tail and any(ln.strip() for ln in err_tail)),
         })
     return jobs
+
+
+# ── LLM 비용·토큰 (라우터 usage 로그) ──
+
+# 프로바이더 단가 (USD / 100만 토큰) — 공식 가격 페이지 기준 스타터 표.
+# 마지막 확인 2026-07-24 (platform.claude.com · ai.google.dev). 공지 단가는 수시로
+# 바뀌고 시간 조건도 있어(예: Sonnet 5 도입가 $2/$10 는 2026-08-31 까지, 이후 $3/$15)
+# data/state/llm_pricing.json 에 {"provider:model": {"in": x, "out": y}} 로 덮어쓴다.
+# 토큰은 사실이라 로그에 저장하지만 비용은 단가가 변하므로 여기서 파생한다.
+DEFAULT_LLM_PRICING: dict[str, dict[str, float]] = {
+    # Anthropic (기본 라우팅 프로바이더)
+    "anthropic:claude-sonnet-5": {"in": 2.0, "out": 10.0},  # 도입가, 2026-09-01 부터 3/15
+    "anthropic:claude-haiku-4-5-20251001": {"in": 1.0, "out": 5.0},
+    "anthropic:claude-opus-4-8": {"in": 5.0, "out": 25.0},
+    # Gemini (대체 프로바이더 예시)
+    "gemini:gemini-2.5-pro": {"in": 1.25, "out": 10.0},
+    "gemini:gemini-2.5-flash": {"in": 0.30, "out": 2.50},
+}
+
+
+def load_pricing(state_dir: Path) -> dict[str, dict[str, float]]:
+    """기본 단가에 {state_dir}/llm_pricing.json 오버라이드를 병합한다(없으면 기본만)."""
+    pricing = dict(DEFAULT_LLM_PRICING)
+    path = state_dir / "llm_pricing.json"
+    if path.exists():
+        pricing.update(json.loads(path.read_text(encoding="utf-8")))
+    return pricing
+
+
+def _rate(price: object) -> tuple[float, float] | None:
+    """단가 항목에서 (in, out) 숫자쌍을 뽑는다. 미설정·비숫자(채워넣기 전 null 자리표시자·
+    손편집 오타 포함)면 None → 호출부가 '단가 미등록'으로 처리한다."""
+    if isinstance(price, dict):
+        pin, pout = price.get("in"), price.get("out")
+        if isinstance(pin, (int, float)) and isinstance(pout, (int, float)):
+            return float(pin), float(pout)
+    return None
+
+
+def usage_cost_report(log_dir: Path, pricing: dict[str, dict[str, float]]) -> dict:
+    """USAGE/llm_usage 이벤트 → 일별·목적별 토큰/비용 집계.
+
+    비용은 pricing[provider:model] 단가로 파생. 단가 미등록 모델은 토큰만 집계하고
+    unpriced 에 표시(비용 0 기여) — 사용자가 단가를 채우면 자동 반영된다.
+    """
+    daily: dict[str, dict] = {}
+    by_purpose: dict[str, dict] = {}
+    unpriced: set[str] = set()
+    total_in = total_out = 0
+    total_cost = 0.0
+    for rec in iter_events(log_dir, "USAGE", "llm_usage"):
+        day = str(rec.get("ts", ""))[:10]
+        tin = int(rec.get("in") or 0)
+        tout = int(rec.get("out") or 0)
+        key = f'{rec.get("provider")}:{rec.get("model")}'
+        rate = _rate(pricing.get(key))
+        cost = (tin / 1e6 * rate[0] + tout / 1e6 * rate[1]) if rate else 0.0
+        if rate is None:
+            unpriced.add(key)
+        purpose = rec.get("purpose") or "(미상)"
+        d = daily.setdefault(day, {"day": day, "in": 0, "out": 0, "cost": 0.0})
+        d["in"] += tin
+        d["out"] += tout
+        d["cost"] += cost
+        p = by_purpose.setdefault(purpose, {"purpose": purpose, "in": 0, "out": 0, "cost": 0.0})
+        p["in"] += tin
+        p["out"] += tout
+        p["cost"] += cost
+        total_in += tin
+        total_out += tout
+        total_cost += cost
+    return {
+        "daily": [daily[k] for k in sorted(daily)],
+        "by_purpose": sorted(by_purpose.values(), key=lambda r: r["cost"], reverse=True),
+        "total_in": total_in,
+        "total_out": total_out,
+        "total_cost": total_cost,
+        "unpriced": sorted(unpriced),
+    }

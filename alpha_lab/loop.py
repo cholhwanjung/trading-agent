@@ -54,6 +54,7 @@ async def generate_candidates(
 
     resp = await router.complete(
         "smart",
+        purpose="alpha_writer",
         messages=[
             {
                 "role": "user",
@@ -95,6 +96,7 @@ async def generate_candidates(
     if reviewable:
         judge_resp = await router.complete(
             "fast",
+            purpose="alpha_judge",
             messages=[
                 {
                     "role": "user",

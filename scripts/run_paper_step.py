@@ -32,6 +32,7 @@ from harness import (  # noqa: E402
     MarketRun,
     RandomPolicy,
     load_env,
+    make_usage_sink,
     notify,
     run_all_markets,
     wait_for_network,
@@ -349,7 +350,7 @@ async def main() -> int:
         print("status=fail event=network_unavailable detail=네트워크 게이트 타임아웃(10분)")
         return 1
 
-    router = LLMRouter(env)
+    router = LLMRouter(env, usage_sink=make_usage_sink(ROOT))
     logger = JsonlLogger(ROOT / "data" / "logs")
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 

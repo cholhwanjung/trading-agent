@@ -8,6 +8,7 @@ from harness.netgate import wait_for_network
 from harness.notify import notify
 from harness.policy import CASH, BuyAndHold, Policy, RandomPolicy
 from harness.runner import MarketRun, run_all_markets
+from harness.usage import make_usage_sink
 
 __all__ = [
     "CASH",
@@ -17,6 +18,7 @@ __all__ = [
     "JsonlLogger",
     "iter_events",
     "load_env",
+    "make_usage_sink",
     "MarketRun",
     "notify",
     "Policy",

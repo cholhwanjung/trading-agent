@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from harness import iter_events, load_env, wait_for_network  # noqa: E402
+from harness import iter_events, load_env, make_usage_sink, wait_for_network  # noqa: E402
 from llm import LLMRouter, extract_json  # noqa: E402
 
 REQUEST_DIR = ROOT / "data" / "requests"
@@ -161,10 +161,10 @@ async def main() -> int:
         print("status=fail event=network_unavailable detail=네트워크 게이트 타임아웃(10분)")
         return 1
 
-    router = LLMRouter(env)
+    router = LLMRouter(env, usage_sink=make_usage_sink(ROOT))
     try:
         resp = await router.complete(
-            "smart", system=SYSTEM,
+            "smart", purpose="capability", system=SYSTEM,
             messages=[{"role": "user", "content": "측정된 갭 신호:\n"
                        + json.dumps(signals, ensure_ascii=False, indent=1)}],
             max_tokens=4096,

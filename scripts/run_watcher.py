@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from harness import JsonlLogger, load_env  # noqa: E402
+from harness import JsonlLogger, load_env, make_usage_sink  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 from risk import RiskEngine, RiskGuardedPolicy  # noqa: E402
 from scripts.run_paper_step import (  # noqa: E402
@@ -78,7 +78,7 @@ async def main() -> int:
 
     logger = JsonlLogger(ROOT / "data" / "logs")
     watch_path = STATE_DIR / f"watch_{market}.json"
-    router = LLMRouter(env)
+    router = LLMRouter(env, usage_sink=make_usage_sink(ROOT))
     try:
         now = datetime.now(timezone.utc)
         current = await adapter.get_current_prices(symbols)
