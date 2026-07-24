@@ -35,6 +35,7 @@ from harness import (  # noqa: E402
     make_usage_sink,
     notify,
     run_all_markets,
+    single_instance,
     wait_for_network,
     with_deadline,
 )
@@ -328,6 +329,18 @@ async def run_memory_pipeline(
 
 async def main() -> int:
     env = load_env(ROOT / ".env")
+
+    # 단일 인스턴스 락 — 같은 시장셋의 catch-up/중복 런이 같은 계좌에 이중 주문하거나
+    # 상태 파일(risk_*·live_notional_*)을 레이스로 덮어쓰지 않게 한다(실계좌 경로 필수).
+    # 시장셋별 키라 장 시간이 다른 잡(KR 10:00 vs CRYPTO,US 23:00)은 서로 막지 않는다.
+    markets_key = "all"
+    if "--markets" in sys.argv:
+        markets_key = "-".join(sorted(sys.argv[sys.argv.index("--markets") + 1].upper().split(",")))
+    lock = single_instance(STATE_DIR / f"run_paper_step_{markets_key}.lock")
+    if lock is None:
+        print(f"status=skip detail=이미 실행 중(markets={markets_key}) — 중복 실행 차단")
+        return 0
+
     adapters = build_adapters(env)
     # --markets KR / --markets CRYPTO,US — 장 시간이 다른 시장을 별도 잡으로 분리
     if "--markets" in sys.argv:
@@ -476,6 +489,7 @@ async def main() -> int:
             if close:
                 await close()
         await router.close()
+        lock.close()  # 락 해제 (프로세스 종료로도 커널이 해제하나 즉시 반납)
 
 
 if __name__ == "__main__":

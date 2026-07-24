@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from harness import JsonlLogger, load_env, make_usage_sink  # noqa: E402
+from harness import JsonlLogger, load_env, make_usage_sink, single_instance  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 from risk import RiskEngine, RiskGuardedPolicy  # noqa: E402
 from scripts.run_paper_step import (  # noqa: E402
@@ -65,6 +65,14 @@ async def main() -> int:
     config = config_for(market)  # 미지원 시장은 KeyError (v1 은 CRYPTO 전용)
 
     env = load_env(ROOT / ".env")
+
+    # 단일 인스턴스 락 — 15분 인터벌 틱이 이전(느린) 틱과 겹치면 같은 계좌에 중복 주문하고
+    # risk_{market}.json 을 레이스로 덮어쓴다. 시장별 키로 자기 중첩을 차단.
+    lock = single_instance(STATE_DIR / f"run_watcher_{market}.lock")
+    if lock is None:
+        print(f"status=skip detail=이미 실행 중(market={market}) — 중복 실행 차단")
+        return 0
+
     adapters = build_adapters(env)
     if market not in adapters:
         for a, _ in adapters.values():
@@ -152,6 +160,7 @@ async def main() -> int:
     finally:
         await _close(adapter)
         await router.close()
+        lock.close()  # 락 해제 (프로세스 종료로도 커널이 해제하나 즉시 반납)
 
 
 if __name__ == "__main__":
