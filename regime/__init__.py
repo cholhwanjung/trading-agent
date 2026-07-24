@@ -9,6 +9,7 @@ from regime.pulse import (
     RegimeResult,
     classify_regime,
 )
+from regime.state import load_market_signals, update_regime_signal
 
 __all__ = [
     "CORRECTION",
@@ -21,4 +22,6 @@ __all__ = [
     "MarketSignal",
     "MetaProposal",
     "propose_meta_weights",
+    "load_market_signals",
+    "update_regime_signal",
 ]

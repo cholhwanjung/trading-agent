@@ -47,7 +47,13 @@ from memory import (  # noqa: E402
     review_probation,
     review_retention,
 )
-from regime import INDEX_PROXY, MarketSignal, compute_regime, propose_meta_weights  # noqa: E402
+from regime import (  # noqa: E402
+    INDEX_PROXY,
+    compute_regime,
+    load_market_signals,
+    propose_meta_weights,
+    update_regime_signal,
+)
 from risk import RiskEngine, RiskGuardedPolicy, RiskLimits  # noqa: E402
 from trader import LLMTrader  # noqa: E402
 
@@ -63,6 +69,8 @@ LIMITS = {
     "KR": RiskLimits(max_weight_per_asset=0.40, min_cash=0.10, max_daily_turnover=0.50, mdd_circuit=0.15),
 }
 STATE_DIR = ROOT / "data" / "state"
+# 시장별 최신 regime 의 cross-job 공유 — 장 시간 분리로 시장이 별도 잡이어도 메타 제안이 전 시장을 본다.
+REGIME_STATE_PATH = STATE_DIR / "regime_latest.json"
 COST_BPS = {"CRYPTO": 10.0, "US": 1.0, "KR": 3.0}  # 가상 포트폴리오 거래비용
 
 
@@ -297,7 +305,6 @@ async def main() -> int:
 
         # 가상 병행 운용 + 메모리 파이프라인 (실스텝 성공 여부와 무관하게 baseline 은 쌓인다)
         today = datetime.now(timezone.utc).date()
-        meta_signals: list[MarketSignal] = []
         for market, (adapter, symbols) in adapters.items():
             guard = guards[market]
             llm_weights = None
@@ -318,11 +325,14 @@ async def main() -> int:
                 })
                 print(f"market={market} regime={regime.state} dd={regime.distribution_days}"
                       f" drawdown={regime.drawdown}")
-            # 메타 배분 입력 — 시장은 항상 포함, regime 없으면 anchor 유지(None → score 0).
-            meta_signals.append(MarketSignal(
-                market, regime.state if regime else None,
-                drawdown=regime.drawdown if regime else 0.0,
-            ))
+            # 최신 regime 을 cross-job 공유 상태에 병합 — 이 잡이 자기 시장만 봐도, 메타 제안은
+            # 공유 상태에서 전 시장을 읽어 완전해진다(장 시간 분리로 인한 부분 제안·시장 탈락 방지).
+            update_regime_signal(
+                REGIME_STATE_PATH, market,
+                regime.state if regime else None,
+                regime.drawdown if regime else 0.0,
+                today,
+            )
 
             # ── 메모리: 결과 소급 기입 → 오늘 결정 기록 → admission → probation ──
             try:
@@ -362,9 +372,11 @@ async def main() -> int:
                 logger.log(market, "memory_error", {"error_type": type(e).__name__, "error": str(e)[:200]})
         memory.close()
 
-        # 시장 간 shadow 메타 배분 — 제안·로깅·누적만. 집행/Risk 미개입, 검증 후 승격.
-        if meta_signals:
-            proposal = propose_meta_weights(meta_signals, asof_day=today)
+        # 시장 간 shadow 메타 배분 — 공유 regime 상태에서 전 시장을 읽어 제안(부분 잡이어도 완전).
+        # 제안·로깅·누적만, 집행/Risk 미개입. 검증 후 승격.
+        signals = load_market_signals(REGIME_STATE_PATH)
+        if any(s.regime_state is not None for s in signals):
+            proposal = propose_meta_weights(signals, asof_day=today)
             if record_meta_shadow(STATE_DIR / "meta_shadow.json", proposal):
                 logger.log("META", "meta_shadow", {
                     "day": today.isoformat(), "weights": proposal.weights,

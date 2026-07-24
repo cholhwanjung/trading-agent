@@ -15,6 +15,7 @@ import json
 import sys
 from pathlib import Path
 
+import altair as alt
 import httpx
 import pandas as pd
 import streamlit as st
@@ -27,7 +28,10 @@ from eval.rolling import ROLLING_K, rolling_report  # noqa: E402
 from gui.panels import (  # noqa: E402
     decision_for_day,
     list_observation_days,
+    load_intramarket_weights,
     load_latest_requests,
+    load_launchd_jobs,
+    load_market_allocation,
     load_observation,
     read_recent_decisions,
     veto_rows,
@@ -67,6 +71,25 @@ def load_context() -> dict:
     return build_context(ROOT)
 
 
+def pie(data: dict[str, float], title: str) -> None:
+    """비중 dict → 도넛 파이. 0/음수 비중은 제외. 데이터 없으면 캡션."""
+    rows = [{"label": k, "value": v} for k, v in data.items() if v and v > 0]
+    if not rows:
+        st.caption(f"{title}: 데이터 없음")
+        return
+    chart = (
+        alt.Chart(pd.DataFrame(rows))
+        .mark_arc(innerRadius=45)
+        .encode(
+            theta=alt.Theta("value:Q", stack=True),
+            color=alt.Color("label:N", legend=alt.Legend(title=None, orient="bottom")),
+            tooltip=["label:N", alt.Tooltip("value:Q", format=".1%")],
+        )
+        .properties(title=title, height=240)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 tab_dash, tab_obs, tab_chat, tab_ops = st.tabs(["📊 대시보드", "🔭 관측", "💬 챗", "🔧 운영"])
 
 
@@ -90,6 +113,23 @@ with tab_dash:
         base_meta = combined_index(VIRTUAL, "llm_base")
         if base_meta:
             cols[3].metric("메모리 델타", f"{meta['ret_pct'] - base_meta['ret_pct']:+.3f}%p")
+
+    st.divider()
+    st.subheader("자본 배분")
+    alloc = load_market_allocation(VIRTUAL, STATE / "meta_shadow.json")
+    ca, cb = st.columns(2)
+    with ca:
+        pie(alloc["current"], "마켓별 — 현재 (가상 equity 비중)")
+    with cb:
+        if alloc["target"]:
+            pie(alloc["target"], "마켓별 — 메타 목표 (shadow 제안)")
+        else:
+            st.caption("마켓별 메타 목표: shadow 제안 없음 (paper_step 이 쌓으면 표시)")
+
+    st.caption("마켓 내 포트폴리오 구성 — 목표 배분 벡터 (CASH 포함)")
+    for col, market in zip(st.columns(len(MARKETS)), MARKETS):
+        with col:
+            pie(load_intramarket_weights(STATE, market), market)
 
     for market in MARKETS:
         frame = load_equity_frame(market)
@@ -258,6 +298,39 @@ with tab_chat:
 # ── 운영 (읽기 전용) ──
 
 with tab_ops:
+
+    @st.fragment(run_every="15s")
+    def launchd_panel() -> None:
+        from datetime import datetime
+
+        st.subheader("스케줄 잡 상태 (launchd) · 15초 자동 갱신")
+        st.caption(
+            "out/err 로그 tail 기반 추정 — 파일만 읽음(launchctl 미호출). stderr 는 과거 로그가 "
+            "누적되므로 실패가 아니라 확인 힌트. 정확한 종료코드는 tail 을 직접 확인."
+        )
+        jobs = load_launchd_jobs(LOG_DIR)
+        if not jobs:
+            st.caption("launchd 로그 없음 — 스케줄 잡이 로그를 남기면 여기 표시된다.")
+            return
+        names = {"main": "paper_step (CRYPTO/US · 23:00)", "kr": "paper_step (KR · 10:00)",
+                 "alpha": "alpha_lab (일요일)"}
+        badge = {"ok": "✅ 성공", "error": "⚠️ 오류", "unknown": "❓ 불명"}
+        for j in jobs:
+            title = names.get(j["job"], j["job"])
+            last = j["last_run"].replace("T", " ") if j["last_run"] else "?"
+            hint = " · 🟡 stderr 있음" if j["has_stderr"] else ""
+            with st.expander(f"{badge.get(j['status'], '❓')} · {title} · 최근 {last}{hint}"):
+                if j["out_tail"]:
+                    st.caption("stdout (tail)")
+                    st.code("\n".join(j["out_tail"]))
+                if j["err_tail"]:
+                    st.caption("stderr (tail)")
+                    st.code("\n".join(j["err_tail"]))
+        st.caption(f"조회: {datetime.now().isoformat(timespec='seconds')}")
+
+    launchd_panel()
+    st.divider()
+
     st.subheader("rolling-k delta (승격 판정 입력)")
     for market in MARKETS:
         if not (VIRTUAL / f"{market}_llm.json").exists():

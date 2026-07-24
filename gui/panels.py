@@ -94,3 +94,99 @@ def load_latest_requests(requests_dir: Path) -> dict | None:
     if not files:
         return None
     return json.loads(files[0].read_text(encoding="utf-8"))
+
+
+# ── 자본 배분 (파이 데이터) ──
+
+
+def _last_equity(virtual_dir: Path, market: str, arm: str) -> float | None:
+    path = virtual_dir / f"{market}_{arm}.json"
+    if not path.exists():
+        return None
+    history = json.loads(path.read_text(encoding="utf-8")).get("history") or []
+    return history[-1]["equity"] if history else None
+
+
+def load_market_allocation(virtual_dir: Path, meta_ledger: Path, arm: str = "llm") -> dict:
+    """마켓별 자본 배분 — 현재(가상 equity 비중) vs 목표(meta_shadow 최신 제안).
+
+    현재 비중은 arm equity 를 시장별로 정규화(전 시장 동일 nominal base 라 공통 단위).
+    목표는 meta_shadow 원장의 최신 제안 weights. 각각 없으면 빈 dict.
+    """
+    suffix = f"_{arm}.json"
+    equities: dict[str, float] = {}
+    if virtual_dir.exists():
+        for path in sorted(virtual_dir.glob(f"*{suffix}")):
+            market = path.name[: -len(suffix)]
+            eq = _last_equity(virtual_dir, market, arm)
+            if eq and eq > 0:
+                equities[market] = eq
+    total = sum(equities.values())
+    current = {m: eq / total for m, eq in equities.items()} if total > 0 else {}
+
+    target: dict[str, float] = {}
+    if meta_ledger.exists():
+        history = json.loads(meta_ledger.read_text(encoding="utf-8")).get("history") or []
+        if history:
+            target = history[-1].get("weights") or {}
+    return {"current": current, "target": target, "arm": arm}
+
+
+def load_intramarket_weights(state_dir: Path, market: str) -> dict[str, float]:
+    """마켓 내 목표 배분 벡터(CASH 포함) — risk_{market}.json 의 prev_weights. 없으면 {}."""
+    path = state_dir / f"risk_{market}.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8")).get("prev_weights") or {}
+
+
+# ── 스케줄 잡 상태 (launchd 로그 기반) ──
+
+_OK_MARKERS = ("briefing=", "status=ok")
+_FAIL_MARKERS = ("status=fail", "status=error")
+
+
+def _tail(path: Path, n: int) -> list[str]:
+    if not path.exists():
+        return []
+    return path.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
+
+
+def load_launchd_jobs(log_dir: Path, tail_lines: int = 20) -> list[dict]:
+    """launchd*.log(out/err)를 잡별로 묶어 상태 요약. 파일만 읽는다(launchctl 미호출).
+
+    상태는 **out 로그 tail 마커** 기반 추정(최신 런의 완료/실패 신호). 정확한 종료코드가
+    아니므로 raw tail 을 함께 노출한다. err 로그는 누적되므로(과거 트레이스백이 남음)
+    stderr 존재는 실패가 아니라 '확인 힌트'로만 표시한다. last_run 은 로그 mtime(로컬).
+    """
+    from datetime import datetime
+
+    if not log_dir.exists():
+        return []
+    groups: dict[str, dict[str, Path]] = {}
+    for p in sorted(log_dir.glob("launchd*.log")):
+        stem = p.name[len("launchd"):].removesuffix(".log")  # 예: ".kr.out"
+        kind = "err" if stem.endswith(".err") else "out"
+        job = stem.removesuffix(".err").removesuffix(".out").strip(".") or "main"
+        groups.setdefault(job, {})[kind] = p
+
+    jobs: list[dict] = []
+    for job, files in sorted(groups.items()):
+        out_p, err_p = files.get("out"), files.get("err")
+        out_tail = _tail(out_p, tail_lines) if out_p else []
+        err_tail = _tail(err_p, tail_lines) if err_p else []
+        mtimes = [p.stat().st_mtime for p in (out_p, err_p) if p and p.exists()]
+        last_run = datetime.fromtimestamp(max(mtimes)).isoformat(timespec="seconds") if mtimes else None
+        joined = "\n".join(out_tail)
+        if any(m in joined for m in _FAIL_MARKERS):
+            status = "error"
+        elif any(m in joined for m in _OK_MARKERS):
+            status = "ok"
+        else:
+            status = "unknown"
+        jobs.append({
+            "job": job, "status": status, "last_run": last_run,
+            "out_tail": out_tail, "err_tail": err_tail,
+            "has_stderr": bool(err_tail and any(ln.strip() for ln in err_tail)),
+        })
+    return jobs
