@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 import altair as alt
@@ -24,9 +25,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from eval.meta import combined_index, load_arm_history  # noqa: E402
+from eval.perf import drawdown_series, perf_stats  # noqa: E402
 from eval.rolling import ROLLING_K, rolling_report  # noqa: E402
 from gui.panels import (  # noqa: E402
     decision_for_day,
+    kill_switch_active,
     list_observation_days,
     load_intramarket_weights,
     load_latest_requests,
@@ -34,11 +37,14 @@ from gui.panels import (  # noqa: E402
     load_market_allocation,
     load_observation,
     load_pricing,
+    load_regime,
+    market_health,
     read_recent_decisions,
     usage_cost_report,
     veto_rows,
 )
 from harness.env import load_env  # noqa: E402
+from risk.engine import RiskLimits  # noqa: E402
 from interaction.briefing import build_briefing  # noqa: E402
 from interaction.context import build_context  # noqa: E402
 
@@ -49,6 +55,9 @@ LOG_DIR = ROOT / "data" / "logs"
 REQUESTS_DIR = ROOT / "data" / "requests"
 MARKETS = ("CRYPTO", "US", "KR")
 ARMS = ("llm", "llm_base", "bh", "random")
+PERIODS_PER_YEAR = {"CRYPTO": 365.0, "US": 252.0, "KR": 252.0}  # 연율화 계수 (연 거래일 수)
+REGIME_BADGE = {"UPTREND": "🟢", "UNDER_PRESSURE": "🟡", "CORRECTION": "🔴"}
+STALE_DAYS = 2  # 마지막 결정이 이 일수 초과로 오래되면 staleness 경고
 
 st.set_page_config(page_title="trading-agent", page_icon="📈", layout="wide")
 
@@ -100,6 +109,47 @@ with tab_dash:
     for item in context["items"]:
         by_kind.setdefault(item["kind"], []).append(item)
 
+    # ── 안전·헬스 배너 (자율 운용 최상단 요소) ──
+    if kill_switch_active(STATE):
+        st.error("🛑 KILL_SWITCH 활성 — 실주문 정지 중. 해제: `rm data/state/KILL_SWITCH`")
+    mdd_circuit = RiskLimits().mdd_circuit
+    today = date.today()
+    health_cols = st.columns(len(MARKETS))
+    for col, market in zip(health_cols, MARKETS):
+        h = market_health(LOG_DIR, market, today)
+        with col:
+            if h["last_day"] is None:
+                st.caption(f"**{market}** · 결정 로그 없음")
+                continue
+            stale = h["days_stale"] is not None and h["days_stale"] > STALE_DAYS
+            tripped = h["mdd"] is not None and h["mdd"] >= mdd_circuit
+            age = f"{h['days_stale']}일 전" if h["days_stale"] is not None else h["last_day"]
+            line = f"**{market}** · 최근 결정 {age}"
+            if h["mdd"]:
+                line += f" · MDD {h['mdd']:.1%}"
+            if tripped:
+                st.error(line + " · 🛑 서킷")
+            elif stale:
+                st.warning(line + " · ⏳ stale")
+            else:
+                st.success(line)
+            if h["violation_days"]:
+                st.caption("최근 risk 클램프: " + ", ".join(h["violation_days"]))
+
+    # ── 국면(regime) 배너 — shadow(결정·리스크 미개입, 관측만) ──
+    regime = load_regime(STATE)
+    if regime:
+        chips = []
+        for market in MARKETS:
+            r = regime.get(market)
+            if not r:
+                continue
+            badge = REGIME_BADGE.get(r["state"], "⚪")
+            chips.append(f"{badge} **{market}** {r['state']} (낙폭 {r.get('drawdown', 0):.1%})")
+        if chips:
+            st.caption("시장 국면 (shadow — 결정·리스크 미개입) · " + " · ".join(chips))
+    st.divider()
+
     # META 결합 지수
     meta = combined_index(VIRTUAL, "llm")
     cols = st.columns(4)
@@ -139,6 +189,35 @@ with tab_dash:
         risk = next((i for i in by_kind.get("risk_state", []) if i["id"] == f"risk:{market}"), None)
         if risk:
             st.caption(f"현재 목표 배분: `{risk['content']['target_weights']}` · equity 고점: {risk['content']['peak_equity']}")
+
+        # 위험조정 성과 지표 (arm × 지표) + 드로다운(언더워터)
+        ppy = PERIODS_PER_YEAR.get(market, 252.0)
+        stat_rows: dict[str, dict] = {}
+        dd_frame: dict[str, pd.Series] = {}
+        for arm in frame.columns:
+            series = frame[arm].dropna()
+            eq = [float(v) for v in series.tolist()]
+            s = perf_stats(eq, ppy)
+            if s:
+                stat_rows[arm] = {
+                    "n": s["n"], "수익률": s["total_return"], "연변동성": s["ann_vol"],
+                    "Sharpe": s["sharpe"], "Sortino": s["sortino"], "Calmar": s["calmar"],
+                    "MDD": s["mdd"], "승률": s["win_rate"], "avg win": s["avg_win"],
+                    "avg loss": s["avg_loss"], "best": s["best"], "worst": s["worst"],
+                }
+            if arm in ("llm", "bh") and len(eq) > 1:
+                dd_frame[arm] = pd.Series(drawdown_series(eq), index=series.index)
+        if stat_rows:
+            st.caption(f"위험조정 성과 (일간 · rf=0 · 연율화 √{int(ppy)} · n=관측일, 짧으면 노이즈 큼)")
+            perf_df = pd.DataFrame(stat_rows).T
+            pct = ("수익률", "연변동성", "MDD", "승률", "avg win", "avg loss", "best", "worst")
+            fmt = {c: "{:.2%}" for c in pct}
+            fmt.update({c: "{:.2f}" for c in ("Sharpe", "Sortino", "Calmar")})
+            fmt["n"] = "{:.0f}"
+            st.dataframe(perf_df.style.format(fmt, na_rep="—"), use_container_width=True)
+        if dd_frame:
+            st.caption("드로다운 (언더워터) — llm vs bh")
+            st.line_chart(pd.DataFrame(dd_frame))
 
     st.subheader("최근 결정 (근거·인용)")
     rows = [

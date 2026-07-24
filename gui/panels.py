@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 from eval.meta import load_arm_history
@@ -76,6 +77,46 @@ def veto_rows(rows: list[dict]) -> list[dict]:
         for r in rows
         if r["risk_violations"]
     ]
+
+
+# ── 국면(regime) · 안전/헬스 (읽기 전용) ──
+
+
+def load_regime(state_dir: Path) -> dict:
+    """regime_latest.json — {market: {state, drawdown, asof}}. 없으면 {}. shadow 신호."""
+    path = state_dir / "regime_latest.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def kill_switch_active(state_dir: Path) -> bool:
+    """실주문 정지 파일(KILL_SWITCH) 존재 여부 — `touch data/state/KILL_SWITCH` 로 발동."""
+    return (state_dir / "KILL_SWITCH").exists()
+
+
+def market_health(log_dir: Path, market: str, today: date) -> dict:
+    """시장별 운영 헬스 — 마지막 결정 신선도 + 리스크 엔진 MDD + 최근 위반.
+
+    staleness 는 결정 로그의 asof_day 기준(마지막 결정이 며칠 전인가). mdd 는 리스크
+    엔진이 서킷브레이커 판정에 쓰는 값(가상 arm 낙폭과는 다른 기준). 파일만 읽는다.
+    """
+    decisions = read_recent_decisions(log_dir, market)
+    last = decisions[-1] if decisions else None
+    last_day = last["day"] if last else None
+    days_stale: int | None = None
+    if last_day:
+        try:
+            days_stale = (today - date.fromisoformat(last_day)).days
+        except ValueError:
+            days_stale = None
+    return {
+        "market": market,
+        "last_day": last_day,
+        "days_stale": days_stale,
+        "mdd": last.get("mdd") if last else None,
+        "violation_days": [d["day"] for d in decisions if d["risk_violations"]][-3:],
+    }
 
 
 def load_latest_requests(requests_dir: Path) -> dict | None:
