@@ -16,8 +16,11 @@ COPY interaction/ interaction/
 COPY llm/ llm/
 COPY memory/ memory/
 COPY reflection/ reflection/
+COPY regime/ regime/
 COPY risk/ risk/
 COPY trader/ trader/
+COPY treasury/ treasury/
+COPY watcher/ watcher/
 COPY scripts/ scripts/
 RUN uv sync --frozen --no-dev
 

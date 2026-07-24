@@ -8,11 +8,10 @@ QuantAgent inner/outer 결합: LLM 은 가설과 수식만 내고, 진짜 판정
 from __future__ import annotations
 
 import json
-import re
 
 from alpha_lab.dsl import DSL_SPEC, DSLError, validate
 from alpha_lab.library import FactorCandidate, FactorLibrary
-from llm import LLMRouter
+from llm import LLMRouter, extract_json
 
 WRITER_PROMPT = """\
 너는 퀀트 팩터 연구자다. 아래 DSL 로 {asset} 일간 횡단면 팩터 후보 {n}개를 제안하라.
@@ -45,14 +44,6 @@ JSON 만 출력 (기각은 이유 필수):
 {{"reviews": [{{"name": "<name>", "verdict": "ok|reject", "reason": "<기각 사유 또는 빈 문자열>"}}, ...]}}"""
 
 
-def _extract_json(text: str) -> dict:
-    stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    match = re.search(r"\{.*\}", stripped, re.DOTALL)
-    if not match:
-        raise ValueError(f"JSON 없음: {text[:100]!r}")
-    return json.loads(match.group())
-
-
 async def generate_candidates(
     router: LLMRouter, library: FactorLibrary, n: int = 5, asset_label: str = "크립토"
 ) -> list[FactorCandidate]:
@@ -79,7 +70,10 @@ async def generate_candidates(
         max_tokens=4096,
         json_mode=True,
     )
-    raw = _extract_json(resp.text).get("factors", [])
+    data = extract_json(resp.text)
+    if not isinstance(data, dict):
+        raise ValueError(f"JSON 없음: {resp.text[:100]!r}")
+    raw = data.get("factors", [])
     candidates = [
         FactorCandidate(
             name=str(f.get("name", f"factor_{i}"))[:60],
@@ -119,14 +113,17 @@ async def generate_candidates(
             max_tokens=2048,
             json_mode=True,
         )
+        judge_data = extract_json(judge_resp.text)
         try:
-            reviews = {
-                r["name"]: r for r in _extract_json(judge_resp.text).get("reviews", [])
-            }
+            reviews = (
+                {r["name"]: r for r in judge_data.get("reviews", [])}
+                if isinstance(judge_data, dict)
+                else {}
+            )
             for c in reviewable:
                 review = reviews.get(c.name)
                 if review and review.get("verdict") == "reject":
                     c.rejected = f"judge: {review.get('reason', '')[:150]}"
-        except (ValueError, KeyError, json.JSONDecodeError):
+        except (KeyError, TypeError):
             pass  # judge 실패는 비치명 — outer 게이트가 최종 판정
     return candidates

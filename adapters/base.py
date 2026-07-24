@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
 
@@ -81,8 +81,6 @@ class OrderResult:
 def observation_window(asof_day: date, lookback: int = OBSERVATION_LOOKBACK_DAYS) -> tuple[date, date]:
     """관측 허용 구간 [t-lookback, t-1] 을 (start, end) 로 반환. end 는 t-1 (포함)."""
 
-    from datetime import timedelta
-
     start = asof_day - timedelta(days=lookback)
     end = asof_day - timedelta(days=1)
     return start, end
@@ -116,14 +114,33 @@ def assert_no_leakage(obs: Observation) -> None:
 
 
 class MarketAdapter(ABC):
-    """시장 어댑터 계약. 구현체는 market 이름과 4개 메서드를 제공한다."""
+    """시장 어댑터 계약. 구현체는 market 이름 + _fetch_bars(시세) + 뉴스·포지션·주문을 제공한다."""
 
     #: "KR" | "US" | "CRYPTO" — 메모리 네임스페이스 키로도 쓰인다.
     market: str
 
-    @abstractmethod
+    async def _fetch_bars(
+        self, symbols: list[str], start: date, end: date
+    ) -> dict[str, list[Bar]]:
+        """[start, end] 구간 일봉 조회 — get_ohlcv/get_ohlcv_history 의 공통 소스.
+
+        실브로커 어댑터는 이것만 구현하면 두 조회 메서드가 기본 제공된다.
+        Mock/baseline 은 get_ohlcv 를 직접 재정의해도 된다.
+        """
+        raise NotImplementedError(f"{type(self).__name__}는 _fetch_bars 미구현")
+
     async def get_ohlcv(self, symbols: list[str], asof_day: date) -> dict[str, list[Bar]]:
         """[t-3, t-1] 구간의 일봉을 symbol별로 반환. same-day(t) 봉 포함 금지."""
+        start, end = observation_window(asof_day)
+        return await self._fetch_bars(symbols, start, end)
+
+    async def get_ohlcv_history(
+        self, symbols: list[str], asof_day: date, lookback_days: int = 90
+    ) -> dict[str, list[Bar]]:
+        """feature 계산용 장기 일봉 [t-lookback, t-1] (상한 t-1 은 동일 강제)."""
+        return await self._fetch_bars(
+            symbols, asof_day - timedelta(days=lookback_days), asof_day - timedelta(days=1)
+        )
 
     @abstractmethod
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
@@ -139,15 +156,6 @@ class MarketAdapter(ABC):
         기본 미구현 — 실브로커 어댑터만 구현하면 된다.
         """
         raise NotImplementedError(f"{type(self).__name__}는 get_equity 미구현")
-
-    async def get_ohlcv_history(
-        self, symbols: list[str], asof_day: date, lookback_days: int = 90
-    ) -> dict[str, list[Bar]]:
-        """feature 계산용 장기 일봉 [t-lookback, t-1] (상한 t-1 은 동일 강제).
-
-        기본 미구현 — 실브로커 어댑터만 구현하면 된다(Mock/baseline 은 불필요).
-        """
-        raise NotImplementedError(f"{type(self).__name__}는 get_ohlcv_history 미구현")
 
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         """현재 체결가(same-day, 실시간). **행동 전용** — 관측·feature·학습에 쓰지 말 것

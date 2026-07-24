@@ -16,6 +16,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from harness.jsonlog import iter_events
 from memory import MemoryStore
 
 MARKETS = ("CRYPTO", "US", "KR")
@@ -24,19 +25,7 @@ RECENT_EPISODIC = 5
 
 
 def _read_jsonl_decisions(log_dir: Path, market: str) -> list[dict]:
-    records = []
-    market_dir = log_dir / market
-    if not market_dir.exists():
-        return records
-    for path in sorted(market_dir.glob("*.jsonl"))[-7:]:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if rec.get("event") == "daily_step":
-                records.append(rec)
-    return records[-RECENT_DECISIONS:]
+    return list(iter_events(log_dir, market, "daily_step"))[-RECENT_DECISIONS:]
 
 
 def build_context(root: Path | str, markets: tuple[str, ...] = MARKETS) -> dict:

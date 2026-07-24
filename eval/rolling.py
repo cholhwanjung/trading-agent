@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from eval.meta import _load_history, combined_index_dynamic
+from eval.meta import combined_index_dynamic, load_arm_history
 from memory.admission import sign_test_p
 
 ROLLING_K = 20  # 거래일 기준 ~1개월
@@ -58,7 +58,7 @@ def rolling_delta(hist_a: list[dict], hist_b: list[dict], k: int = ROLLING_K) ->
 def rolling_report(state_dir: Path | str, market: str, k: int = ROLLING_K) -> dict:
     """시장 1곳의 승격 판정용 rolling 지표 — memory(llm−llm_base) · alpha(llm−bh)."""
     state_dir = Path(state_dir)
-    hists = {arm: _load_history(state_dir, market, arm) for arm in ("llm", "llm_base", "bh")}
+    hists = {arm: load_arm_history(state_dir, market, arm) for arm in ("llm", "llm_base", "bh")}
     return {
         "market": market,
         "memory": rolling_delta(hists["llm"], hists["llm_base"], k) if hists["llm"] else None,

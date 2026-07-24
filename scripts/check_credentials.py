@@ -8,16 +8,15 @@
 - 출력: key=value 구조화 로그.
 - 종료코드: 설정된 키 중 하나라도 인증 실패 시 1, 아니면 0.
 - 주의: KIS 토큰 발급은 분당 1회 제한 — 연속 실행 시 EGW00133류 오류는 재시도로 해석.
-- 의존성: ccxt(기존 의존성) + 표준 라이브러리만. 외부 추가 설치 불필요.
+- 의존성: ccxt·httpx (모두 기존 필수 의존성). 외부 추가 설치 불필요.
 """
 
 from __future__ import annotations
 
-import json
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
+
+import httpx
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -35,16 +34,11 @@ def report(check: str, status: str, detail: str = "") -> None:
     print(f"check={check} status={status}" + (f" detail={detail}" if detail else ""))
 
 
-def http_json(req: urllib.request.Request) -> tuple[int, dict]:
+def _json_or_empty(resp: httpx.Response) -> dict:
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            return resp.status, json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        try:
-            body = json.loads(e.read().decode())
-        except Exception:
-            body = {}
-        return e.code, body
+        return resp.json()
+    except ValueError:
+        return {}
 
 
 def check_binance_testnet(env: dict[str, str]) -> str:
@@ -71,19 +65,20 @@ def check_alpaca_paper(env: dict[str, str]) -> str:
     if not key or not secret:
         report("alpaca_paper", "skip", "키 미설정")
         return "skip"
-    req = urllib.request.Request(
-        f"{ALPACA_PAPER_BASE}/v2/account",
-        headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
-    )
     try:
-        status, body = http_json(req)
+        resp = httpx.get(
+            f"{ALPACA_PAPER_BASE}/v2/account",
+            headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+            timeout=TIMEOUT,
+        )
     except Exception as e:
         report("alpaca_paper", "fail", str(e)[:200])
         return "fail"
-    if status == 200 and body.get("status") == "ACTIVE":
+    body = _json_or_empty(resp)
+    if resp.status_code == 200 and body.get("status") == "ACTIVE":
         report("alpaca_paper", "ok", f"계좌 ACTIVE, equity={body.get('equity')}")
         return "ok"
-    report("alpaca_paper", "fail", f"http={status} body={str(body)[:150]}")
+    report("alpaca_paper", "fail", f"http={resp.status_code} body={str(body)[:150]}")
     return "fail"
 
 
@@ -97,26 +92,22 @@ def check_kis_paper(env: dict[str, str]) -> str:
     if not account or "-" not in account:
         report("kis_paper", "fail", "KIS_PAPER_ACCOUNT 형식 오류 (예: 12345678-01)")
         return "fail"
-    payload = json.dumps(
-        {"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret}
-    ).encode()
-    req = urllib.request.Request(
-        f"{KIS_PAPER_BASE}/oauth2/tokenP",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        status, body = http_json(req)
+        resp = httpx.post(
+            f"{KIS_PAPER_BASE}/oauth2/tokenP",
+            json={"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
+            timeout=TIMEOUT,
+        )
     except Exception as e:
         report("kis_paper", "fail", str(e)[:200])
         return "fail"
-    if status == 200 and body.get("access_token"):
+    body = _json_or_empty(resp)
+    if resp.status_code == 200 and body.get("access_token"):
         report("kis_paper", "ok", f"모의투자 토큰 발급 성공 (expires_in={body.get('expires_in')})")
         return "ok"
     # 분당 1회 제한(EGW00133)은 키 자체는 유효할 수 있음 — 안내만
     msg = body.get("error_description") or body.get("msg1") or str(body)[:150]
-    report("kis_paper", "fail", f"http={status} msg={msg}")
+    report("kis_paper", "fail", f"http={resp.status_code} msg={msg}")
     return "fail"
 
 

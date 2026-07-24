@@ -53,20 +53,6 @@ class AlpacaPaperAdapter(MarketAdapter):
 
         return await with_retry(call, exceptions=(httpx.HTTPError,))
 
-    async def get_ohlcv(self, symbols: list[str], asof_day: date) -> dict[str, list[Bar]]:
-        start, end = observation_window(asof_day)
-        return await self._fetch_bars(symbols, start, end)
-
-    async def get_ohlcv_history(
-        self, symbols: list[str], asof_day: date, lookback_days: int = 90
-    ) -> dict[str, list[Bar]]:
-        from datetime import timedelta
-
-        # 상한 t-1
-        return await self._fetch_bars(
-            symbols, asof_day - timedelta(days=lookback_days), asof_day - timedelta(days=1)
-        )
-
     async def _fetch_bars(
         self, symbols: list[str], start: date, end: date
     ) -> dict[str, list[Bar]]:

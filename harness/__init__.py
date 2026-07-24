@@ -2,7 +2,7 @@
 
 from harness.deadline import DEFAULT_DEADLINE_S, run_deadline_s, with_deadline
 from harness.env import load_env
-from harness.jsonlog import JsonlLogger
+from harness.jsonlog import JsonlLogger, iter_events
 from harness.loop import AllocationError, run_daily_step, validate_weights
 from harness.netgate import wait_for_network
 from harness.policy import CASH, BuyAndHold, Policy, RandomPolicy
@@ -14,6 +14,7 @@ __all__ = [
     "AllocationError",
     "BuyAndHold",
     "JsonlLogger",
+    "iter_events",
     "load_env",
     "MarketRun",
     "Policy",

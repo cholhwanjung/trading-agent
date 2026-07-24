@@ -23,7 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eval import load_meta_shadow  # noqa: E402
+from eval import load_arm_history, load_meta_shadow  # noqa: E402
 from harness import JsonlLogger  # noqa: E402
 from treasury import ALLOWLIST, TreasuryLimits, enforce_transfer, plan_transfers  # noqa: E402
 from treasury.manual import MANUAL_ROUTES  # noqa: E402
@@ -33,14 +33,6 @@ VIRTUAL = STATE_DIR / "virtual"
 MARKET_TO_BUCKET = {"CRYPTO": "UPBIT", "US": "KIS", "KR": "KIS"}
 # dry-run 판정 표시용 — 실 ALLOWLIST(집행 게이트)가 아니다. 활성화 시에만 guard.ALLOWLIST 하드코딩.
 PREVIEW_ALLOWLIST = frozenset({"UPBIT", "KIS"})
-
-
-def _last_equity(virtual_dir: Path, market: str, arm: str) -> float | None:
-    path = virtual_dir / f"{market}_{arm}.json"
-    if not path.exists():
-        return None
-    hist = json.loads(path.read_text(encoding="utf-8")).get("history") or []
-    return hist[-1]["equity"] if hist else None
 
 
 def _latest_market_weights(ledger_path: Path) -> dict[str, float] | None:
@@ -59,7 +51,8 @@ def _to_buckets(
     bucket_equity: dict[str, float] = {}
     bucket_target_raw: dict[str, float] = {}
     for market, bucket in MARKET_TO_BUCKET.items():
-        eq = _last_equity(virtual_dir, market, arm)
+        hist = load_arm_history(virtual_dir, market, arm)
+        eq = hist[-1]["equity"] if hist else None
         w = market_weights.get(market)
         if eq is None or w is None:
             continue

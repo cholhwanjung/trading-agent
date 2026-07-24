@@ -14,7 +14,6 @@ arm 의미:
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -22,28 +21,21 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 STATE = ROOT / "data" / "state" / "virtual"
 
+from eval.meta import load_arm_history, max_drawdown  # noqa: E402
+
 
 def load_arm(market: str, arm: str) -> dict | None:
-    path = STATE / f"{market}_{arm}.json"
-    if not path.exists():
-        return None
-    state = json.loads(path.read_text(encoding="utf-8"))
-    history = state.get("history") or []
+    history = load_arm_history(STATE, market, arm)
     if not history:
         return None
     equities = [h["equity"] for h in history]
-    peak = equities[0]
-    mdd = 0.0
-    for eq in equities:
-        peak = max(peak, eq)
-        mdd = max(mdd, 1 - eq / peak)
     return {
         "days": len(history),
         "first_day": history[0]["day"],
         "last_day": history[-1]["day"],
         "equity": equities[-1],
         "ret_pct": (equities[-1] / 100_000.0 - 1) * 100,
-        "mdd_pct": mdd * 100,
+        "mdd_pct": max_drawdown(equities) * 100,
         "total_cost": round(sum(h.get("cost", 0.0) for h in history), 2),
     }
 

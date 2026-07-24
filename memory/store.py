@@ -111,8 +111,10 @@ class MemoryStore:
         return entry_id
 
     def update(self, entry_id: str, **fields) -> None:
-        allowed = {"outcome", "status", "importance", "content"}
+        allowed = {"outcome", "status", "importance", "content", "data"}
         assert set(fields) <= allowed, f"수정 불가 필드: {set(fields) - allowed}"
+        if "data" in fields:
+            fields["data"] = json.dumps(fields["data"], ensure_ascii=False, default=str)
         sets = ", ".join(f"{k}=?" for k in fields)
         self._db.execute(
             f"UPDATE memories SET {sets} WHERE id=?", [*fields.values(), entry_id]

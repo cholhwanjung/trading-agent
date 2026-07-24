@@ -153,7 +153,8 @@ def review_probation(store: MemoryStore, market: str, asof_day: date) -> list[di
                 verdict = "active" if oos_mean * expected_sign > 0 else "retired"
             else:
                 # OOS 표본 부족 — 패턴 미출현은 무효 증거가 아니므로 유예 연장
-                store_data_extend(store, entry, asof_day)
+                extended = (asof_day + timedelta(days=PROBATION_DAYS)).isoformat()
+                store.update(entry.id, data={**entry.data, "probation_until": extended})
                 events.append({"event": "probation_extended", "id": entry.id, "oos_n": len(oos)})
                 continue
             store.update(entry.id, status=verdict)
@@ -162,16 +163,3 @@ def review_probation(store: MemoryStore, market: str, asof_day: date) -> list[di
                  "oos_n": len(oos), "oos_mean": round(oos_mean, 5)}
             )
     return events
-
-
-def store_data_extend(store: MemoryStore, entry: MemoryEntry, asof_day: date) -> None:
-    """probation_until 연장 — data 필드 갱신은 재삽입 대신 raw SQL 로 최소 변경."""
-    import json
-
-    data = dict(entry.data)
-    data["probation_until"] = (asof_day + timedelta(days=PROBATION_DAYS)).isoformat()
-    store._db.execute(
-        "UPDATE memories SET data=? WHERE id=?",
-        (json.dumps(data, ensure_ascii=False), entry.id),
-    )
-    store._db.commit()

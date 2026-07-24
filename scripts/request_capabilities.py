@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,8 +20,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from harness import load_env  # noqa: E402
-from llm import LLMRouter  # noqa: E402
+from harness import iter_events, load_env  # noqa: E402
+from llm import LLMRouter, extract_json  # noqa: E402
 
 REQUEST_DIR = ROOT / "data" / "requests"
 MARKETS = ("CRYPTO", "US", "KR")
@@ -54,24 +53,14 @@ def classify_policy(text: str) -> str:
 def _read_steps(log_dir: Path, market: str, limit: int = RECENT) -> list[dict]:
     """daily_step → asof_day 오름차순. n_news(top-level)·debate·influence 만 추린다."""
 
-    market_dir = log_dir / market
-    if not market_dir.exists():
-        return []
     rows: dict[str, dict] = {}
-    for path in sorted(market_dir.glob("*.jsonl")):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if rec.get("event") != "daily_step":
-                continue
-            day = str(rec.get("asof_day", ""))[:10]
-            if not day:
-                continue
-            d = rec.get("decision") or {}
-            rows[day] = {"day": day, "n_news": rec.get("n_news"),
-                         "debate": d.get("debate"), "influence": d.get("influence") or {}}
+    for rec in iter_events(log_dir, market, "daily_step"):
+        day = str(rec.get("asof_day", ""))[:10]
+        if not day:
+            continue
+        d = rec.get("decision") or {}
+        rows[day] = {"day": day, "n_news": rec.get("n_news"),
+                     "debate": d.get("debate"), "influence": d.get("influence") or {}}
     return [rows[k] for k in sorted(rows)][-limit:]
 
 
@@ -141,13 +130,7 @@ def enforce_policy(requests: list[dict]) -> list[dict]:
 def parse_requests(text: str) -> list[dict]:
     """LLM 응답에서 JSON 배열 추출(코드펜스 허용). 실패 시 []."""
 
-    match = re.search(r"\[.*\]", text.strip(), re.DOTALL)
-    if not match:
-        return []
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return []
+    data = extract_json(text)
     return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
 
 

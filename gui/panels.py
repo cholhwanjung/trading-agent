@@ -10,6 +10,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from eval.meta import load_arm_history
+from harness.jsonlog import iter_events
+
 
 def list_observation_days(obs_dir: Path, market: str) -> list[str]:
     """해당 시장의 관측 스냅샷 날짜(YYYY-MM-DD)를 최신순으로 반환."""
@@ -36,36 +39,26 @@ def read_recent_decisions(log_dir: Path, market: str, limit: int = 30) -> list[d
     (관측 스냅샷과 같은 축). 같은 asof 재실행은 최신 레코드로 덮어쓴다.
     """
 
-    market_dir = log_dir / market
-    if not market_dir.exists():
-        return []
     rows: dict[str, dict] = {}
-    for path in sorted(market_dir.glob("*.jsonl")):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if rec.get("event") != "daily_step":
-                continue
-            day = str(rec.get("asof_day", ""))[:10]
-            if not day:
-                continue
-            d = rec.get("decision") or {}
-            rows[day] = {
-                "day": day,
-                "policy": rec.get("policy"),
-                "weights": rec.get("weights") or {},
-                "accepted": rec.get("accepted"),
-                "features": d.get("features") or {},
-                "rationale": d.get("rationale"),
-                "debate": d.get("debate"),
-                "risk_violations": d.get("risk_violations") or [],
-                "weights_pre_risk": d.get("weights_pre_risk"),
-                "mdd": d.get("mdd"),
-                "cited_signal_ids": d.get("cited_signal_ids") or [],
-                "cited_memory_ids": d.get("cited_memory_ids") or [],
-            }
+    for rec in iter_events(log_dir, market, "daily_step"):
+        day = str(rec.get("asof_day", ""))[:10]
+        if not day:
+            continue
+        d = rec.get("decision") or {}
+        rows[day] = {
+            "day": day,
+            "policy": rec.get("policy"),
+            "weights": rec.get("weights") or {},
+            "accepted": rec.get("accepted"),
+            "features": d.get("features") or {},
+            "rationale": d.get("rationale"),
+            "debate": d.get("debate"),
+            "risk_violations": d.get("risk_violations") or [],
+            "weights_pre_risk": d.get("weights_pre_risk"),
+            "mdd": d.get("mdd"),
+            "cited_signal_ids": d.get("cited_signal_ids") or [],
+            "cited_memory_ids": d.get("cited_memory_ids") or [],
+        }
     return [rows[k] for k in sorted(rows)][-limit:]
 
 
@@ -99,14 +92,6 @@ def load_latest_requests(requests_dir: Path) -> dict | None:
 # ── 자본 배분 (파이 데이터) ──
 
 
-def _last_equity(virtual_dir: Path, market: str, arm: str) -> float | None:
-    path = virtual_dir / f"{market}_{arm}.json"
-    if not path.exists():
-        return None
-    history = json.loads(path.read_text(encoding="utf-8")).get("history") or []
-    return history[-1]["equity"] if history else None
-
-
 def load_market_allocation(virtual_dir: Path, meta_ledger: Path, arm: str = "llm") -> dict:
     """마켓별 자본 배분 — 현재(가상 equity 비중) vs 목표(meta_shadow 최신 제안).
 
@@ -118,7 +103,8 @@ def load_market_allocation(virtual_dir: Path, meta_ledger: Path, arm: str = "llm
     if virtual_dir.exists():
         for path in sorted(virtual_dir.glob(f"*{suffix}")):
             market = path.name[: -len(suffix)]
-            eq = _last_equity(virtual_dir, market, arm)
+            history = load_arm_history(virtual_dir, market, arm)
+            eq = history[-1]["equity"] if history else None
             if eq and eq > 0:
                 equities[market] = eq
     total = sum(equities.values())

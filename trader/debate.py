@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
+
+from llm import extract_json
 
 SIGNAL_CONFLICT_MIN = 0.5  # z-score 크기 — 이 이상의 양·음 신호 혼재 = 충돌
 LARGE_CHANGE_L1 = 0.4  # 직전 배분 대비 L1 (CASH 포함) — Risk turnover 캡(0.5) 직전 수준
@@ -67,14 +68,10 @@ def debate_trigger(
 
 def _parse_side(text: str) -> dict:
     """토론자 출력 파싱 — 실패해도 토론은 자문일 뿐이라 원문으로 폴백(비치명)."""
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        try:
-            data = json.loads(match.group())
-            return {"thesis": str(data.get("thesis", ""))[:300],
-                    "points": [str(p)[:200] for p in data.get("points") or []][:3]}
-        except json.JSONDecodeError:
-            pass
+    data = extract_json(text)
+    if isinstance(data, dict):
+        return {"thesis": str(data.get("thesis", ""))[:300],
+                "points": [str(p)[:200] for p in data.get("points") or []][:3]}
     return {"thesis": text.strip()[:300], "points": []}
 
 

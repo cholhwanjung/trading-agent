@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -141,6 +141,7 @@ class KISPaperAdapter(MarketAdapter):
     async def _fetch_bars(
         self, symbols: list[str], start: date, end: date
     ) -> dict[str, list[Bar]]:
+        # API 1회 응답 최대 100행 — 기본 lookback(90일)은 1회 조회로 충분
         out: dict[str, list[Bar]] = {}
         for symbol in symbols:
             data = await self._get(
@@ -157,18 +158,6 @@ class KISPaperAdapter(MarketAdapter):
             )
             out[symbol] = self._parse_daily(data.get("output2") or [], start, end)
         return out
-
-    async def get_ohlcv(self, symbols: list[str], asof_day: date) -> dict[str, list[Bar]]:
-        start, end = observation_window(asof_day)
-        return await self._fetch_bars(symbols, start, end)
-
-    async def get_ohlcv_history(
-        self, symbols: list[str], asof_day: date, lookback_days: int = 90
-    ) -> dict[str, list[Bar]]:
-        # 상한 t-1. API 1회 응답 최대 100행 — lookback 90 은 1회로 충분
-        return await self._fetch_bars(
-            symbols, asof_day - timedelta(days=lookback_days), asof_day - timedelta(days=1)
-        )
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
         from adapters.news_kr import fetch_kr_news
@@ -197,8 +186,9 @@ class KISPaperAdapter(MarketAdapter):
             },
         )
 
-    async def get_positions(self) -> list[Position]:
-        data = await self._balance()
+    @staticmethod
+    def _parse_positions(data: dict) -> list[Position]:
+        """잔고 응답(output1) → 보유 포지션 (0주 행 제외)."""
         return [
             Position(
                 symbol=row["pdno"],
@@ -209,6 +199,9 @@ class KISPaperAdapter(MarketAdapter):
             for row in data.get("output1") or []
             if float(row.get("hldg_qty") or 0) > 0
         ]
+
+    async def get_positions(self) -> list[Position]:
+        return self._parse_positions(await self._balance())
 
     async def get_equity(self) -> float:
         data = await self._balance()
@@ -257,9 +250,9 @@ class KISPaperAdapter(MarketAdapter):
     async def submit_allocation(self, weights: dict[str, float]) -> OrderResult:
         now = datetime.now(timezone.utc)
         try:
-            data = await self._balance()
+            data = await self._balance()  # 잔고 1회로 총평가·보유 동시 파싱
             total_eval = float((data.get("output2") or [{}])[0].get("tot_evlu_amt") or 0)
-            holdings = {p.symbol: p.market_value for p in await self.get_positions()}
+            holdings = {p.symbol: p.market_value for p in self._parse_positions(data)}
             # 예수금(dnca_tot_amt)은 T+2 정산 미반영으로 과대계상 — 총평가에서 역산
             cash = total_eval - sum(holdings.values())
             prices = {s: await self._current_price(s) for s in self.universe}

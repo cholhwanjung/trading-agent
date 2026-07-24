@@ -10,13 +10,13 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from interaction.context import allowed_ids, build_context
+from llm import extract_json
 from memory import MemoryStore
 
 SYSTEM_PROMPT = """\
@@ -55,14 +55,9 @@ class DiscussionSession:
 
 
 def _parse(text: str) -> ChatAnswer:
-    stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    match = re.search(r"\{.*\}", stripped, re.DOTALL)
-    if not match:
+    data = extract_json(text)
+    if not isinstance(data, dict):
         raise GroundingError(f"JSON 아님: {text[:100]!r}")
-    try:
-        data = json.loads(match.group())
-    except json.JSONDecodeError as e:
-        raise GroundingError(f"JSON 파싱 실패: {e}") from e
     return ChatAnswer(
         answer=str(data.get("answer", "")).strip(),
         cited_ids=[str(x) for x in data.get("cited_ids") or []],

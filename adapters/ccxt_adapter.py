@@ -66,26 +66,12 @@ class BinanceTestnetAdapter(MarketAdapter):
             out[symbol] = bars
         return out
 
-    async def get_ohlcv(self, symbols: list[str], asof_day: date) -> dict[str, list[Bar]]:
-        start, end = observation_window(asof_day)
-        return await self._fetch_bars(symbols, start, end)
-
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
         # 무료 RSS(CoinDesk·Cointelegraph) — 시장 전반 헤드라인, 심볼 필터 없음
         from adapters.news_rss import fetch_rss_news
 
         start, end = observation_window(asof_day)
         return await fetch_rss_news(start, end)
-
-    async def get_ohlcv_history(
-        self, symbols: list[str], asof_day: date, lookback_days: int = 90
-    ) -> dict[str, list[Bar]]:
-        from datetime import timedelta
-
-        # 상한 t-1
-        return await self._fetch_bars(
-            symbols, asof_day - timedelta(days=lookback_days), asof_day - timedelta(days=1)
-        )
 
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         """실시간 체결가 — 메인넷 공개 티커(당일, 행동 전용)."""
@@ -95,47 +81,38 @@ class BinanceTestnetAdapter(MarketAdapter):
             out[symbol] = float(ticker["last"])
         return out
 
-    async def get_equity(self) -> float:
+    async def _snapshot(self) -> tuple[float, dict[str, float], dict[str, float]]:
+        """(quote 현금, 보유수량, 현재가) — 잔고 1회 + 유니버스 전 종목 티커 조회."""
         balance = await with_retry(self.ex.fetch_balance)
-        equity = float(balance.get("total", {}).get(self.quote) or 0)
+        cash = float(balance.get("total", {}).get(self.quote) or 0)
+        qty: dict[str, float] = {}
+        prices: dict[str, float] = {}
         for symbol in self.universe:
             base = symbol.split("/")[0]
-            qty = float(balance.get("total", {}).get(base) or 0)
-            if qty > 0:
-                ticker = await with_retry(lambda s=symbol: self.data.fetch_ticker(s))
-                equity += qty * float(ticker["last"])
-        return equity
+            held = float(balance.get("total", {}).get(base) or 0)
+            if held > 0:
+                qty[symbol] = held
+            ticker = await with_retry(lambda s=symbol: self.data.fetch_ticker(s))
+            prices[symbol] = float(ticker["last"])
+        return cash, qty, prices
+
+    async def get_equity(self) -> float:
+        cash, qty, prices = await self._snapshot()
+        return cash + sum(q * prices[s] for s, q in qty.items())
 
     async def get_positions(self) -> list[Position]:
-        balance = await with_retry(self.ex.fetch_balance)
-        positions = []
-        for symbol in self.universe:
-            base = symbol.split("/")[0]
-            qty = float(balance.get("total", {}).get(base) or 0)
-            if qty <= 0:
-                continue
-            ticker = await with_retry(lambda s=symbol: self.data.fetch_ticker(s))
-            price = float(ticker["last"])
-            # spot 잔고에는 취득단가가 없다 — avg_price=0.0 은 "미상" 표기
-            positions.append(
-                Position(symbol=symbol, quantity=qty, avg_price=0.0, market_value=qty * price)
-            )
-        return positions
+        _, qty, prices = await self._snapshot()
+        # spot 잔고에는 취득단가가 없다 — avg_price=0.0 은 "미상" 표기
+        return [
+            Position(symbol=s, quantity=q, avg_price=0.0, market_value=q * prices[s])
+            for s, q in qty.items()
+        ]
 
     async def submit_allocation(self, weights: dict[str, float]) -> OrderResult:
         now = datetime.now(timezone.utc)
         try:
-            balance = await with_retry(self.ex.fetch_balance)
-            cash = float(balance.get("total", {}).get(self.quote) or 0)
-            holdings: dict[str, float] = {}
-            prices: dict[str, float] = {}
-            for symbol in self.universe:
-                base = symbol.split("/")[0]
-                qty = float(balance.get("total", {}).get(base) or 0)
-                ticker = await with_retry(lambda s=symbol: self.data.fetch_ticker(s))
-                prices[symbol] = float(ticker["last"])
-                if qty > 0:
-                    holdings[symbol] = qty * prices[symbol]
+            cash, qty, prices = await self._snapshot()
+            holdings = {s: q * prices[s] for s, q in qty.items()}
 
             intents = compute_order_deltas(
                 weights, holdings, cash, prices, min_notional=self.min_notional

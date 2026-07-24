@@ -22,11 +22,26 @@ if TYPE_CHECKING:
 MARKET_CAPITAL_WEIGHTS = {"CRYPTO": 1 / 3, "US": 1 / 3, "KR": 1 / 3}  # 초기 고정 비율
 
 
-def _load_history(state_dir: Path, market: str, arm: str) -> list[dict]:
+def load_arm_history(state_dir: Path, market: str, arm: str) -> list[dict]:
+    """가상 arm 상태 파일({market}_{arm}.json)의 equity history. 없으면 [].
+
+    가상 equity 를 읽는 모든 소비자(rolling·GUI·리포트·treasury 스텝)의 단일 리더.
+    """
     path = state_dir / f"{market}_{arm}.json"
     if not path.exists():
         return []
     return json.loads(path.read_text(encoding="utf-8")).get("history") or []
+
+
+def max_drawdown(values: list[float]) -> float:
+    """시계열의 최대 낙폭 (0~1). 빈 리스트는 0."""
+    if not values:
+        return 0.0
+    peak, mdd = values[0], 0.0
+    for v in values:
+        peak = max(peak, v)
+        mdd = max(mdd, 1 - v / peak)
+    return mdd
 
 
 def combined_index(
@@ -38,7 +53,7 @@ def combined_index(
     state_dir = Path(state_dir)
     weights = weights or MARKET_CAPITAL_WEIGHTS
     histories = {
-        m: h for m in weights if (h := _load_history(state_dir, m, arm))
+        m: h for m in weights if (h := load_arm_history(state_dir, m, arm))
     }
     if not histories:
         return None
@@ -59,10 +74,7 @@ def combined_index(
             index += weights[market] / total_w * ratio
         curve.append({"day": day, "index": round(index, 6)})
 
-    peak, mdd = curve[0]["index"], 0.0
-    for point in curve:
-        peak = max(peak, point["index"])
-        mdd = max(mdd, 1 - point["index"] / peak)
+    mdd = max_drawdown([p["index"] for p in curve])
     return {
         "arm": arm,
         "days": len(curve),
@@ -106,8 +118,8 @@ def combined_index_dynamic(
     state_dir = Path(state_dir)
     markets = sorted({m for w in weights_by_day.values() for m in w})
     if not markets:  # 균등 baseline — 시장은 상태파일에서 유추
-        markets = [m for m in MARKET_CAPITAL_WEIGHTS if _load_history(state_dir, m, arm)]
-    histories = {m: h for m in markets if (h := _load_history(state_dir, m, arm))}
+        markets = [m for m in MARKET_CAPITAL_WEIGHTS if load_arm_history(state_dir, m, arm)]
+    histories = {m: h for m in markets if (h := load_arm_history(state_dir, m, arm))}
     if not histories:
         return None
 
@@ -132,10 +144,7 @@ def combined_index_dynamic(
         index *= 1.0 + port_ret
         curve.append({"day": day, "index": round(index, 6)})
 
-    peak, mdd = curve[0]["index"], 0.0
-    for point in curve:
-        peak = max(peak, point["index"])
-        mdd = max(mdd, 1 - point["index"] / peak)
+    mdd = max_drawdown([p["index"] for p in curve])
     return {
         "arm": arm,
         "days": len(curve),

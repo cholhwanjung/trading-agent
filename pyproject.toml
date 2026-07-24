@@ -34,5 +34,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = [
     "adapters", "alpha_lab", "eval", "harness", "interaction",
-    "llm", "memory", "reflection", "risk", "trader",
+    "llm", "memory", "reflection", "regime", "risk", "trader",
+    "treasury", "watcher",
 ]

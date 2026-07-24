@@ -6,8 +6,28 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+def iter_events(root: Path | str, market: str, event: str) -> Iterator[dict]:
+    """{root}/{market}/*.jsonl 을 날짜 파일 순으로 읽어 해당 event 레코드만 낸다.
+
+    로그를 읽는 모든 소비자(GUI·context·갭 신호)의 단일 리더. 깨진 줄은
+    건너뛴다(append 전용 로그 — 부분 기록 허용). 디렉토리 없으면 빈 이터레이터.
+    """
+    market_dir = Path(root) / market
+    if not market_dir.exists():
+        return
+    for path in sorted(market_dir.glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("event") == event:
+                yield record
 
 
 class JsonlLogger:

@@ -50,18 +50,18 @@ def review_retention(store: MemoryStore, market: str, asof_day: date) -> list[di
                 )
 
         # 2. 중복성 — 임베딩 근사 중복 쌍에서 신뢰도 낮은 쪽 퇴출
-        survivors = [e for e in store.query(market, store=store_name, status="active")]
+        survivors = store.query(market, store=store_name, status="active")
+        retired_ids: set[str] = set()  # 이 심사에서 퇴출된 엔트리 — 재비교 제외
         for i, a in enumerate(survivors):
             for b in survivors[i + 1 :]:
                 if not a.embedding or not b.embedding:
                     continue
-                if a.status == "retired" or b.status == "retired":
+                if a.id in retired_ids or b.id in retired_ids:
                     continue
                 if cosine(a.embedding, b.embedding) >= REDUNDANCY_COSINE:
                     loser = a if lesson_confidence(a) <= lesson_confidence(b) else b
                     store.update(loser.id, status="retired")
-                    # 로컬 객체 상태는 불변이므로 재조회 없이 표기만 갱신
-                    object.__setattr__(loser, "status", "retired")
+                    retired_ids.add(loser.id)
                     events.append(
                         {"event": "retention_redundant", "id": loser.id,
                          "kept": (b if loser is a else a).id}

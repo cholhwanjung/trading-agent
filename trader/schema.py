@@ -6,12 +6,11 @@
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass, field
 
 from adapters.allocation import CASH
 from harness.loop import AllocationError, validate_weights
+from llm import extract_json
 
 
 class DecisionParseError(ValueError):
@@ -28,28 +27,15 @@ class TradeDecision:
     cited_signal_ids: list[str] = field(default_factory=list)
 
 
-def _extract_json(text: str) -> dict:
-    """코드펜스/전후 산문을 걷어내고 첫 JSON 객체를 파싱."""
-    stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", stripped, re.DOTALL)
-        if not match:
-            raise DecisionParseError(f"JSON 객체 없음: {text[:120]!r}")
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError as e:
-            raise DecisionParseError(f"JSON 파싱 실패: {e}") from e
-
-
 def parse_decision(text: str, universe: list[str]) -> TradeDecision:
     """LLM 텍스트 → 검증된 TradeDecision.
 
     검증: 필수 필드 존재 · 배분 대상 ⊆ universe ∪ {CASH} · ∑=1 · long-only.
     """
 
-    data = _extract_json(text)
+    data = extract_json(text)
+    if not isinstance(data, dict):
+        raise DecisionParseError(f"JSON 객체 없음: {text[:120]!r}")
 
     allocation = data.get("allocation")
     if not isinstance(allocation, dict) or not allocation:

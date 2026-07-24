@@ -23,7 +23,7 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eval.meta import combined_index  # noqa: E402
+from eval.meta import combined_index, load_arm_history  # noqa: E402
 from eval.rolling import ROLLING_K, rolling_report  # noqa: E402
 from gui.panels import (  # noqa: E402
     decision_for_day,
@@ -55,10 +55,7 @@ def load_equity_frame(market: str) -> pd.DataFrame | None:
     """가상 arm equity 곡선 → wide DataFrame (index=day, columns=arm)."""
     series = {}
     for arm in ARMS:
-        path = VIRTUAL / f"{market}_{arm}.json"
-        if not path.exists():
-            continue
-        history = json.loads(path.read_text(encoding="utf-8")).get("history") or []
+        history = load_arm_history(VIRTUAL, market, arm)
         if history:
             series[arm] = pd.Series(
                 [h["equity"] for h in history], index=[h["day"] for h in history]
