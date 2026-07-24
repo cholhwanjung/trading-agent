@@ -24,12 +24,14 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eval.meta import combined_index, load_arm_history  # noqa: E402
+from eval.meta import combined_index, load_arm_history, load_meta_shadow  # noqa: E402
 from eval.perf import drawdown_series, perf_stats  # noqa: E402
-from eval.rolling import ROLLING_K, rolling_report  # noqa: E402
+from eval.rolling import ROLLING_K, meta_shadow_delta, rolling_report  # noqa: E402
 from gui.panels import (  # noqa: E402
     decision_for_day,
+    exposure_turnover,
     kill_switch_active,
+    latest_meta_event,
     list_observation_days,
     load_intramarket_weights,
     load_latest_requests,
@@ -40,6 +42,8 @@ from gui.panels import (  # noqa: E402
     load_regime,
     market_health,
     read_recent_decisions,
+    scenario_outcomes,
+    treasury_dryrun_report,
     usage_cost_report,
     veto_rows,
 )
@@ -219,6 +223,37 @@ with tab_dash:
             st.caption("드로다운 (언더워터) — llm vs bh")
             st.line_chart(pd.DataFrame(dd_frame))
 
+    st.subheader("노출·회전율 & 기간 수익률")
+    st.caption("결정 배분에서 파생한 현금/투자 비중·turnover(리스크 캡 0.5 대비)와 arm 수익률 리샘플.")
+    for market in MARKETS:
+        decisions = read_recent_decisions(LOG_DIR, market)
+        et = exposure_turnover(decisions)
+        history = load_arm_history(VIRTUAL, market, "llm")
+        if not et and not history:
+            continue
+        st.markdown(f"**{market}**")
+        ce, cr = st.columns(2)
+        with ce:
+            if et:
+                et_df = pd.DataFrame(et).set_index("day")
+                st.caption("현금 vs 투자 비중")
+                st.area_chart(et_df[["invested", "cash"]])
+                if et_df["turnover"].notna().any():
+                    st.caption("일일 turnover (0.5·Σ|Δw|)")
+                    st.bar_chart(et_df["turnover"])
+        with cr:
+            if history:
+                eq = pd.Series(
+                    [h["equity"] for h in history],
+                    index=pd.to_datetime([h["day"] for h in history]),
+                )
+                for label, rule in (("주간", "W"), ("월간", "ME")):
+                    per = eq.resample(rule).last().pct_change().dropna()
+                    if not per.empty:
+                        st.caption(f"{label} 수익률 (llm)")
+                        st.bar_chart(per)
+                        break  # 표본이 짧으면 주간만, 쌓이면 주간 우선
+
     st.subheader("최근 결정 (근거·인용)")
     rows = [
         {
@@ -307,6 +342,12 @@ with tab_obs:
                 if decision["debate"]:
                     with st.expander(f"🗣 debate ({decision['debate'].get('trigger')})"):
                         st.json(decision["debate"])
+                if decision.get("scenario_expected") or decision.get("scenario_invalidation"):
+                    st.caption("시나리오 (사후 검증 기준)")
+                    if decision.get("scenario_expected"):
+                        st.markdown(f"- **예상**: {decision['scenario_expected']}")
+                    if decision.get("scenario_invalidation"):
+                        st.markdown(f"- **무효화 조건**: {decision['scenario_invalidation']}")
 
         st.divider()
         st.subheader("배분 변화 타임라인")
@@ -323,6 +364,22 @@ with tab_obs:
             st.dataframe(pd.DataFrame(vr), use_container_width=True, hide_index=True)
         else:
             st.caption("최근 창에 risk 위반 없음")
+
+        st.subheader("시나리오 vs 실제 (익일 수익률)")
+        st.caption(
+            "결정 시점 예상·무효화 조건과 익일 arm 실현 수익률을 나란히 — 무효화는 자연어라 "
+            "자동 판정하지 않고, 사람이 조건 충족 여부를 읽는다."
+        )
+        so = scenario_outcomes(decisions, load_arm_history(VIRTUAL, obs_market, "llm"))
+        if so:
+            so_df = pd.DataFrame([
+                {"day": r["day"], "예상": r["expected"], "무효화 조건": r["invalidation"],
+                 "익일 수익률": None if r["next_day_return"] is None else round(r["next_day_return"] * 100, 3)}
+                for r in so
+            ])
+            st.dataframe(so_df, use_container_width=True, hide_index=True)
+        else:
+            st.caption("이 시장에 시나리오 기록이 아직 없음.")
 
 
 # ── 챗 (게이트웨이 프록시) ──
@@ -454,6 +511,55 @@ with tab_ops:
                 p = f"p={r['p_value']:.3f}" if r["p_value"] is not None else "p=n/a"
                 line += f"{name}: 승률 {r['win_rate']:.0%} ({p}) · "
         st.markdown(line.rstrip(" ·"))
+
+    st.subheader("메타 shadow — 동적 배분 vs 고정균등 (집행 전 검증)")
+    st.caption(
+        "시장 간 동적 틸트(regime 기반)가 고정 1/3 을 이기는지 rolling delta. shadow — "
+        "실자본 재배분 없음. 집행 승격은 델타>0·유의 + 실계좌 전환 후."
+    )
+    wbd = load_meta_shadow(STATE / "meta_shadow.json")
+    if not wbd:
+        st.caption("메타 제안 없음 — paper_step 이 쌓으면 표시.")
+    else:
+        line = f"제안 {len(wbd)}일 — "
+        for arm in ("llm", "bh"):
+            r = meta_shadow_delta(VIRTUAL, arm, wbd)
+            if r is None:
+                line += f"{arm}: 데이터 {ROLLING_K + 1}일 미만 · "
+            else:
+                p = f"p={r['p_value']:.3f}" if r["p_value"] is not None else "p=n/a"
+                line += f"{arm}: 승률 {r['win_rate']:.0%} ({p}) · "
+        st.markdown(line.rstrip(" ·"))
+        meta_evt = latest_meta_event(LOG_DIR)
+        if meta_evt:
+            st.caption(
+                f"최신 제안 ({meta_evt.get('day')}): `{meta_evt.get('weights')}` · "
+                f"편차 L1 {meta_evt.get('deviation_l1')} · 근거 {meta_evt.get('cited')}"
+            )
+
+    st.subheader("Treasury 이체 dry-run (집행 전 · 결정론 가드)")
+    st.caption("메타 제안 → 버킷 이체 계획을 dry-run 으로만 로깅(실집행·잔고변경 없음).")
+    tr = treasury_dryrun_report(LOG_DIR)
+    if tr is None:
+        st.caption("Treasury dry-run 로그 없음 — run_treasury_step 이 쌓으면 표시.")
+    else:
+        plan = tr["plan"]
+        pc = st.columns(3)
+        pc[0].metric("버킷 목표", str(plan.get("bucket_target")))
+        pc[1].metric("현재 split", str(plan.get("current_split")))
+        pc[2].metric("이체 의도 수", plan.get("n_intents", 0))
+        st.caption(f"한도: {plan.get('limits')}")
+        if tr["intents"]:
+            st.dataframe(
+                pd.DataFrame([
+                    {"from": i.get("from"), "to": i.get("to"), "금액": i.get("amount"),
+                     "사유": i.get("reason"), "허용": i.get("would_allow"),
+                     "위반": ", ".join(i.get("violations") or []),
+                     "자동레그": i.get("auto_leg"), "집행": i.get("executed")}
+                    for i in tr["intents"]
+                ]),
+                use_container_width=True, hide_index=True,
+            )
 
     st.subheader("메모리 (교훈 상태)")
     context = load_context()

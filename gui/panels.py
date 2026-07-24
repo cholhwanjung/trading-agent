@@ -59,8 +59,52 @@ def read_recent_decisions(log_dir: Path, market: str, limit: int = 30) -> list[d
             "mdd": d.get("mdd"),
             "cited_signal_ids": d.get("cited_signal_ids") or [],
             "cited_memory_ids": d.get("cited_memory_ids") or [],
+            "scenario_expected": d.get("scenario_expected"),
+            "scenario_invalidation": d.get("scenario_invalidation"),
         }
     return [rows[k] for k in sorted(rows)][-limit:]
+
+
+def exposure_turnover(decisions: list[dict]) -> list[dict]:
+    """정규화된 결정 행 → 일별 현금비중·투자비중·turnover(직전 대비 L1/2). 첫날 turnover=None."""
+    rows: list[dict] = []
+    prev: dict[str, float] | None = None
+    for d in decisions:
+        w = d.get("weights") or {}
+        cash = float(w.get("CASH", 0.0))
+        turnover = None
+        if prev is not None:
+            turnover = 0.5 * sum(
+                abs(float(w.get(k, 0.0)) - float(prev.get(k, 0.0))) for k in set(w) | set(prev)
+            )
+        rows.append({"day": d["day"], "cash": cash, "invested": 1.0 - cash, "turnover": turnover})
+        prev = w
+    return rows
+
+
+def scenario_outcomes(decisions: list[dict], equity: list[dict]) -> list[dict]:
+    """결정의 시나리오(예상·무효화 조건)를 익일 실현 수익률과 나란히.
+
+    무효화 조건은 자연어라 자동 판정하지 않는다 — 익일 arm 수익률을 함께 보여
+    사람이 무효화 여부를 읽게 한다(정직한 표시, 자동 verdict 없음).
+    """
+    eq_by_day = {p["day"]: p["equity"] for p in equity}
+    days = sorted(eq_by_day)
+    idx = {d: i for i, d in enumerate(days)}
+    rows: list[dict] = []
+    for d in decisions:
+        exp, inv = d.get("scenario_expected"), d.get("scenario_invalidation")
+        if not (exp or inv):
+            continue
+        day = d["day"]
+        nxt = None
+        i = idx.get(day)
+        if i is not None and i + 1 < len(days):
+            e0, e1 = eq_by_day[days[i]], eq_by_day[days[i + 1]]
+            if e0:
+                nxt = e1 / e0 - 1.0
+        rows.append({"day": day, "expected": exp, "invalidation": inv, "next_day_return": nxt})
+    return rows
 
 
 def decision_for_day(rows: list[dict], day: str) -> dict | None:
@@ -117,6 +161,26 @@ def market_health(log_dir: Path, market: str, today: date) -> dict:
         "mdd": last.get("mdd") if last else None,
         "violation_days": [d["day"] for d in decisions if d["risk_violations"]][-3:],
     }
+
+
+def latest_meta_event(log_dir: Path) -> dict | None:
+    """META 네임스페이스 최신 meta_shadow 이벤트(제안 가중치·틸트 근거). 없으면 None."""
+    events = list(iter_events(log_dir, "META", "meta_shadow"))
+    return events[-1] if events else None
+
+
+def treasury_dryrun_report(log_dir: Path) -> dict | None:
+    """TREASURY 최신 dry-run plan + 같은 실행의 이체 의도들. 없으면 None."""
+    plans = list(iter_events(log_dir, "TREASURY", "treasury_dryrun_plan"))
+    if not plans:
+        return None
+    last = plans[-1]
+    day = str(last.get("ts", ""))[:10]
+    intents = [
+        i for i in iter_events(log_dir, "TREASURY", "treasury_dryrun_intent")
+        if str(i.get("ts", ""))[:10] == day
+    ]
+    return {"plan": last, "intents": intents}
 
 
 def load_latest_requests(requests_dir: Path) -> dict | None:
