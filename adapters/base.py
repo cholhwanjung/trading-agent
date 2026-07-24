@@ -14,6 +14,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from typing import Protocol, runtime_checkable
 
 
 # 관측 윈도우: 오늘(t) 기준 [t-3, t-1]. same-day(t) 데이터는 절대 포함 금지.
@@ -186,3 +187,30 @@ class MarketAdapter(ABC):
             bars=bars,
             news=news,
         )
+
+
+@runtime_checkable
+class TreasuryCapable(Protocol):
+    """버킷 간 자본 이체의 '자동 레그' 계약 — 가용 잔고 조회 + 등록 계좌로 출금.
+
+    API 로 집행 가능한 레그(Upbit KRW 출금)만 구현한다. 출금 목적지는 거래소가 KYC 로
+    고정한 본인 명의 계좌 — 자유 주소가 아니므로 이체 목적지 조작이 구조적으로 불가능하다.
+    실집행은 이체 가드(allowlist·상한·쿨다운) 통과분만; API 부재 레그(증권·은행 입금)는
+    수동 액추에이션(별도)으로 처리한다.
+
+    코인 출금은 의도적으로 제외 — 자본 이동은 온-거래소 KRW 환전 후 KRW 출금으로만 하고
+    코인을 외부 지갑으로 반출하지 않는다(반출 공격면 회피).
+    """
+
+    venue: str
+
+    async def withdrawable_krw(self) -> float:
+        """지금 출금 가능한 KRW 가용 잔고(잠금·미체결 제외). 이체 가드 잔고 대조 입력."""
+        ...
+
+    async def withdraw_krw(self, amount: float) -> dict:
+        """등록 계좌로 KRW 출금 집행 — **실자금 이동**. 이체 가드 통과 후에만 호출.
+
+        반환은 거래 레코드({uuid, state, amount})로 이후 잔고 대조(reconcile)에 쓴다.
+        """
+        ...

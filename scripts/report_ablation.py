@@ -103,6 +103,25 @@ def main() -> int:
             )
         if meta["llm"] and meta["bh"]:
             print(f"meta_alpha_vs_bh_pct={meta['llm']['ret_pct'] - meta['bh']['ret_pct']:+.4f}")
+
+    # 동적 메타 배분 vs 고정 균등 — shadow 검증. 같은 리밸런싱법으로 배분 스킬만 분리.
+    from eval.meta import load_meta_shadow
+    from eval.rolling import ROLLING_K, meta_shadow_delta
+
+    weights_by_day = load_meta_shadow(ROOT / "data" / "state" / "meta_shadow.json")
+    if weights_by_day:
+        print(f"\n=== META SHADOW (동적 vs 고정균등 리밸런싱, 제안 {len(weights_by_day)}일) ===")
+        for arm in ("llm", "bh"):
+            r = meta_shadow_delta(STATE, arm, weights_by_day)
+            if r is None:
+                print(f"arm={arm} status=insufficient need_days>={ROLLING_K + 1}")
+                continue
+            p = f"{r['p_value']:.4f}" if r["p_value"] is not None else f"n/a(청크 {r['n_chunks']}<5)"
+            print(
+                f"arm={arm} k={r['k']} win_rate={r['win_rate']:.2f}"
+                f" mean={r['mean_delta_pct']:+.3f}% latest={r['latest_delta_pct']:+.3f}%"
+                f" sign_p={p}  # dynamic−equal 비중첩 {r['n_chunks']}청크 양성 {r['chunks_positive']}"
+            )
     print(
         "\nnote=단기 표본은 통계력 없음 — 보조 지표(메모리 승격/퇴출률·인용 기여)와 함께 볼 것"
     )

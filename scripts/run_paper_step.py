@@ -24,7 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eval import VirtualPortfolio  # noqa: E402
+from eval import VirtualPortfolio, record_meta_shadow  # noqa: E402
 from harness import (  # noqa: E402
     BuyAndHold,
     JsonlLogger,
@@ -47,7 +47,7 @@ from memory import (  # noqa: E402
     review_probation,
     review_retention,
 )
-from regime import INDEX_PROXY, compute_regime  # noqa: E402
+from regime import INDEX_PROXY, MarketSignal, compute_regime, propose_meta_weights  # noqa: E402
 from risk import RiskEngine, RiskGuardedPolicy, RiskLimits  # noqa: E402
 from trader import LLMTrader  # noqa: E402
 
@@ -297,6 +297,7 @@ async def main() -> int:
 
         # 가상 병행 운용 + 메모리 파이프라인 (실스텝 성공 여부와 무관하게 baseline 은 쌓인다)
         today = datetime.now(timezone.utc).date()
+        meta_signals: list[MarketSignal] = []
         for market, (adapter, symbols) in adapters.items():
             guard = guards[market]
             llm_weights = None
@@ -317,6 +318,11 @@ async def main() -> int:
                 })
                 print(f"market={market} regime={regime.state} dd={regime.distribution_days}"
                       f" drawdown={regime.drawdown}")
+            # 메타 배분 입력 — 시장은 항상 포함, regime 없으면 anchor 유지(None → score 0).
+            meta_signals.append(MarketSignal(
+                market, regime.state if regime else None,
+                drawdown=regime.drawdown if regime else 0.0,
+            ))
 
             # ── 메모리: 결과 소급 기입 → 오늘 결정 기록 → admission → probation ──
             try:
@@ -355,6 +361,18 @@ async def main() -> int:
             except Exception as e:  # 메모리 실패가 매매 루프를 죽이면 안 된다
                 logger.log(market, "memory_error", {"error_type": type(e).__name__, "error": str(e)[:200]})
         memory.close()
+
+        # 시장 간 shadow 메타 배분 — 제안·로깅·누적만. 집행/Risk 미개입, 검증 후 승격.
+        if meta_signals:
+            proposal = propose_meta_weights(meta_signals, asof_day=today)
+            if record_meta_shadow(STATE_DIR / "meta_shadow.json", proposal):
+                logger.log("META", "meta_shadow", {
+                    "day": today.isoformat(), "weights": proposal.weights,
+                    "deviation_l1": proposal.deviation_l1, "cited": proposal.cited_signals,
+                    "note": proposal.note,
+                })
+                print(f"market=META meta_shadow weights={proposal.weights}"
+                      f" dev={proposal.deviation_l1} note={proposal.note}")
 
         # 일일 브리핑 생성 (결정론 — 게이트웨이 /briefing 이 서빙)
         try:

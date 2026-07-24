@@ -14,6 +14,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from regime.meta import MetaProposal
 
 MARKET_CAPITAL_WEIGHTS = {"CRYPTO": 1 / 3, "US": 1 / 3, "KR": 1 / 3}  # 초기 고정 비율
 
@@ -143,3 +147,39 @@ def combined_index_dynamic(
         "mdd_pct": mdd * 100,
         "curve": curve,
     }
+
+
+# ── 메타 shadow 배분 로그 ([ADR-025] shadow 배선) ─────────────────────────────
+# propose_meta_weights 의 일별 제안을 누적 — combined_index_dynamic/meta_shadow_delta
+# 의 weights_by_day 입력원. 집행 없이 로깅만(하드룰 1: 검증 전 개입 금지).
+
+
+def load_meta_shadow(ledger_path: Path | str) -> dict[str, dict[str, float]]:
+    """메타 shadow 로그 → weights_by_day({day_iso: {market: w}}). 없으면 {}."""
+    path = Path(ledger_path)
+    if not path.exists():
+        return {}
+    history = json.loads(path.read_text(encoding="utf-8")).get("history") or []
+    return {h["day"]: h["weights"] for h in history if h.get("day") and h.get("weights")}
+
+
+def record_meta_shadow(ledger_path: Path | str, proposal: MetaProposal) -> bool:
+    """메타 제안을 날짜별로 누적(같은 날 재실행은 갱신, 멱등). asof_day 없으면 skip → False."""
+    if proposal.asof_day is None:
+        return False
+    path = Path(ledger_path)
+    day = proposal.asof_day.isoformat()
+    state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"history": []}
+    history = [h for h in state.get("history", []) if h.get("day") != day]
+    history.append({
+        "day": day,
+        "weights": proposal.weights,
+        "anchor": proposal.anchor,
+        "deviation_l1": proposal.deviation_l1,
+        "cited": proposal.cited_signals,
+        "note": proposal.note,
+    })
+    history.sort(key=lambda h: h["day"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"history": history}, ensure_ascii=False, indent=1), encoding="utf-8")
+    return True

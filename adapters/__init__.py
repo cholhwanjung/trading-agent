@@ -8,6 +8,7 @@ from adapters.base import (
     Observation,
     OrderResult,
     Position,
+    TreasuryCapable,
     assert_no_leakage,
     observation_window,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "Observation",
     "OrderResult",
     "Position",
+    "TreasuryCapable",
     "assert_no_leakage",
     "observation_window",
 ]
