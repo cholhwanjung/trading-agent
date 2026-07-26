@@ -38,13 +38,12 @@ from gui.panels import (  # noqa: E402
     load_launchd_jobs,
     load_market_allocation,
     load_observation,
-    load_pricing,
     load_regime,
     market_health,
     read_recent_decisions,
     scenario_outcomes,
     treasury_dryrun_report,
-    usage_cost_report,
+    usage_report,
     veto_rows,
 )
 from harness.env import load_env  # noqa: E402
@@ -466,32 +465,24 @@ with tab_ops:
     launchd_panel()
     st.divider()
 
-    st.subheader("LLM 비용·토큰 (라우터 usage 로그)")
+    st.subheader("LLM 토큰 사용량 (라우터 usage 로그)")
     st.caption(
         "모든 프로바이더 호출을 라우터 초크포인트에서 기록 — 결정·debate·챗·alpha·"
-        "reflection·self-improve·capability 전부 포함. 토큰은 사실로 저장하고 비용(USD)은 "
-        "단가표로 파생(임베딩 제외). 단가는 `data/state/llm_pricing.json` 으로 갱신."
+        "reflection·self-improve·capability 전부 포함. 토큰(사실)만 집계하고 비용(USD)은 "
+        "추정하지 않는다 — 실제 청구는 각 프로바이더 콘솔에서 확인. 임베딩 호출은 기록되지 않음."
     )
-    usage = usage_cost_report(LOG_DIR, load_pricing(STATE))
+    usage = usage_report(LOG_DIR)
     if usage["total_in"] or usage["total_out"]:
-        uc = st.columns(3)
+        uc = st.columns(2)
         uc[0].metric("누적 입력 토큰", f"{usage['total_in']:,}")
         uc[1].metric("누적 출력 토큰", f"{usage['total_out']:,}")
-        uc[2].metric("누적 비용 (USD, 추정)", f"${usage['total_cost']:,.2f}")
         if usage["daily"]:
             df = pd.DataFrame(usage["daily"]).set_index("day")
-            st.caption("일별 비용 (USD, 추정)")
-            st.bar_chart(df["cost"])
             st.caption("일별 토큰 (in/out)")
             st.line_chart(df[["in", "out"]])
-        if usage["by_purpose"]:
-            st.caption("목적별 누적 (비용 내림차순)")
-            st.dataframe(pd.DataFrame(usage["by_purpose"]), use_container_width=True, hide_index=True)
-        if usage["unpriced"]:
-            st.warning(
-                "단가 미등록 모델 → 비용 0 처리. `data/state/llm_pricing.json` 에 추가: "
-                + ", ".join(f"`{m}`" for m in usage["unpriced"])
-            )
+        if usage["by_model"]:
+            st.caption("모델별 누적 토큰 (in+out 내림차순)")
+            st.dataframe(pd.DataFrame(usage["by_model"]), use_container_width=True, hide_index=True)
     else:
         st.caption("아직 usage 로그 없음 — 다음 LLM 호출부터 `data/logs/USAGE/` 에 쌓인다.")
 
