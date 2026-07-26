@@ -6,8 +6,12 @@
 - 주문: 미국 정규장에 순수 시장가가 없다(모의는 지정가만) → 현재가에 버퍼를 더한
   '체결형 지정가'(marketable limit)로 시장가를 대용한다. 정수 주 단위만 가능.
 - 지정가 미체결 잔량이 남을 수 있어 주문 전 미체결 심볼은 제외(중복 주문 방지).
-- 현금: **USD 예수금만** 버킷 현금으로 본다(사전 환전 전제). 통합증거금(원화 주문)은
-  안전망일 뿐 회계 기준이 아니다 — 원화 예수금은 국내 버킷 소속이라 이중계상 금지.
+- 매수여력: **통합증거금 반영 '환전이후주문가능금액'(USD)** — 원화 담보를 자동환전한
+  주문 여력이라, USD 예수금이 없어도 원화만으로 매수 가능(수동 환전 단계 불필요).
+- 평가액(MDD 입력): **원화 총자산(tot_asst_amt)** — 원화 담보로 산 미국 자산은 환율
+  손익에 노출되므로, USD 가 아닌 KRW 로 계상해 서킷이 FX 낙폭까지 포착하게 한다.
+  (주의: 향후 KR 국내도 같은 실계좌로 오면 원화 담보를 KR/US 가 나눠 써야 함 — 지금은
+  계좌 분리라 무관.)
 - 뉴스: KIS 무료 원천 미정 — 빈 리스트(관측 배선 시 채널 별도 결정).
 """
 
@@ -19,7 +23,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from adapters.allocation import compute_order_deltas
-from adapters.base import Bar, MarketAdapter, NewsItem, OrderResult, Position
+from adapters.base import (
+    Bar,
+    MarketAdapter,
+    NewsItem,
+    OrderResult,
+    Position,
+    observation_window,
+)
 from adapters.kis import PAPER_BASE, REAL_BASE, KISSession
 
 if TYPE_CHECKING:
@@ -39,6 +50,7 @@ ORDER_TR = {
 BALANCE_TR = {"real": "TTTS3012R", "demo": "VTTS3012R"}
 PRESENT_TR = {"real": "CTRP6504R", "demo": "VTRP6504R"}
 NCCS_TR = {"real": "TTTS3018R", "demo": "VTTS3018R"}  # 미체결 조회
+PSAMOUNT_TR = {"real": "TTTS3007R", "demo": "VTTS3007R"}  # 매수가능금액(통합증거금 여력)
 
 LIMIT_BUFFER = 0.005  # marketable limit 버퍼 — 현재가 대비 0.5%
 
@@ -58,6 +70,8 @@ class KISOverseasAdapter(MarketAdapter):
         min_notional: float = 10.0,  # USD
         limit_buffer: float = LIMIT_BUFFER,
         live_guard: LiveGuard | None = None,  # 실전 절대 금액 가드(모의는 None)
+        alpaca_key: str | None = None,  # US 뉴스 원천(체결과 분리 — KIS 는 무료 뉴스 없음)
+        alpaca_secret: str | None = None,
     ) -> None:
         assert mode in ("demo", "real"), f"mode={mode!r} — 'demo' 또는 'real'"
         assert exchange in QUOTE_EXCD, f"exchange={exchange!r} — {sorted(QUOTE_EXCD)}"
@@ -73,6 +87,8 @@ class KISOverseasAdapter(MarketAdapter):
         self.min_notional = min_notional
         self.limit_buffer = limit_buffer
         self.live_guard = live_guard
+        self._alpaca_key = alpaca_key
+        self._alpaca_secret = alpaca_secret
 
     async def close(self) -> None:
         await self.session.close()
@@ -122,7 +138,11 @@ class KISOverseasAdapter(MarketAdapter):
         return out
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
-        return []  # 무료 원천 미정 — 관측 배선 시 결정
+        # 체결은 KIS, 뉴스는 Alpaca(무료) — venue 분리. 키 없으면 빈 리스트.
+        from adapters.news_us import fetch_us_news
+
+        start, end = observation_window(asof_day)
+        return await fetch_us_news(self._alpaca_key, self._alpaca_secret, symbols, start, end)
 
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         """현재 체결가(same-day, 지연 가능) — 행동(지정가 산정) 전용."""
@@ -170,30 +190,42 @@ class KISOverseasAdapter(MarketAdapter):
     async def get_positions(self) -> list[Position]:
         return self._parse_positions(await self._balance_rows())
 
-    async def _usd_cash(self) -> float:
-        """USD 예수금 — 버킷 현금(사전 환전 전제). 통화 행에서 USD 만 취한다."""
+    async def _buying_power(self, ref_symbol: str, ref_price: float) -> float:
+        """통합증거금 반영 매수여력(USD) — '환전이후주문가능금액'. 원화 담보를 자동환전한
+        USD 주문 여력이라 USD 예수금이 없어도 매수 가능. 금액은 계좌 단위(심볼 무관)이나
+        API 가 종목·단가를 요구해 유니버스 대표 1종을 기준으로 조회한다."""
+        data = await self.session.get(
+            "/uapi/overseas-stock/v1/trading/inquire-psamount",
+            tr_id=PSAMOUNT_TR[self.mode],
+            params={
+                "CANO": self.cano,
+                "ACNT_PRDT_CD": self.prdt,
+                "OVRS_EXCG_CD": self.exchange,
+                "OVRS_ORD_UNPR": f"{ref_price:.2f}",
+                "ITEM_CD": ref_symbol,
+            },
+        )
+        return float((data.get("output") or {}).get("echm_af_ord_psbl_amt") or 0)
+
+    async def get_equity(self) -> float:
+        """버킷 평가액 — **원화 총자산**(FX-aware). 원화 담보로 산 미국 자산의 환율 손익까지
+        MDD 서킷이 포착하도록 USD 가 아닌 KRW 로 계상. Risk Engine MDD 입력."""
         data = await self.session.get(
             "/uapi/overseas-stock/v1/trading/inquire-present-balance",
             tr_id=PRESENT_TR[self.mode],
             params={
                 "CANO": self.cano,
                 "ACNT_PRDT_CD": self.prdt,
-                "WCRC_FRCR_DVSN_CD": "02",  # 외화 기준
+                "WCRC_FRCR_DVSN_CD": "01",  # 원화 기준
                 "NATN_CD": "840",  # 미국
                 "TR_MKET_CD": "00",
                 "INQR_DVSN_CD": "00",
             },
         )
-        for row in data.get("output2") or []:
-            if row.get("crcy_cd") == "USD":
-                # 예수금 필드 우선, 없으면 출금가능액 폴백 (계정 유형별 응답 차이 방어)
-                return float(row.get("frcr_dncl_amt_2") or row.get("frcr_drwg_psbl_amt_1") or 0)
-        return 0.0
-
-    async def get_equity(self) -> float:
-        """버킷 평가액(USD) = USD 예수금 + 미국 주식 평가. Risk Engine MDD 입력."""
-        positions = await self.get_positions()
-        return await self._usd_cash() + sum(p.market_value for p in positions)
+        out3 = data.get("output3")
+        if isinstance(out3, list):  # 계정 유형별 dict/list 차이 방어
+            out3 = out3[0] if out3 else {}
+        return float((out3 or {}).get("tot_asst_amt") or 0)
 
     # ── 주문 ──
 
@@ -261,8 +293,9 @@ class KISOverseasAdapter(MarketAdapter):
             positions = self._parse_positions(await self._balance_rows())
             holdings = {p.symbol: p.market_value for p in positions}
             qty_held = {p.symbol: p.quantity for p in positions}
-            cash = await self._usd_cash()
             prices = await self.get_current_prices(self.universe)
+            # 통합증거금 매수여력(USD) — 유니버스 대표 1종 기준(금액은 계좌 단위)
+            cash = await self._buying_power(self.universe[0], prices[self.universe[0]])
             pending = await self._pending_symbols()
 
             intents = compute_order_deltas(

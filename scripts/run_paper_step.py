@@ -53,12 +53,13 @@ from memory import (  # noqa: E402
 )
 from regime import (  # noqa: E402
     INDEX_PROXY,
+    compute_macro_regime,
     compute_regime,
     load_market_signals,
     propose_meta_weights,
     update_regime_signal,
 )
-from risk import RiskEngine, RiskGuardedPolicy, RiskLimits  # noqa: E402
+from risk import RiskEngine, RiskGuardedPolicy, RiskLimits, account_fingerprint  # noqa: E402
 from trader import LLMTrader  # noqa: E402
 
 # 시장별 유니버스 — 설명 가능한 메이저 집중(2026-07-20, 사용자 승인): 뉴스·데이터
@@ -124,6 +125,8 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
                 token_cache=STATE_DIR / "kis_real_token.json",
                 mode="real",
                 live_guard=guard,
+                alpaca_key=env.get("ALPACA_PAPER_API_KEY"),  # 뉴스 원천(체결과 분리)
+                alpaca_secret=env.get("ALPACA_PAPER_SECRET"),
             ),
             US_UNIVERSE,
         )
@@ -149,6 +152,7 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
                 env["KIS_PAPER_ACCOUNT"],
                 KR_UNIVERSE,
                 token_cache=STATE_DIR / "kis_token.json",
+                dart_api_key=env.get("DART_API_KEY"),
             ),
             KR_UNIVERSE,
         )
@@ -280,6 +284,7 @@ def build_market_policy(
         risk_path,
         equity_fn=adapter.get_equity,
         forbidden_patterns_fn=make_forbidden_fn(memory, market),
+        account_key=account_fingerprint(adapter),  # 어댑터 전환 시 stale MDD 상태 리셋
     )
 
 
@@ -460,6 +465,17 @@ async def main() -> int:
             except Exception as e:
                 logger.log(market, "memory_error", {"error_type": type(e).__name__, "error": str(e)[:200]})
         memory.close()
+
+        # 매크로 국면 (전역 shadow) — FRED 일간 지표(VIX·금리차·달러·원달러). 계산·로깅만,
+        # 결정/Risk 미개입(하드룰 1). FRED 키 없으면 생략. 검증 후 리스크 게이트로 승격 대상.
+        macro = await compute_macro_regime(env, today)
+        if macro is not None:
+            logger.log("MACRO", "macro_regime", {
+                "day": today.isoformat(), "state": macro.state,
+                "vix": macro.vix, "yield_spread": macro.yield_spread, **macro.values,
+            })
+            print(f"market=MACRO regime={macro.state} vix={macro.vix}"
+                  f" yield_spread={macro.yield_spread} usdkrw={macro.values.get('usdkrw')}")
 
         # 시장 간 shadow 메타 배분 — 공유 regime 상태에서 전 시장을 읽어 제안(부분 잡이어도 완전).
         # 제안·로깅·누적만, 집행/Risk 미개입. 검증 후 승격.

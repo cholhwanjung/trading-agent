@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 
+from regime.macro import MacroRegime, classify_macro
 from regime.pulse import RegimeResult, classify_regime
 
 INDEX_PROXY = {"CRYPTO": "BTC/USDT", "US": "SPY", "KR": "069500"}
@@ -25,3 +27,14 @@ async def compute_regime(adapter, market: str, asof_day: date) -> RegimeResult |
         return classify_regime(bars.get(proxy, []))
     except Exception:
         return None
+
+
+async def compute_macro_regime(env: Mapping[str, str], asof_day: date) -> MacroRegime | None:
+    """FRED 매크로 국면 (전역 shadow). 키 없음/조회 실패 → None (fail-open — 보조 신호)."""
+    api_key = env.get("FRED_API_KEY")
+    if not api_key:
+        return None
+    from adapters.fred import fetch_fred_latest
+
+    values = await fetch_fred_latest(api_key, asof_day)
+    return classify_macro(values)

@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from harness import JsonlLogger, load_env, make_usage_sink, single_instance  # noqa: E402
 from llm import LLMRouter  # noqa: E402
-from risk import RiskEngine, RiskGuardedPolicy  # noqa: E402
+from risk import RiskEngine, RiskGuardedPolicy, account_fingerprint  # noqa: E402
 from scripts.run_paper_step import (  # noqa: E402
     LIMITS,
     STATE_DIR,
@@ -130,7 +130,8 @@ async def main() -> int:
             prev_weights_fn=lambda p=risk_path: load_prev_weights(p),
         )
         guard = RiskGuardedPolicy(
-            trader, RiskEngine(LIMITS[market]), risk_path, equity_fn=adapter.get_equity
+            trader, RiskEngine(LIMITS[market]), risk_path, equity_fn=adapter.get_equity,
+            account_key=account_fingerprint(adapter),
         )
         obs = await adapter.observe_and_audit(symbols)  # [t-3,t-1] 누출 감사 (행동 컨텍스트)
         positions = await adapter.get_positions()

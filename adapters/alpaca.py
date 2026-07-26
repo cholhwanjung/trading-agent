@@ -37,6 +37,7 @@ class AlpacaPaperAdapter(MarketAdapter):
     ) -> None:
         self.universe = universe
         self.min_notional = min_notional
+        self._key, self._secret = api_key, secret
         self._client = httpx.AsyncClient(
             headers={"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": secret},
             timeout=15.0,
@@ -85,29 +86,10 @@ class AlpacaPaperAdapter(MarketAdapter):
         return out
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
+        from adapters.news_us import fetch_us_news
+
         start, end = observation_window(asof_day)
-        data = await self._get(
-            f"{DATA_BASE}/v1beta1/news",
-            params={
-                "symbols": ",".join(symbols),
-                "start": f"{start.isoformat()}T00:00:00Z",
-                "end": f"{end.isoformat()}T23:59:59Z",
-                "limit": 50,
-            },
-        )
-        items = []
-        for n in data.get("news") or []:
-            published = datetime.fromisoformat(n["created_at"].replace("Z", "+00:00"))
-            if start <= published.date() <= end:  # 윈도우 재확인
-                items.append(
-                    NewsItem(
-                        published_at=published,
-                        headline=n.get("headline", ""),
-                        source=n.get("source", "alpaca"),
-                        url=n.get("url"),
-                    )
-                )
-        return items
+        return await fetch_us_news(self._key, self._secret, symbols, start, end)
 
     async def get_equity(self) -> float:
         account = await self._get(f"{TRADE_BASE}/v2/account")

@@ -15,6 +15,15 @@ from harness.policy import Policy
 from risk.engine import RiskEngine
 
 
+def account_fingerprint(adapter: object) -> str:
+    """어댑터(계좌) 지문. 리스크 상태 파일은 시장 단위라, 같은 시장을 다른 어댑터/계좌로
+    바꾸면(예: 페이퍼→실계좌) 이전 계좌의 equity 이력·직전배분을 물려받아 MDD 서킷이
+    오발동한다. 이 지문이 바뀌면 상태를 리셋한다(전환 감지 키)."""
+    return ":".join(
+        [type(adapter).__name__, getattr(adapter, "mode", "") or "", getattr(adapter, "cano", "") or ""]
+    )
+
+
 class RiskGuardedPolicy:
     def __init__(
         self,
@@ -24,6 +33,7 @@ class RiskGuardedPolicy:
         equity_fn: Callable[[], Awaitable[float]] | None = None,
         forbidden: frozenset[str] = frozenset(),
         forbidden_patterns_fn: Callable[[], set[str]] | None = None,
+        account_key: str | None = None,
     ) -> None:
         self.inner = inner
         self.engine = engine
@@ -33,6 +43,8 @@ class RiskGuardedPolicy:
         # admission 통과(active) Forbidden 패턴 집합 — 당일 결정의 pattern_key 가
         # 여기 걸리면 직전 배분으로 동결 (APV 하드 veto)
         self.forbidden_patterns_fn = forbidden_patterns_fn
+        # 계좌 지문 — 어댑터/계좌 전환 시 stale equity 이력 리셋 트리거 (account_fingerprint)
+        self.account_key = account_key
         self.name = f"risk_guarded({inner.name})"
         self.last_decision: dict | None = None
 
@@ -59,6 +71,13 @@ class RiskGuardedPolicy:
         )
         state = self._load_state()
 
+        # 어댑터/계좌 전환 감지 — 리스크 상태는 시장 단위 파일이라 어댑터가 바뀌면(페이퍼→
+        # 실계좌 등) 이전 계좌의 equity 이력을 물려받아 MDD 서킷이 오발동한다. 지문이
+        # 명시적으로 다를 때만 리셋(레거시=지문 없음 은 현재 지문 채택, 오리셋 방지).
+        existing_key = state.get("account_key")
+        if self.account_key and existing_key is not None and existing_key != self.account_key:
+            state = {}
+
         # Forbidden 패턴 하드 veto — 결정의 패턴이 검증된 실패 패턴이면 직전 배분 동결
         if self.forbidden_patterns_fn:
             from memory.journal import pattern_key as _pattern_key
@@ -77,7 +96,7 @@ class RiskGuardedPolicy:
                     "equity": None,
                     "mdd": 0.0,
                 }
-                self._save_state({**state, "prev_weights": frozen})
+                self._save_state({**state, "prev_weights": frozen, "account_key": self.account_key})
                 return frozen
 
         equity = await self.equity_fn() if self.equity_fn else None
@@ -104,6 +123,10 @@ class RiskGuardedPolicy:
             "mdd": round(mdd, 4),
         }
         self._save_state(
-            {"prev_weights": decision.weights, "peak_equity": peak if peak is not None else equity}
+            {
+                "prev_weights": decision.weights,
+                "peak_equity": peak if peak is not None else equity,
+                "account_key": self.account_key,
+            }
         )
         return decision.weights

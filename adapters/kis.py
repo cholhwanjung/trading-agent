@@ -127,11 +127,13 @@ class KISPaperAdapter(MarketAdapter):
         universe: list[str],  # 예: ["069500"] (KODEX 200)
         token_cache: Path,
         min_notional: float = 10_000.0,  # KRW — 1주 미만 잔주문 방지
+        dart_api_key: str | None = None,  # 있으면 공시를 관측 뉴스에 편입
     ) -> None:
         self.session = KISSession(app_key, app_secret, Path(token_cache), PAPER_BASE)
         self.cano, _, self.prdt = account.partition("-")
         self.universe = universe
         self.min_notional = min_notional
+        self._dart_key = dart_api_key
 
     async def close(self) -> None:
         await self.session.close()
@@ -184,7 +186,12 @@ class KISPaperAdapter(MarketAdapter):
         from adapters.news_kr import fetch_kr_news
 
         start, end = observation_window(asof_day)
-        return await fetch_kr_news(symbols, start, end)
+        news = await fetch_kr_news(symbols, start, end)
+        if self._dart_key:  # DART 공시를 구조화 이벤트로 관측에 편입 (같은 뉴스 채널)
+            from adapters.dart import fetch_dart_disclosures
+
+            news += await fetch_dart_disclosures(self._dart_key, symbols, start, end)
+        return news
 
     # ── 계좌 ──
 
