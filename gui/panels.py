@@ -233,7 +233,9 @@ def load_intramarket_weights(state_dir: Path, market: str) -> dict[str, float]:
 
 # ── 스케줄 잡 상태 (launchd 로그 기반) ──
 
-_OK_MARKERS = ("briefing=", "status=ok")
+# briefing= : paper_step, status=ok : 범용, cycle_done : alpha_lab 사이클 완료.
+# 실패 마커가 우선하므로(아래 판정) 한 시장만 실패해도 error 로 남는다.
+_OK_MARKERS = ("briefing=", "status=ok", "cycle_done")
 _FAIL_MARKERS = ("status=fail", "status=error")
 
 
