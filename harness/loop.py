@@ -11,7 +11,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from adapters.base import MarketAdapter, Observation, OrderResult, observation_window
+from adapters.base import MarketAdapter, Observation, OrderResult, bar_observation_window
 from harness.jsonlog import JsonlLogger
 from harness.policy import Policy
 
@@ -42,7 +42,7 @@ def _observation_snapshot(obs: Observation) -> dict:
     feature·근거는 결정 로그에 이미 있으므로 여기 넣지 않는다(한 파일=한 개념).
     """
 
-    start, end = observation_window(obs.asof_day)
+    start, end = bar_observation_window(obs.asof_day)
     return {
         "market": obs.market,
         "asof_day": obs.asof_day.isoformat(),

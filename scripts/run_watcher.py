@@ -27,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from adapters import configure_observation  # noqa: E402
 from harness import JsonlLogger, load_env, make_usage_sink, single_instance  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 from risk import RiskEngine, RiskGuardedPolicy, account_fingerprint  # noqa: E402
@@ -65,6 +66,7 @@ async def main() -> int:
     config = config_for(market)  # 미지원 시장은 KeyError (v1 은 CRYPTO 전용)
 
     env = load_env(ROOT / ".env")
+    configure_observation(env)  # 관측 윈도우 길이 .env 오버라이드(실험 변수, 미설정 시 기본)
 
     # 단일 인스턴스 락 — 15분 인터벌 틱이 이전(느린) 틱과 겹치면 같은 계좌에 중복 주문하고
     # risk_{market}.json 을 레이스로 덮어쓴다. 시장별 키로 자기 중첩을 차단.
@@ -133,7 +135,7 @@ async def main() -> int:
             trader, RiskEngine(LIMITS[market]), risk_path, equity_fn=adapter.get_equity,
             account_key=account_fingerprint(adapter),
         )
-        obs = await adapter.observe_and_audit(symbols)  # [t-3,t-1] 누출 감사 (행동 컨텍스트)
+        obs = await adapter.observe_and_audit(symbols)  # 상한 t-1 누출 감사 (행동 컨텍스트)
         positions = await adapter.get_positions()
         weights = await guard.decide(obs, positions, trigger=trigger)
         result = await adapter.submit_allocation(weights)

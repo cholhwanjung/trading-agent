@@ -59,6 +59,7 @@ from regime import (  # noqa: E402
     propose_meta_weights,
     update_regime_signal,
 )
+from adapters import configure_observation  # noqa: E402
 from risk import RiskEngine, RiskGuardedPolicy, RiskLimits, account_fingerprint  # noqa: E402
 from trader import LLMTrader  # noqa: E402
 
@@ -334,6 +335,7 @@ async def run_memory_pipeline(
 
 async def main() -> int:
     env = load_env(ROOT / ".env")
+    configure_observation(env)  # 관측 윈도우 길이 .env 오버라이드(실험 변수, 미설정 시 기본)
 
     # 단일 인스턴스 락 — 같은 시장셋의 catch-up/중복 런이 같은 계좌에 이중 주문하거나
     # 상태 파일(risk_*·live_notional_*)을 레이스로 덮어쓰지 않게 한다(실계좌 경로 필수).

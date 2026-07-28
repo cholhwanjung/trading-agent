@@ -10,6 +10,8 @@ from adapters.base import (
     Position,
     TreasuryCapable,
     assert_no_leakage,
+    bar_observation_window,
+    configure_observation,
     observation_window,
 )
 
@@ -23,5 +25,7 @@ __all__ = [
     "Position",
     "TreasuryCapable",
     "assert_no_leakage",
+    "bar_observation_window",
+    "configure_observation",
     "observation_window",
 ]

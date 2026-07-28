@@ -1,6 +1,6 @@
 """KR 종목 뉴스 — Google News RSS (무료, 키 불필요).
 
-KR 유니버스 종목별 회사명으로 Google News RSS 를 질의해 관측 윈도우 [t-3, t-1] 로 필터한다.
+KR 유니버스 종목별 회사명으로 Google News RSS 를 질의해 뉴스 관측 창(최근 N캘린더일)으로 필터한다.
 RSS 2.0 파싱은 크립토 뉴스와 동일 파서(parse_rss)를 재사용한다. 개별 종목 피드 실패는
 조용히 건너뛴다(뉴스는 best-effort 관측 보조).
 

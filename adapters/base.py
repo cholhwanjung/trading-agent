@@ -5,7 +5,8 @@
 (LiveTradeBench 방식).
 
 불변 제약:
-- 관측 윈도우는 [t-3, t-1]로 고정, same-day leakage 차단.
+- 관측 상한은 t-1 고정(당일 t 데이터 절대 차단) — 누출 통제의 본질. 봉은 최근 N거래일,
+  뉴스는 최근 N캘린더일(길이는 configure_observation 으로 조정 가능).
 - 모든 관측에 수집 타임스탬프 기록 → 사후 감사 가능.
 """
 
@@ -17,8 +18,11 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
 
-# 관측 윈도우: 오늘(t) 기준 [t-3, t-1]. same-day(t) 데이터는 절대 포함 금지.
-OBSERVATION_LOOKBACK_DAYS = 3
+# 관측 윈도우 기본값. 상한은 항상 t-1(당일 t 데이터 절대 포함 금지) — 이게 누출 통제의 본질이며
+# 아래 길이 값과 무관하게 불변이다. 운영 스크립트가 configure_observation()으로 .env 값을 주입해
+# 실험적으로 조정할 수 있다(미설정 시 기본 유지).
+OBSERVATION_TRADING_DAYS = 3  # 원시 최근 봉: 최근 N '거래일'(요일·휴장과 무관하게 일정)
+OBSERVATION_NEWS_DAYS = 7     # 뉴스: 최근 N 캘린더일(봉 창과 디커플 — 사건은 거래세션에 안 매임)
 
 
 @dataclass(frozen=True)
@@ -57,7 +61,7 @@ class Position:
 class Observation:
     """어댑터가 반환하는 관측 묶음. 모든 관측은 이 컨테이너로 감사된다.
 
-    collected_at: 수집 시각(UTC). asof_day: 관측 기준일 t. window: 실제 [t-3, t-1].
+    collected_at: 수집 시각(UTC). asof_day: 관측 기준일 t. 봉=최근 N거래일·뉴스=N캘린더일(상한 t-1).
     """
 
     market: str
@@ -78,38 +82,65 @@ class OrderResult:
     error: str | None = None
 
 
-def observation_window(asof_day: date, lookback: int = OBSERVATION_LOOKBACK_DAYS) -> tuple[date, date]:
-    """관측 허용 구간 [t-lookback, t-1] 을 (start, end) 로 반환. end 는 t-1 (포함)."""
+def observation_window(asof_day: date, lookback: int | None = None) -> tuple[date, date]:
+    """뉴스·일반 관측의 캘린더 윈도우 [t-lookback, t-1]. end=t-1(당일 차단, 불변).
 
-    start = asof_day - timedelta(days=lookback)
-    end = asof_day - timedelta(days=1)
-    return start, end
+    lookback=None 이면 모듈 기본값(OBSERVATION_NEWS_DAYS)을 호출 시점에 읽는다
+    (configure_observation 오버라이드가 반영되도록 기본 인자로 캡처하지 않음).
+    """
+
+    n = OBSERVATION_NEWS_DAYS if lookback is None else lookback
+    return asof_day - timedelta(days=n), asof_day - timedelta(days=1)
+
+
+def bar_observation_window(asof_day: date, trading_days: int | None = None) -> tuple[date, date]:
+    """원시 봉 조회 구간. end=t-1(당일 차단, 불변).
+
+    최근 N '거래일'을 주말·휴장을 넘어 확보하기 위해 캘린더 하한을 여유있게(2N+10일) 잡는다.
+    실제 봉은 get_ohlcv 가 최근 N개로 절삭하므로, 이 구간은 '넓게 떠서 뒤에서 N개'용 fetch 범위다.
+    """
+
+    n = OBSERVATION_TRADING_DAYS if trading_days is None else trading_days
+    return asof_day - timedelta(days=n * 2 + 10), asof_day - timedelta(days=1)
+
+
+def configure_observation(env: dict[str, str]) -> None:
+    """운영 스크립트가 .env로 관측 윈도우 길이를 오버라이드(실험 변수). 미설정 키는 기본 유지."""
+
+    global OBSERVATION_TRADING_DAYS, OBSERVATION_NEWS_DAYS
+    if env.get("OBSERVATION_TRADING_DAYS"):
+        OBSERVATION_TRADING_DAYS = int(env["OBSERVATION_TRADING_DAYS"])
+    if env.get("OBSERVATION_NEWS_DAYS"):
+        OBSERVATION_NEWS_DAYS = int(env["OBSERVATION_NEWS_DAYS"])
 
 
 class LeakageError(AssertionError):
-    """관측 윈도우 [t-3, t-1] 밖(특히 same-day t 이후) 데이터가 섞였을 때."""
+    """관측 윈도우 밖(특히 same-day t 이후) 데이터가 섞였을 때."""
 
 
 def assert_no_leakage(obs: Observation) -> None:
-    """Observation 이 same-day leakage 없이 [t-3, t-1] 안에 있는지 검증 (verify).
+    """Observation 에 same-day leakage 가 없는지 검증 (verify).
 
+    누출의 본질은 상한 end=t-1 — 봉·뉴스 모두 당일(t) 이후를 절대 포함하지 않아야 한다.
+    하한은 각 채널 윈도우(봉=최근 N거래일 fetch 구간, 뉴스=N캘린더일)를 쓴다.
     위반 시 LeakageError. 하니스·테스트가 모든 관측에 대해 호출한다.
     """
 
-    start, end = observation_window(obs.asof_day)
+    bar_start, end = bar_observation_window(obs.asof_day)
     for symbol, bars in obs.bars.items():
         for bar in bars:
-            if not (start <= bar.day <= end):
+            if not (bar_start <= bar.day <= end):
                 raise LeakageError(
                     f"leakage market={obs.market} symbol={symbol} "
-                    f"bar_day={bar.day} window=[{start},{end}] asof={obs.asof_day}"
+                    f"bar_day={bar.day} window=[{bar_start},{end}] asof={obs.asof_day}"
                 )
+    news_start, _ = observation_window(obs.asof_day)
     for item in obs.news:
         news_day = item.published_at.date()
-        if not (start <= news_day <= end):
+        if not (news_start <= news_day <= end):
             raise LeakageError(
                 f"leakage market={obs.market} news_day={news_day} "
-                f"window=[{start},{end}] asof={obs.asof_day} headline={item.headline!r}"
+                f"window=[{news_start},{end}] asof={obs.asof_day} headline={item.headline!r}"
             )
 
 
@@ -130,9 +161,15 @@ class MarketAdapter(ABC):
         raise NotImplementedError(f"{type(self).__name__}는 _fetch_bars 미구현")
 
     async def get_ohlcv(self, symbols: list[str], asof_day: date) -> dict[str, list[Bar]]:
-        """[t-3, t-1] 구간의 일봉을 symbol별로 반환. same-day(t) 봉 포함 금지."""
-        start, end = observation_window(asof_day)
-        return await self._fetch_bars(symbols, start, end)
+        """최근 N '거래일'의 일봉을 symbol별로 반환. same-day(t) 봉 포함 금지.
+
+        주말·휴장으로 캘린더 [t-N, t-1] 이 요일마다 1~N개로 들쭉날쭉해지는 것을 막기 위해,
+        넓은 구간으로 조회한 뒤 오름차순 정렬해 최근 N개만 남긴다(거래일 기준 일정).
+        """
+        start, end = bar_observation_window(asof_day)
+        fetched = await self._fetch_bars(symbols, start, end)
+        n = OBSERVATION_TRADING_DAYS
+        return {s: sorted(bars, key=lambda b: b.day)[-n:] for s, bars in fetched.items()}
 
     async def get_ohlcv_history(
         self, symbols: list[str], asof_day: date, lookback_days: int = 90
@@ -144,7 +181,7 @@ class MarketAdapter(ABC):
 
     @abstractmethod
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
-        """[t-3, t-1] 구간에 발행된 뉴스만 반환. published_at >= t 인 건 제외."""
+        """최근 N 캘린더일에 발행된 뉴스만 반환. published_at >= t(당일) 인 건 제외."""
 
     @abstractmethod
     async def get_positions(self) -> list[Position]:

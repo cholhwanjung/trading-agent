@@ -1,6 +1,6 @@
 """LLM Trader — stateless 단일 에이전트 (메모리 없음 기준선).
 
-관측(feature 7종 + [t-3,t-1] 봉·뉴스 + 포지션)을 구조화 프롬프트로 만들어
+관측(feature 7종 + 최근 봉·뉴스 + 포지션)을 구조화 프롬프트로 만들어
 smart tier LLM 1회 호출 → 결정 스키마 검증 → 배분 벡터 반환.
 
 실패 시 예외를 올린다 — 러너가 스텝을 격리 실패시키므로 주문 없는 안전 no-op 이 된다.
@@ -87,7 +87,7 @@ def build_user_prompt(
     payload = {
         "asof_day": str(obs.asof_day),
         "features": features,  # None = 이력 부족으로 계산 불가
-        "recent_bars_t3_t1": recent,
+        "recent_bars": recent,
         "news_headlines": [
             {"day": str(n.published_at.date()), "headline": n.headline}
             for n in obs.news[:max_news]
