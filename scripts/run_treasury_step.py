@@ -15,6 +15,7 @@ plan_transfers → enforce_transfer 까지 순수 결정론 파이프라인을 *
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from datetime import datetime, timezone
@@ -63,8 +64,15 @@ def _to_buckets(
     return bucket_equity, bucket_target
 
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="주간/월간 자금 이체 스텝 (dry-run 기본)")
+    p.add_argument("--arm", default="llm", choices=["llm", "llm_base", "bh", "random"],
+                   help="잔고 기준 가상 arm (기본 llm)")
+    return p.parse_args()
+
+
 def main() -> int:
-    arm = sys.argv[sys.argv.index("--arm") + 1] if "--arm" in sys.argv else "llm"
+    arm = _parse_args().arm
     logger = JsonlLogger(ROOT / "data" / "logs")
     now = datetime.now(timezone.utc)
 

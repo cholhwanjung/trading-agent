@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import sys
@@ -333,16 +334,40 @@ async def run_memory_pipeline(
             logger.log(market, "weekly_credit", event)
 
 
+_VALID_MARKETS = {"KR", "US", "CRYPTO"}
+
+
+def _market_set(value: str) -> set[str]:
+    """쉼표 구분 시장 목록 → 대문자 집합. 알 수 없는 시장은 즉시 거부."""
+    markets = {m.strip().upper() for m in value.split(",") if m.strip()}
+    if not markets:
+        raise argparse.ArgumentTypeError("빈 시장 목록")
+    invalid = markets - _VALID_MARKETS
+    if invalid:
+        raise argparse.ArgumentTypeError(
+            f"알 수 없는 시장: {sorted(invalid)} (가능: {sorted(_VALID_MARKETS)})"
+        )
+    return markets
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="일일 페이퍼 스텝 — 실계좌 + 가상 A/B")
+    p.add_argument("--markets", type=_market_set,
+                   help="쉼표 구분 시장 (예: CRYPTO,US). 미지정 시 키 있는 전 시장")
+    p.add_argument("--dry-run", action="store_true", help="관측·포지션 조회까지만 (주문 없음)")
+    p.add_argument("--debate", action="store_true", help="debate 강제 소집")
+    return p.parse_args()
+
+
 async def main() -> int:
+    args = _parse_args()
     env = load_env(ROOT / ".env")
     configure_observation(env)  # 관측 윈도우 길이 .env 오버라이드(실험 변수, 미설정 시 기본)
 
     # 단일 인스턴스 락 — 같은 시장셋의 catch-up/중복 런이 같은 계좌에 이중 주문하거나
     # 상태 파일(risk_*·live_notional_*)을 레이스로 덮어쓰지 않게 한다(실계좌 경로 필수).
     # 시장셋별 키라 장 시간이 다른 잡(KR 10:00 vs CRYPTO,US 23:00)은 서로 막지 않는다.
-    markets_key = "all"
-    if "--markets" in sys.argv:
-        markets_key = "-".join(sorted(sys.argv[sys.argv.index("--markets") + 1].upper().split(",")))
+    markets_key = "-".join(sorted(args.markets)) if args.markets else "all"
     lock = single_instance(STATE_DIR / f"run_paper_step_{markets_key}.lock")
     if lock is None:
         print(f"status=skip detail=이미 실행 중(markets={markets_key}) — 중복 실행 차단")
@@ -350,8 +375,8 @@ async def main() -> int:
 
     adapters = build_adapters(env)
     # --markets KR / --markets CRYPTO,US — 장 시간이 다른 시장을 별도 잡으로 분리
-    if "--markets" in sys.argv:
-        wanted = set(sys.argv[sys.argv.index("--markets") + 1].upper().split(","))
+    if args.markets:
+        wanted = args.markets
         dropped = wanted - set(adapters)
         for adapter, _ in (v for k, v in adapters.items() if k not in wanted):
             close = getattr(adapter, "close", None)
@@ -375,7 +400,7 @@ async def main() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        if "--dry-run" in sys.argv:
+        if args.dry_run:
             for market, (adapter, symbols) in adapters.items():
                 obs = await adapter.observe_and_audit(symbols)
                 positions = await adapter.get_positions()
@@ -389,7 +414,7 @@ async def main() -> int:
         memory = MemoryStore(ROOT / "data" / "memory.sqlite")
 
         # 실계좌: Risk-guarded LLM (+ 검증 통과 교훈만 주입)
-        debate = "always" if "--debate" in sys.argv else "auto"  # --debate = 사용자 강제 소집
+        debate = "always" if args.debate else "auto"  # --debate = 사용자 강제 소집
         runs = []
         guards: dict[str, RiskGuardedPolicy] = {}
         prev_weights_by_market: dict[str, dict | None] = {}

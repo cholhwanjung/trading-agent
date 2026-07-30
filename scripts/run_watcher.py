@@ -18,6 +18,7 @@ reflection)을 호출하지 않는다 — 당일 정보 기반 결정을 admissi
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import sys
@@ -41,8 +42,12 @@ from trader import LLMTrader  # noqa: E402
 from watcher import config_for, evaluate, max_drift  # noqa: E402
 
 
-def _arg(flag: str, default: str) -> str:
-    return sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else default
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="실시간 이벤트 트리거 워커 — 급변 감지·재결정")
+    p.add_argument("--market", default="CRYPTO", type=str.upper,
+                   choices=["KR", "US", "CRYPTO"], help="점검 시장 (기본 CRYPTO)")
+    p.add_argument("--dry-run", action="store_true", help="조회·판정만 (주문·상태저장 없음)")
+    return p.parse_args()
 
 
 def _load_watch_state(path: Path) -> dict:
@@ -61,8 +66,9 @@ async def _close(adapter) -> None:
 
 
 async def main() -> int:
-    market = _arg("--market", "CRYPTO").upper()
-    dry_run = "--dry-run" in sys.argv
+    args = _parse_args()
+    market = args.market
+    dry_run = args.dry_run
     config = config_for(market)  # 미지원 시장은 KeyError (v1 은 CRYPTO 전용)
 
     env = load_env(ROOT / ".env")

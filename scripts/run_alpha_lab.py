@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 from datetime import date, datetime, timezone
@@ -83,14 +84,37 @@ async def run_cycle(
     return len(admitted)
 
 
+_VALID_MARKETS = {"CRYPTO", "US"}
+
+
+def _market_set(value: str) -> set[str]:
+    """쉼표 구분 시장 목록 → 대문자 집합. 알 수 없는 시장은 즉시 거부."""
+    markets = {m.strip().upper() for m in value.split(",") if m.strip()}
+    if not markets:
+        raise argparse.ArgumentTypeError("빈 시장 목록")
+    invalid = markets - _VALID_MARKETS
+    if invalid:
+        raise argparse.ArgumentTypeError(
+            f"알 수 없는 시장: {sorted(invalid)} (가능: {sorted(_VALID_MARKETS)})"
+        )
+    return markets
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Alpha Lab 1사이클 — writer→judge→백테스트→admission")
+    p.add_argument("--n", type=int, default=5, help="사이클당 후보 팩터 수 (기본 5)")
+    p.add_argument("--markets", type=_market_set, help="쉼표 구분 시장 (예: CRYPTO,US)")
+    return p.parse_args()
+
+
 async def main() -> int:
-    n = int(sys.argv[sys.argv.index("--n") + 1]) if "--n" in sys.argv else 5
+    args = _parse_args()
+    n = args.n
     env = load_env(ROOT / ".env")
 
     markets = _markets(env)
-    if "--markets" in sys.argv:
-        wanted = set(sys.argv[sys.argv.index("--markets") + 1].upper().split(","))
-        markets = {k: v for k, v in markets.items() if k in wanted}
+    if args.markets:
+        markets = {k: v for k, v in markets.items() if k in args.markets}
     if not markets:
         print("status=fail detail=실행할 시장 없음(키/인자 확인)")
         return 1
