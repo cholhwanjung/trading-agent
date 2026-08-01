@@ -14,7 +14,8 @@ import ast
 
 import numpy as np
 
-FIELDS = ("open", "high", "low", "close", "volume", "returns")
+FIELDS = ("open", "high", "low", "close", "volume", "returns",
+          "vwap", "dollar_volume", "trade_count")
 MAX_NODES = 60  # 복잡도 상한 — 과적합 수식 차단
 MAX_WINDOW = 120
 
@@ -146,7 +147,10 @@ FUNCS = {
 }
 
 DSL_SPEC = (
-    "필드: open, high, low, close, volume, returns (일간 패널)\n"
+    "필드: open, high, low, close, volume, returns, vwap, dollar_volume, trade_count (일간 패널)\n"
+    "  vwap=거래량가중평균가(일중 앵커) · dollar_volume=거래대금(가격×거래량) · trade_count=체결 건수\n"
+    "  횡단면 유동성 비교는 dollar_volume 을 써라 — raw volume 은 자산 간 단위가 달라"
+    "(코인 수량/주식 수) 비교 불가\n"
     "함수: delay(x,n) delta(x,n) ts_mean(x,n) ts_std(x,n) ts_min(x,n) ts_max(x,n) "
     "ts_rank(x,n) ts_corr(x,y,n) rank(x) zscore(x) sign(x) abs(x) log(x)\n"
     "연산: + - * / 및 단항 - · 숫자 상수. n 은 2..120 정수(delay 는 1..120).\n"

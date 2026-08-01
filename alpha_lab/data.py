@@ -1,7 +1,8 @@
-"""연구 유니버스 데이터 — ccxt 공개 일봉 → 정렬 패널 (무료·일간).
+"""연구 유니버스 데이터 — 공개 일봉 → 정렬 패널 (무료·일간).
 
 연구 유니버스(횡단면 IC 용)는 매매 유니버스보다 넓다 — 크립토
 상위 유동성 10종. 상한 t-1: 진행 중인 당일 봉 제외.
+패널 필드: OHLCV + vwap(거래량가중평균가) + dollar_volume(거래대금) + trade_count(체결수).
 """
 
 from __future__ import annotations
@@ -17,13 +18,13 @@ CRYPTO_RESEARCH_UNIVERSE = [
     "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "LTC/USDT",
 ]
 
-_PANEL_FEATURES = ("open", "high", "low", "close", "volume")
+_PANEL_FEATURES = ("open", "high", "low", "close", "volume", "vwap", "dollar_volume", "trade_count")
 
 
 def _assemble_panel(
     per_symbol: dict[str, dict[date, tuple]], symbols: list[str]
 ) -> tuple[dict[str, np.ndarray], list[str], list[date]]:
-    """종목별 {날짜: (o,h,lo,c,v)} → (panel, symbols, dates). 공통 거래일만 inner-join.
+    """종목별 {날짜: (o,h,lo,c,v,vwap,거래대금,체결수)} → (panel, symbols, dates). 공통 거래일 inner-join.
 
     데이터 없는 종목은 제외(횡단면에서 자동 탈락). returns 는 close 로부터 파생.
     """
@@ -38,12 +39,15 @@ def _assemble_panel(
     panel = {f: np.full((T, N), np.nan) for f in _PANEL_FEATURES}
     for j, symbol in enumerate(symbols):
         for i, day in enumerate(common):
-            o, h, lo, c, v = per_symbol[symbol][day]
+            o, h, lo, c, v, vw, dv, nt = per_symbol[symbol][day]
             panel["open"][i, j] = o
             panel["high"][i, j] = h
             panel["low"][i, j] = lo
             panel["close"][i, j] = c
             panel["volume"][i, j] = v
+            panel["vwap"][i, j] = vw
+            panel["dollar_volume"][i, j] = dv
+            panel["trade_count"][i, j] = nt
     close = panel["close"]
     returns = np.full_like(close, np.nan)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -57,7 +61,12 @@ async def fetch_crypto_panel(
     lookback_days: int = 730,
     asof_day: date | None = None,
 ) -> tuple[dict[str, np.ndarray], list[str], list[date]]:
-    """메인넷 공개 OHLCV → (panel, symbols, dates). 공통 날짜만 정렬(inner join)."""
+    """메인넷 공개 klines → (panel, symbols, dates). 공통 날짜만 정렬(inner join).
+
+    fetch_ohlcv 는 6컬럼(OHLCV)만 돌려줘 거래대금·체결수를 버린다. 유동성 신호를
+    위해 원시 klines(12컬럼)를 직접 조회 — quote(USDT) 거래대금[7]·체결 건수[8]를
+    확보한다. VWAP 은 거래대금/거래량으로 근사(klines 는 VWAP 직접 미제공).
+    """
     import ccxt.async_support as ccxt_async
 
     symbols = symbols or CRYPTO_RESEARCH_UNIVERSE
@@ -72,19 +81,25 @@ async def fetch_crypto_panel(
     per_symbol: dict[str, dict[date, tuple]] = {}
     try:
         for symbol in symbols:
+            market_id = symbol.replace("/", "")  # BTC/USDT → BTCUSDT (원시 klines 심볼)
             rows: dict[date, tuple] = {}
             cursor = since
             while True:
-                raw = await ex.fetch_ohlcv(symbol, "1d", cursor, 1000)
+                raw = await ex.publicGetKlines(
+                    {"symbol": market_id, "interval": "1d", "startTime": cursor, "limit": 1000}
+                )
                 if not raw:
                     break
-                for ts, o, h, lo, c, v in raw:
-                    day = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date()
+                for k in raw:
+                    day = datetime.fromtimestamp(int(k[0]) / 1000, tz=timezone.utc).date()
                     if day <= end:
-                        rows[day] = (o, h, lo, c, v)
+                        o, h, lo, c, v = (float(k[i]) for i in range(1, 6))
+                        quote_vol, n_trades = float(k[7]), float(k[8])
+                        vwap = quote_vol / v if v > 0 else c
+                        rows[day] = (o, h, lo, c, v, vwap, quote_vol, n_trades)
                 if len(raw) < 1000:
                     break
-                cursor = raw[-1][0] + 1
+                cursor = int(raw[-1][0]) + 1
             per_symbol[symbol] = rows
     finally:
         await ex.close()
@@ -111,6 +126,7 @@ async def fetch_us_panel(
 ) -> tuple[dict[str, np.ndarray], list[str], list[date]]:
     """Alpaca 무료 IEX 일봉 → (panel, symbols, dates). 상한 t-1(진행 중 당일 봉 제외).
 
+    봉 스키마 t/o/h/l/c/v/n/vw 중 vw(VWAP)·n(체결수)까지 캡처 — 유동성 신호용.
     2년 일봉은 종목당 ~500봉(< limit)이라 페이지네이션 불필요 — 종목별 1회 조회.
     """
     symbols = symbols or US_RESEARCH_UNIVERSE
@@ -141,7 +157,10 @@ async def fetch_us_panel(
             for rb in (resp.json().get("bars") or {}).get(symbol, []):
                 day = datetime.fromisoformat(rb["t"].replace("Z", "+00:00")).date()
                 if day <= end:  # 상한 재확인
-                    rows[day] = (rb["o"], rb["h"], rb["l"], rb["c"], rb["v"])
+                    o, h, lo, c, v = rb["o"], rb["h"], rb["l"], rb["c"], rb["v"]
+                    vwap = rb.get("vw", c)  # Alpaca 제공 VWAP (없으면 종가 대체)
+                    # Alpaca 는 quote 거래대금 미제공 → VWAP×거래량으로 근사
+                    rows[day] = (o, h, lo, c, v, vwap, vwap * v, float(rb.get("n", 0)))
             per_symbol[symbol] = rows
     finally:
         if own_client:
