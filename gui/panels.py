@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 
@@ -234,9 +235,33 @@ def load_intramarket_weights(state_dir: Path, market: str) -> dict[str, float]:
 # ── 스케줄 잡 상태 (launchd 로그 기반) ──
 
 # briefing= : paper_step, status=ok : 범용, cycle_done : alpha_lab 사이클 완료.
-# 실패 마커가 우선하므로(아래 판정) 한 시장만 실패해도 error 로 남는다.
+# 시장별 상태를 파싱해 롤업한다 — 일부 시장만 실패하면 error 가 아니라 partial(한 시장의
+# 네트워크 블립이 같은 잡의 다른 시장을 실패로 오염시키는 것 방지). 아래 범용 마커는
+# 시장 라인이 없는 잡(proposal·requests)의 폴백.
 _OK_MARKERS = ("briefing=", "status=ok", "cycle_done")
 _FAIL_MARKERS = ("status=fail", "status=error")
+
+# 시장별 상태 토큰: "market=US status=ok" 와 "[CRYPTO] status=error" 를 모두 매칭.
+_MKT_STATUS = re.compile(r"(?:market=|\[)([A-Za-z_]+)\]?\s+status=(\w+)")
+_MKT_CYCLE_OK = re.compile(r"\[([A-Za-z_]+)\]\s+cycle_done")  # alpha_lab 시장 완료
+_TERMINAL = {"ok", "error", "fail"}  # observed 등 중간 상태는 무시(최신 '종결' 만 반영)
+
+
+def _market_statuses(out_tail: list[str]) -> dict[str, str]:
+    """out 로그 tail 에서 시장별 최신 종결 상태(ok|error)를 뽑는다(마지막 등장 우선).
+
+    status= 없는 유사 시장 라인(MACRO·META·virtual·regime)과 중간 상태(observed)는 무시.
+    """
+    latest: dict[str, str] = {}
+    for line in out_tail:
+        m = _MKT_STATUS.search(line)
+        if m and m.group(2) in _TERMINAL:
+            latest[m.group(1)] = "error" if m.group(2) in ("error", "fail") else "ok"
+            continue
+        c = _MKT_CYCLE_OK.search(line)
+        if c:
+            latest[c.group(1)] = "ok"
+    return latest
 
 
 def _tail(path: Path, n: int) -> list[str]:
@@ -245,7 +270,7 @@ def _tail(path: Path, n: int) -> list[str]:
     return path.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
 
 
-def load_launchd_jobs(log_dir: Path, tail_lines: int = 20) -> list[dict]:
+def load_launchd_jobs(log_dir: Path, tail_lines: int = 40) -> list[dict]:
     """launchd*.log(out/err)를 잡별로 묶어 상태 요약. 파일만 읽는다(launchctl 미호출).
 
     상태는 **out 로그 tail 마커** 기반 추정(최신 런의 완료/실패 신호). 정확한 종료코드가
@@ -270,15 +295,26 @@ def load_launchd_jobs(log_dir: Path, tail_lines: int = 20) -> list[dict]:
         err_tail = _tail(err_p, tail_lines) if err_p else []
         mtimes = [p.stat().st_mtime for p in (out_p, err_p) if p and p.exists()]
         last_run = datetime.fromtimestamp(max(mtimes)).isoformat(timespec="seconds") if mtimes else None
-        joined = "\n".join(out_tail)
-        if any(m in joined for m in _FAIL_MARKERS):
-            status = "error"
-        elif any(m in joined for m in _OK_MARKERS):
-            status = "ok"
-        else:
-            status = "unknown"
+        market_status = _market_statuses(out_tail)
+        if market_status:
+            vals = set(market_status.values())
+            if "error" in vals and "ok" in vals:
+                status = "partial"  # 일부 시장만 실패 — 다른 시장은 정상
+            elif "error" in vals:
+                status = "error"
+            else:
+                status = "ok"
+        else:  # 시장 라인 없는 잡: 범용 마커 폴백
+            joined = "\n".join(out_tail)
+            if any(m in joined for m in _FAIL_MARKERS):
+                status = "error"
+            elif any(m in joined for m in _OK_MARKERS):
+                status = "ok"
+            else:
+                status = "unknown"
         jobs.append({
             "job": job, "status": status, "last_run": last_run,
+            "markets": market_status,
             "out_tail": out_tail, "err_tail": err_tail,
             "has_stderr": bool(err_tail and any(ln.strip() for ln in err_tail)),
         })

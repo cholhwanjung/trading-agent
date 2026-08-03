@@ -448,12 +448,18 @@ with tab_ops:
             return
         names = {"main": "paper_step (CRYPTO/US · 23:00)", "kr": "paper_step (KR · 10:00)",
                  "alpha": "alpha_lab (일요일)", "requests": "request_capabilities (매월 1일 20:30)"}
-        badge = {"ok": "✅ 성공", "error": "⚠️ 오류", "unknown": "❓ 불명"}
+        badge = {"ok": "✅ 성공", "partial": "🟠 부분 실패", "error": "⚠️ 오류", "unknown": "❓ 불명"}
         for j in jobs:
             title = names.get(j["job"], j["job"])
             last = j["last_run"].replace("T", " ") if j["last_run"] else "?"
             hint = " · 🟡 stderr 있음" if j["has_stderr"] else ""
-            with st.expander(f"{badge.get(j['status'], '❓')} · {title} · 최근 {last}{hint}"):
+            chips = " ".join(
+                f"{'✅' if s == 'ok' else '⚠️'}{m}" for m, s in sorted(j.get("markets", {}).items())
+            )
+            chip_str = f" · {chips}" if chips else ""
+            with st.expander(f"{badge.get(j['status'], '❓')} · {title}{chip_str} · 최근 {last}{hint}"):
+                if j.get("markets"):
+                    st.caption("시장별 최신 상태 — 한 잡이 여러 시장을 묶어 돌므로 한 시장 실패가 다른 시장 실패를 뜻하지 않음.")
                 if j["out_tail"]:
                     st.caption("stdout (tail)")
                     st.code("\n".join(j["out_tail"]))
