@@ -23,6 +23,17 @@ from adapters.base import (
 from adapters.retry import with_retry
 
 
+async def _ensure_markets(client) -> None:
+    """ccxt 마켓 메타를 1회만 프리로드(캐시). markets 가 이미 있으면 즉시 반환.
+
+    exchangeInfo 응답은 드물게 느리거나 일시 불가(ExchangeNotAvailable/타임아웃)할 수 있고,
+    그동안 첫 데이터 조회 안에서 lazily 터지면 크립토 스텝 전체가 죽는다. 일반 조회(3회)보다
+    넉넉한 재시도(5회·백오프 2s→)로 감싸 더 긴 일시 장애 구간을 흡수한다.
+    """
+    if not client.markets:
+        await with_retry(client.load_markets, attempts=5, base_delay=2.0)
+
+
 class BinanceTestnetAdapter(MarketAdapter):
     market = "CRYPTO"
 
@@ -55,6 +66,7 @@ class BinanceTestnetAdapter(MarketAdapter):
         """메인넷 일봉 조회 후 [start, end] 로 필터 — 진행 중인 당일 봉 차단."""
         since = int(datetime.combine(start, time(), tzinfo=timezone.utc).timestamp() * 1000)
         limit = (end - start).days + 3
+        await _ensure_markets(self.data)  # exchangeInfo 프리로드(넉넉한 재시도) — lazily 실패 방지
         out: dict[str, list[Bar]] = {}
         for symbol in symbols:
             raw = await with_retry(lambda s=symbol: self.data.fetch_ohlcv(s, "1d", since, limit))
@@ -75,6 +87,7 @@ class BinanceTestnetAdapter(MarketAdapter):
 
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         """실시간 체결가 — 메인넷 공개 티커(당일, 행동 전용)."""
+        await _ensure_markets(self.data)
         out: dict[str, float] = {}
         for symbol in symbols:
             ticker = await with_retry(lambda s=symbol: self.data.fetch_ticker(s))
@@ -83,6 +96,7 @@ class BinanceTestnetAdapter(MarketAdapter):
 
     async def _snapshot(self) -> tuple[float, dict[str, float], dict[str, float]]:
         """(quote 현금, 보유수량, 현재가) — 잔고 1회 + 유니버스 전 종목 티커 조회."""
+        await _ensure_markets(self.data)  # 티커 조회 전 시세 클라이언트 마켓 프리로드
         balance = await with_retry(self.ex.fetch_balance)
         cash = float(balance.get("total", {}).get(self.quote) or 0)
         qty: dict[str, float] = {}
@@ -118,7 +132,7 @@ class BinanceTestnetAdapter(MarketAdapter):
                 weights, holdings, cash, prices, min_notional=self.min_notional
             )
             if intents:
-                await self.ex.load_markets()  # amount_to_precision 에 필요 (캐시됨)
+                await _ensure_markets(self.ex)  # amount_to_precision 에 필요 (넉넉한 재시도·캐시됨)
             orders = []
             for it in intents:
                 amount = float(self.ex.amount_to_precision(it.symbol, it.qty))
