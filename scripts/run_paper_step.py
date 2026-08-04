@@ -483,6 +483,27 @@ async def main() -> int:
                 today,
             )
 
+            # KR 수급 (shadow) — 투자자별 순매수(외인/기관/개인) 계산·로깅만, 결정 미개입.
+            # 수급 축적·반전은 봉·뉴스가 못 담는 포지셔닝 신호 — 관측 승격은 라이브 검증 후.
+            if market == "KR":
+                from adapters.kis import summarize_flows
+
+                try:
+                    flows = await adapter.get_investor_flows(symbols, today)
+                    summary = {s: summarize_flows(r) for s, r in flows.items() if r}
+                    if summary:
+                        logger.log(market, "investor_flow", {"summary": summary})
+                        lows = min(summary.items(), key=lambda kv: kv[1]["foreign_5d_z"])
+                        print(
+                            f"market={market} flow_symbols={len(summary)}"
+                            f" min_foreign_5d_z={lows[1]['foreign_5d_z']} sym={lows[0]}"
+                        )
+                except Exception as e:  # 수급 조회 실패가 매매 루프를 죽이면 안 된다
+                    logger.log(market, "flow_error", {
+                        "error_type": type(e).__name__, "error": str(e)[:200],
+                    })
+                    print(f"market={market} status=flow_error detail={str(e)[:120]}")
+
             # ── 메모리 파이프라인 — 실패가 매매 루프를 죽이면 안 된다 ──
             try:
                 await run_memory_pipeline(

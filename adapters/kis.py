@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import statistics
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -114,6 +115,24 @@ class KISSession:
         headers = await self.headers(tr_id)
         await self._throttle()
         return await self._client.post(path, headers=headers, json=body)
+
+
+def summarize_flows(rows: list[dict], short: int = 5, long: int = 20) -> dict:
+    """투자자별 순매수 요약 — 최근 short 일 합(백만원)과 z-점수.
+
+    z = short합 / (최근 long 일 일별 표준편차 × √short) — 종목 규모와 무관하게 비교 가능.
+    표본이 long 미만이면 있는 만큼으로 계산, 표준편차 0(무변동)이면 z=0.
+    """
+    out: dict = {"days": len(rows), "last_day": rows[-1]["day"].isoformat() if rows else None}
+    for who in ("foreign", "inst", "retail"):
+        daily = [r[who] for r in rows][-long:]
+        recent = daily[-short:]
+        std = statistics.pstdev(daily) if len(daily) > 1 else 0.0
+        out[f"{who}_{short}d"] = round(sum(recent))
+        out[f"{who}_{short}d_z"] = (
+            round(sum(recent) / (std * short**0.5), 3) if std > 0 else 0.0
+        )
+    return out
 
 
 class KISPaperAdapter(MarketAdapter):
@@ -239,6 +258,49 @@ class KISPaperAdapter(MarketAdapter):
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         """실시간 체결가 — 당일, 행동 전용(실시간 이벤트 트리거 감시·재결정 입력)."""
         return {s: await self._current_price(s) for s in symbols}
+
+    # ── 수급 (투자자별 순매수) ──
+
+    @staticmethod
+    def _parse_investor(rows: list[dict], end: date) -> list[dict]:
+        """일별 투자자 순매수 행 → [{day, foreign, inst, retail}] 오름차순 (대금, 백만원).
+
+        당일 행은 장중 집계 전이라 필드가 빈 문자열로 온다 — 빈 행과 end(t-1) 초과분을
+        함께 버려 미확정·당일 데이터가 관측에 들어오지 않게 한다.
+        """
+        out = []
+        for r in rows:
+            raw = r.get("stck_bsop_date") or ""
+            if len(raw) != 8 or not r.get("frgn_ntby_tr_pbmn"):
+                continue
+            day = date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+            if day <= end:
+                out.append({
+                    "day": day,
+                    "foreign": float(r["frgn_ntby_tr_pbmn"]),
+                    "inst": float(r["orgn_ntby_tr_pbmn"]),
+                    "retail": float(r["prsn_ntby_tr_pbmn"]),
+                })
+        return sorted(out, key=lambda x: x["day"])
+
+    async def get_investor_flows(
+        self, symbols: list[str], asof_day: date
+    ) -> dict[str, list[dict]]:
+        """투자자별 순매수 동향(외인/기관/개인, 최근 ~30거래일) — 상한 t-1.
+
+        수급 축적·반전(외인 연속 매도, 개인 투매 전환 등)은 봉·뉴스가 못 담는
+        포지셔닝 신호라 별도 채널로 관측한다. 대금(백만원) 기준.
+        """
+        end = asof_day - timedelta(days=1)
+        out: dict[str, list[dict]] = {}
+        for symbol in symbols:
+            data = await self.session.get(
+                "/uapi/domestic-stock/v1/quotations/inquire-investor",
+                tr_id="FHKST01010900",
+                params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
+            )
+            out[symbol] = self._parse_investor(data.get("output") or [], end)
+        return out
 
     # ── 주문 ──
 
