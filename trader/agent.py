@@ -17,6 +17,7 @@ from pathlib import Path
 from adapters.allocation import CASH
 from adapters.base import Bar, Observation, Position
 from llm import LLMRouter
+from trader.events import upcoming_events
 from trader.features import InsufficientHistoryError, compute_features
 from trader.schema import parse_decision
 
@@ -74,10 +75,12 @@ def build_user_prompt(
     debate: dict | None = None,
     trigger: dict | None = None,
     max_news: int = 10,
+    events: list[dict] | None = None,
 ) -> str:
     """관측을 구조화 텍스트로 — 자유 산문 없이 JSON 블록 나열.
 
     lessons 는 admission+probation 을 통과한 active 교훈만 (검증 전 개입 금지).
+    events 는 사전 공지된 미래 일정(공개 정보) — 관측 상한과 무관한 별도 컨텍스트.
     """
 
     recent = {
@@ -98,6 +101,11 @@ def build_user_prompt(
         "verified_lessons": lessons or [],
         "alpha_signals": alpha_signals or {},
     }
+    if events:
+        payload["upcoming_events"] = {
+            "note": "사전 공지된 일정(결과 아님) — 이벤트 직전 리스크 노출은 스스로 판단하라.",
+            "events": events,
+        }
     if debate:
         payload["debate_review"] = {
             "instruction": "아래 Bull/Bear 토론을 검토해 배분을 재결정하라. 논거가 기존 제안을 지지하면 유지해도 된다.",
@@ -160,7 +168,8 @@ class LLMTrader:
                 {
                     "role": "user",
                     "content": build_user_prompt(
-                        obs, positions, features, lessons, signals, debate, trigger
+                        obs, positions, features, lessons, signals, debate, trigger,
+                        events=upcoming_events(self.market, obs.asof_day),
                     ),
                 }
             ],
@@ -260,6 +269,7 @@ class LLMTrader:
             "influence": influence,
             "debate": debate_meta,  # None = 미소집 (verify 로그)
             "realtime_trigger": trigger,  # None = 일간 스텝 / dict = 이벤트 소집
+            "upcoming_events": upcoming_events(self.market, obs.asof_day),  # 프롬프트 주입분 감사
             "rationale": decision.rationale,
             "cited_signal_ids": decision.cited_signal_ids,
             "cited_memory_ids": decision.cited_memory_ids,
