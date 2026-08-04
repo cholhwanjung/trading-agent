@@ -62,7 +62,13 @@ from regime import (  # noqa: E402
     update_regime_signal,
 )
 from adapters import configure_observation  # noqa: E402
-from risk import RiskEngine, RiskGuardedPolicy, RiskLimits, account_fingerprint  # noqa: E402
+from risk import (  # noqa: E402
+    RiskEngine,
+    RiskGuardedPolicy,
+    RiskLimits,
+    account_fingerprint,
+    concentration,
+)
 from trader import LLMTrader  # noqa: E402
 
 # 시장별 유니버스 — 설명 가능한 메이저 집중(2026-07-20, 사용자 승인): 뉴스·데이터
@@ -493,6 +499,28 @@ async def main() -> int:
                     "proxy": INDEX_PROXY.get(market),
                 })
                 print(f"market={market} vol_state={vol.state} rv20={vol.realized_vol}")
+
+            # 배분 집중도·실효 분산 (shadow) — 종목당 상한이 못 보는 동조 리스크.
+            # 계산·로깅만, Risk Engine 미개입 — 검증 후 집중도 상한 게이트 승격 대상.
+            if llm_weights:
+                try:
+                    hist = await adapter.get_ohlcv_history(symbols, today, lookback_days=120)
+                    conc = concentration(
+                        llm_weights, {s: [b.close for b in bars] for s, bars in hist.items()}
+                    )
+                except Exception as e:
+                    conc = None
+                    logger.log(market, "concentration_error", {
+                        "error_type": type(e).__name__, "error": str(e)[:200],
+                    })
+                if conc is not None:
+                    logger.log(market, "concentration", {
+                        "hhi": conc.hhi, "effective_n": conc.effective_n,
+                        "effective_n_corr": conc.effective_n_corr,
+                        "avg_corr": conc.avg_corr, "n_assets": conc.n_assets,
+                    })
+                    print(f"market={market} eff_n={conc.effective_n}"
+                          f" eff_n_corr={conc.effective_n_corr} avg_corr={conc.avg_corr}")
 
             # KR 수급 (shadow) — 투자자별 순매수(외인/기관/개인) 계산·로깅만, 결정 미개입.
             # 수급 축적·반전은 봉·뉴스가 못 담는 포지셔닝 신호 — 관측 승격은 라이브 검증 후.
