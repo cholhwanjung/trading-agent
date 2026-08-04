@@ -12,9 +12,13 @@ from datetime import date
 
 from regime.macro import MacroRegime, classify_macro
 from regime.pulse import RegimeResult, classify_regime
+from regime.vol import VolResult, classify_vol
 
-INDEX_PROXY = {"CRYPTO": "BTC/USDT", "US": "SPY", "KR": "069500"}
+# US 프록시는 QQQ — 유니버스(나스닥 메가캡)와 정합하고, KIS 해외 시세계가 나스닥
+# 코드(NAS)로 고정돼 있어 NYSE Arca 상장 SPY 는 빈 응답이 온다(조용한 실패 방지).
+INDEX_PROXY = {"CRYPTO": "BTC/USDT", "US": "QQQ", "KR": "069500"}
 LOOKBACK_DAYS = 300  # DD 25세션 윈도우 + CORRECTION 추적 여유
+VOL_LOOKBACK_DAYS = 60  # 실현변동성 20거래일 창 + 휴장 여유
 
 
 async def compute_regime(adapter, market: str, asof_day: date) -> RegimeResult | None:
@@ -25,6 +29,18 @@ async def compute_regime(adapter, market: str, asof_day: date) -> RegimeResult |
     try:
         bars = await adapter.get_ohlcv_history([proxy], asof_day, lookback_days=LOOKBACK_DAYS)
         return classify_regime(bars.get(proxy, []))
+    except Exception:
+        return None
+
+
+async def compute_market_vol(adapter, market: str, asof_day: date) -> VolResult | None:
+    """지수 프록시 실현변동성 국면. 프록시 없음/조회 실패 → None (fail-open)."""
+    proxy = INDEX_PROXY.get(market)
+    if not proxy:
+        return None
+    try:
+        bars = await adapter.get_ohlcv_history([proxy], asof_day, lookback_days=VOL_LOOKBACK_DAYS)
+        return classify_vol([b.close for b in bars.get(proxy, [])])
     except Exception:
         return None
 

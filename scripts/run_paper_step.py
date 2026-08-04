@@ -53,6 +53,7 @@ from memory import (  # noqa: E402
     review_retention,
 )
 from regime import (  # noqa: E402
+    compute_market_vol,
     INDEX_PROXY,
     compute_macro_regime,
     compute_regime,
@@ -482,6 +483,16 @@ async def main() -> int:
                 regime.drawdown if regime else 0.0,
                 today,
             )
+
+            # 시장 실현변동성 (shadow) — 전역 VIX 게이지가 못 보는 지역 위기 감지.
+            # 계산·로깅만, 결정/리스크 미개입 — 검증 후 리스크 게이트 입력 승격 대상.
+            vol = await compute_market_vol(adapter, market, today)
+            if vol is not None:
+                logger.log(market, "market_vol", {
+                    "state": vol.state, "realized_vol_20d": vol.realized_vol,
+                    "proxy": INDEX_PROXY.get(market),
+                })
+                print(f"market={market} vol_state={vol.state} rv20={vol.realized_vol}")
 
             # KR 수급 (shadow) — 투자자별 순매수(외인/기관/개인) 계산·로깅만, 결정 미개입.
             # 수급 축적·반전은 봉·뉴스가 못 담는 포지셔닝 신호 — 관측 승격은 라이브 검증 후.

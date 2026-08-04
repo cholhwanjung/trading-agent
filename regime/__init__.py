@@ -1,6 +1,6 @@
 """시장 국면(regime) 분류 — O'Neil market pulse 이식 ([ADR-023]). 무료 일간 지수 봉만."""
 
-from regime.live import INDEX_PROXY, compute_macro_regime, compute_regime
+from regime.live import INDEX_PROXY, compute_macro_regime, compute_market_vol, compute_regime
 from regime.macro import CALM, CRISIS, STRESS, MacroRegime, classify_macro
 from regime.meta import MarketSignal, MetaProposal, propose_meta_weights
 from regime.pulse import (
@@ -26,6 +26,7 @@ __all__ = [
     "compute_macro_regime",
     "INDEX_PROXY",
     "compute_regime",
+    "compute_market_vol",
     "MarketSignal",
     "MetaProposal",
     "propose_meta_weights",
