@@ -236,6 +236,10 @@ class KISPaperAdapter(MarketAdapter):
         total = (data.get("output2") or [{}])[0]
         return float(total.get("tot_evlu_amt") or 0)  # 예수금 + 평가액
 
+    async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
+        """실시간 체결가 — 당일, 행동 전용(실시간 이벤트 트리거 감시·재결정 입력)."""
+        return {s: await self._current_price(s) for s in symbols}
+
     # ── 주문 ──
 
     async def _current_price(self, symbol: str) -> float:

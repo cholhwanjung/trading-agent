@@ -11,7 +11,8 @@ JSON 파일에 영속 — 이 모듈은 (state, prices, now) → (trigger?, new_
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True)
@@ -21,18 +22,39 @@ class TriggerConfig:
     move_threshold: float  # |Δ| ≥ 이 값이면 발동 (예: 0.08 = 8%)
     cooldown_s: int  # 직전 발동 후 이 시간 내 재발동 금지
     ref_ttl_s: int  # 무발동 시 참조가를 현재가로 갱신하는 주기(롤링 윈도우 폭)
+    session: tuple[str, time, time] | None = None  # (IANA tz, 개장, 폐장). None = 24/7
 
 
-# v1 은 CRYPTO 전용(24/7, 장중 게이팅 불필요). US/KR 은 장 시간 게이팅 도입 후 추가.
+# CRYPTO 는 24/7 무게이팅. KR 은 장중(09:00~15:30 KST)만 — 장외 시장가는 미체결.
+# KR 임계 5%: 코스피 대형주 일중 5% 급변이면 지수 서킷브레이커(8%) 전 단계에서 재평가.
+# US 는 현재 실계좌 집행 경로라 자동 트리거 주문 대상에서 보류(명시 결정 후 추가).
 DEFAULTS = {
     "CRYPTO": TriggerConfig(move_threshold=0.08, cooldown_s=3600, ref_ttl_s=10800),
+    "KR": TriggerConfig(
+        move_threshold=0.05, cooldown_s=3600, ref_ttl_s=10800,
+        session=("Asia/Seoul", time(9, 0), time(15, 30)),
+    ),
 }
 
 
 def config_for(market: str) -> TriggerConfig:
     if market not in DEFAULTS:
-        raise KeyError(f"트리거 미지원 시장={market} (v1 은 {sorted(DEFAULTS)})")
+        raise KeyError(f"트리거 미지원 시장={market} (지원: {sorted(DEFAULTS)})")
     return DEFAULTS[market]
+
+
+def in_session(config: TriggerConfig, now: datetime) -> bool:
+    """장중 여부. session 없는 시장(24/7)은 항상 True.
+
+    주말(토·일)은 장외. 휴장일 캘린더는 두지 않는다 — 휴장 틱은 가격 불변 → 무발동이라
+    무해하고, 주문 경로는 어차피 거래소가 거부한다.
+    """
+    if config.session is None:
+        return True
+    now = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    tz, open_t, close_t = config.session
+    local = now.astimezone(ZoneInfo(tz))
+    return local.weekday() < 5 and open_t <= local.time() <= close_t
 
 
 def _parse(ts: str | None) -> datetime | None:

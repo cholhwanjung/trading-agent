@@ -244,7 +244,9 @@ _FAIL_MARKERS = ("status=fail", "status=error")
 # 시장별 상태 토큰: "market=US status=ok" 와 "[CRYPTO] status=error" 를 모두 매칭.
 _MKT_STATUS = re.compile(r"(?:market=|\[)([A-Za-z_]+)\]?\s+status=(\w+)")
 _MKT_CYCLE_OK = re.compile(r"\[([A-Za-z_]+)\]\s+cycle_done")  # alpha_lab 시장 완료
-_TERMINAL = {"ok", "error", "fail"}  # observed 등 중간 상태는 무시(최신 '종결' 만 반영)
+# observed·triggered 등 중간 상태는 무시(최신 '종결' 만 반영).
+# no_trigger(워처 무발동 틱)·closed(장외 게이팅 스킵)=정상, rejected(트리거 주문 거부)=실패.
+_TERMINAL = {"ok", "error", "fail", "no_trigger", "closed", "rejected"}
 
 
 def _market_statuses(out_tail: list[str]) -> dict[str, str]:
@@ -256,7 +258,7 @@ def _market_statuses(out_tail: list[str]) -> dict[str, str]:
     for line in out_tail:
         m = _MKT_STATUS.search(line)
         if m and m.group(2) in _TERMINAL:
-            latest[m.group(1)] = "error" if m.group(2) in ("error", "fail") else "ok"
+            latest[m.group(1)] = "error" if m.group(2) in ("error", "fail", "rejected") else "ok"
             continue
         c = _MKT_CYCLE_OK.search(line)
         if c:

@@ -12,7 +12,7 @@ reflection)을 호출하지 않는다 — 당일 정보 기반 결정을 admissi
 
 사용법:
     uv run python scripts/run_watcher.py                 # CRYPTO 1회 점검(+발동 시 주문)
-    uv run python scripts/run_watcher.py --market CRYPTO
+    uv run python scripts/run_watcher.py --market KR     # KR 은 장중(09:00~15:30 KST)만 동작
     uv run python scripts/run_watcher.py --dry-run       # 조회·판정만(주문·상태저장 없음)
 """
 
@@ -39,7 +39,7 @@ from scripts.run_paper_step import (  # noqa: E402
     load_prev_weights,
 )
 from trader import LLMTrader  # noqa: E402
-from watcher import config_for, evaluate, max_drift  # noqa: E402
+from watcher import config_for, evaluate, in_session, max_drift  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -69,7 +69,12 @@ async def main() -> int:
     args = _parse_args()
     market = args.market
     dry_run = args.dry_run
-    config = config_for(market)  # 미지원 시장은 KeyError (v1 은 CRYPTO 전용)
+    config = config_for(market)  # 미지원 시장은 KeyError (지원 목록은 watcher.DEFAULTS)
+
+    # 장외엔 아무것도 하지 않는다 — 시장가 미체결 시간대의 트리거·주문 차단(15분 틱 조기 종료).
+    if not in_session(config, datetime.now(timezone.utc)):
+        print(f"market={market} status=closed detail=장외 게이팅 스킵")
+        return 0
 
     env = load_env(ROOT / ".env")
     configure_observation(env)  # 관측 윈도우 길이 .env 오버라이드(실험 변수, 미설정 시 기본)

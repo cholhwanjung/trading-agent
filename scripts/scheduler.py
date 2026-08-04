@@ -40,8 +40,10 @@ JOBS = [
     # 능력 갭 요구 — 매월 1일 20:30, 제안서(21:00) 직전 생성. 신호 없으면 스크립트가 skip.
     Job("capability_requests", "scripts/request_capabilities.py", hour=20, minute=30, monthday=1),
     Job("monthly_proposal", "scripts/propose_improvements.py", hour=21, monthday=1),
-    # 실시간 이벤트 트리거 — 15분마다 급변 점검, CRYPTO 전용(24/7)
+    # 실시간 이벤트 트리거 — 15분마다 급변 점검. CRYPTO 는 24/7,
+    # KR 은 장중(09:00~15:30 KST) 게이팅을 스크립트가 판단(장외 틱은 즉시 종료)
     Job("watcher_crypto", "scripts/run_watcher.py", every_minutes=15, args=("--market", "CRYPTO")),
+    Job("watcher_kr", "scripts/run_watcher.py", every_minutes=15, args=("--market", "KR")),
 ]
 
 
