@@ -1,7 +1,7 @@
 """라이브 국면 계산 — 어댑터로 지수 프록시 봉을 조회해 classify_regime 에 넘긴다.
 
-별도 지수 API 없이 기존 어댑터의 심볼 조회만 사용(`get_ohlcv_history`, 상한 t−1 =
-[ADR-013] 누출 통제 유지). 지수 프록시:
+별도 지수 API 없이 기존 어댑터의 심볼 조회만 사용(`get_ohlcv_history`, 상한 t−1 로
+당일 데이터 차단). 지수 프록시:
     CRYPTO = BTC/USDT (대장), US = SPY, KR = 069500 (KODEX 200).
 """
 

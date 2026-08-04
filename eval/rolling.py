@@ -72,11 +72,11 @@ def meta_shadow_delta(
     weights_by_day: dict[str, dict[str, float]],
     k: int = ROLLING_K,
 ) -> dict | None:
-    """동적 메타 배분 vs 고정 균등의 rolling delta ([ADR-025] verify).
+    """동적 메타 배분 vs 고정 균등의 rolling delta.
 
     두 지수를 **같은 리밸런싱 방법**(combined_index_dynamic)으로 산출 — 가중치만 달라
     배분 스킬을 분리 측정한다. dynamic − equal 의 창 승률·비중첩 청크 부호검정.
-    집행 승격은 이 델타>0·유의 + 실계좌 전환 후([ADR-026]). 데이터 부족 시 None.
+    집행 승격은 이 델타>0·유의 + 실계좌 전환 후. 데이터 부족 시 None.
     """
     dyn = combined_index_dynamic(state_dir, arm, weights_by_day)
     fixed = combined_index_dynamic(state_dir, arm, {})  # 빈 dict = 고정 균등 baseline

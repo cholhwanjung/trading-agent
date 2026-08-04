@@ -1,12 +1,12 @@
-"""시장 간 shadow 메타 배분 제안 — regime 기반 결정론 틸트 ([ADR-025]).
+"""시장 간 shadow 메타 배분 제안 — regime 기반 결정론 틸트.
 
 고정 1/N anchor 대비 각 시장의 국면으로 예산을 bounded 틸트한다. LLM 미개입(순수 함수).
 증거 부족(regime_state=None)한 시장은 anchor 유지(무개입 fallback). v1 은 shadow —
-제안만 반환하고 집행/Risk 변조는 검증 후(하드룰 1). 출력 weights 는
+제안만 반환하고 집행/Risk 변조는 라이브 검증 후에만. 출력 weights 는
 `treasury.guard.plan_transfers` 의 target_split 로 직결된다(시장 = venue).
 
 regime 이 모두 동일하면 틸트가 균일→재정규화로 anchor 복귀: 시장 간 *상대* 국면차가
-없으면 예산을 옮길 이유가 없다(하방 방어는 각 버킷 내부 현금비중이 담당, 격리 유지 [ADR-007]).
+없으면 예산을 옮길 이유가 없다(하방 방어는 각 버킷 내부 현금비중이 담당, 시장 격리 유지).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ REGIME_SCORE: dict[str, float] = {
 
 @dataclass(frozen=True)
 class MarketSignal:
-    """시장 1곳의 집계 신호 — 격리 유지: 개별 포지션·메모리 미포함 ([ADR-007])."""
+    """시장 1곳의 집계 신호 — 격리 유지: 개별 포지션·메모리 미포함."""
 
     market: str
     regime_state: str | None

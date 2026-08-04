@@ -41,7 +41,7 @@ async def fetch_fred_latest(
     series: dict[str, str] = MACRO_SERIES,
     lookback_days: int = 30,
 ) -> dict[str, float | None]:
-    """각 시리즈의 t−1 상한 최신값. 상한 = asof_day−1(당일 차단, 하드룰 7)."""
+    """각 시리즈의 t−1 상한 최신값. 상한 = asof_day−1(당일 데이터 차단)."""
     end = asof_day - timedelta(days=1)
     start = asof_day - timedelta(days=lookback_days)
     out: dict[str, float | None] = {}

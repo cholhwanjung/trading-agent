@@ -1,4 +1,4 @@
-"""시장 국면(regime) 분류 — O'Neil market pulse 이식 ([ADR-023]). 무료 일간 지수 봉만."""
+"""시장 국면(regime) 분류 — O'Neil market pulse 이식. 무료 일간 지수 봉만."""
 
 from regime.live import INDEX_PROXY, compute_macro_regime, compute_market_vol, compute_regime
 from regime.macro import CALM, CRISIS, STRESS, MacroRegime, classify_macro

@@ -1,4 +1,4 @@
-"""Treasury — 시장 간 자본 이체 계층 ([ADR-026]). 결정론 가드 + (후속) 수동 액추에이션."""
+"""Treasury — 시장 간 자본 이체 계층. 결정론 가드 + (후속) 수동 액추에이션."""
 
 from treasury.guard import (
     ALLOWLIST,

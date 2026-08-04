@@ -554,7 +554,7 @@ async def main() -> int:
         memory.close()
 
         # 매크로 국면 (전역 shadow) — FRED 일간 지표(VIX·금리차·달러·원달러). 계산·로깅만,
-        # 결정/Risk 미개입(하드룰 1). FRED 키 없으면 생략. 검증 후 리스크 게이트로 승격 대상.
+        # 결정/Risk 미개입(검증 전 개입 금지). FRED 키 없으면 생략. 검증 후 게이트 승격 대상.
         macro = await compute_macro_regime(env, today)
         if macro is not None:
             logger.log("MACRO", "macro_regime", {

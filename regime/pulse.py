@@ -1,4 +1,4 @@
-"""시장 국면(regime) 상태기계 — O'Neil "market direction (M)" 이식 ([ADR-023]).
+"""시장 국면(regime) 상태기계 — O'Neil "market direction (M)" 이식.
 
 무료 일간 지수 봉만으로 시장 건강을 3개 상태로 분류하는 결정론 FSM (순수 함수,
 I/O·클럭·네트워크 없음 → 단위 테스트 가능). prism-insight `cores/market_pulse.py`
@@ -60,7 +60,7 @@ def classify_regime(bars: list[Bar]) -> RegimeResult | None:
     """일간 봉 시퀀스(오름차순)를 replay 해 현재 국면을 판정. 봉 부족 시 None.
 
     순수 함수 — 전체 시퀀스를 매 호출 재생(O(n)). 호출부는 상한 t−1 봉만 넘긴다
-    ([ADR-013] 누출 통제와 동일 — 국면은 전일 종가 기준).
+    (관측 채널과 동일한 누출 통제 — 국면은 전일 종가 기준).
     """
     bars = [b for b in bars if b.volume is not None]
     if len(bars) < MIN_BARS:

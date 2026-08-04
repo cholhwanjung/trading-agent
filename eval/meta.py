@@ -104,7 +104,7 @@ def combined_index_dynamic(
     arm: str,
     weights_by_day: dict[str, dict[str, float]],
 ) -> dict | None:
-    """날짜별 메타 가중치로 **리밸런싱**한 결합 지수 ([ADR-025] verify).
+    """날짜별 메타 가중치로 **리밸런싱**한 결합 지수 — 동적 배분 검증용.
 
     index_0 = 1.0; index_t = index_{t-1} · (1 + Σ_m w_m,t · r_m,t),
     r_m,t = 시장 m 일간 수익률(step equity). 미시작 시장은 수익 0 기여(현금 대기).
@@ -158,9 +158,9 @@ def combined_index_dynamic(
     }
 
 
-# ── 메타 shadow 배분 로그 ([ADR-025] shadow 배선) ─────────────────────────────
+# ── 메타 shadow 배분 로그 ────────────────────────────────────────────────────
 # propose_meta_weights 의 일별 제안을 누적 — combined_index_dynamic/meta_shadow_delta
-# 의 weights_by_day 입력원. 집행 없이 로깅만(하드룰 1: 검증 전 개입 금지).
+# 의 weights_by_day 입력원. 집행 없이 로깅만 — 검증 전에는 결정에 개입하지 않는다.
 
 
 def load_meta_shadow(ledger_path: Path | str) -> dict[str, dict[str, float]]:
