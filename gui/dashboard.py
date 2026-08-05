@@ -98,7 +98,7 @@ def pie(data: dict[str, float], title: str) -> None:
         )
         .properties(title=title, height=240)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 tab_dash, tab_obs, tab_chat, tab_ops = st.tabs(["📊 대시보드", "🔭 관측", "💬 챗", "🔧 운영"])
@@ -217,7 +217,7 @@ with tab_dash:
             fmt = {c: "{:.2%}" for c in pct}
             fmt.update({c: "{:.2f}" for c in ("Sharpe", "Sortino", "Calmar")})
             fmt["n"] = "{:.0f}"
-            st.dataframe(perf_df.style.format(fmt, na_rep="—"), use_container_width=True)
+            st.dataframe(perf_df.style.format(fmt, na_rep="—"))
         if dd_frame:
             st.caption("드로다운 (언더워터) — llm vs bh")
             st.line_chart(pd.DataFrame(dd_frame))
@@ -265,7 +265,7 @@ with tab_dash:
         for d in by_kind.get("decision", [])
     ]
     if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True)
 
     st.subheader("오늘 브리핑")
     st.markdown(build_briefing(ROOT))
@@ -302,7 +302,7 @@ with tab_obs:
             for sym, bars in snap["bars"].items():
                 if bars:
                     st.caption(f"`{sym}` OHLCV")
-                    st.dataframe(pd.DataFrame(bars).set_index("day"), use_container_width=True)
+                    st.dataframe(pd.DataFrame(bars).set_index("day"))
             st.markdown("**뉴스**")
             if snap["news"]:
                 for n in snap["news"]:
@@ -324,9 +324,9 @@ with tab_obs:
                     st.caption("관측 feature (심볼 × 정예 지표)")
                     # features 는 {심볼: {지표: 값}} 중첩 — 심볼을 행, 지표를 열로
                     if all(isinstance(v, dict) for v in feats.values()):
-                        st.dataframe(pd.DataFrame(feats).T.round(4), use_container_width=True)
+                        st.dataframe(pd.DataFrame(feats).T.round(4))
                     else:
-                        st.dataframe(pd.DataFrame([feats]), use_container_width=True, hide_index=True)
+                        st.dataframe(pd.DataFrame([feats]), hide_index=True)
                 st.caption("목표 배분 (risk 통과 후)")
                 st.json(decision["weights"])
                 if decision.get("weights_pre_risk"):
@@ -360,7 +360,7 @@ with tab_obs:
         st.subheader("risk veto/클램프 타임라인")
         vr = veto_rows(decisions)
         if vr:
-            st.dataframe(pd.DataFrame(vr), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(vr), hide_index=True)
         else:
             st.caption("최근 창에 risk 위반 없음")
 
@@ -376,7 +376,7 @@ with tab_obs:
                  "익일 수익률": None if r["next_day_return"] is None else round(r["next_day_return"] * 100, 3)}
                 for r in so
             ])
-            st.dataframe(so_df, use_container_width=True, hide_index=True)
+            st.dataframe(so_df, hide_index=True)
         else:
             st.caption("이 시장에 시나리오 기록이 아직 없음.")
 
@@ -488,7 +488,7 @@ with tab_ops:
             st.line_chart(df[["in", "out"]])
         if usage["by_model"]:
             st.caption("모델별 누적 토큰 (in+out 내림차순)")
-            st.dataframe(pd.DataFrame(usage["by_model"]), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(usage["by_model"]), hide_index=True)
     else:
         st.caption("아직 usage 로그 없음 — 다음 LLM 호출부터 `data/logs/USAGE/` 에 쌓인다.")
 
@@ -555,7 +555,7 @@ with tab_ops:
                      "자동레그": i.get("auto_leg"), "집행": i.get("executed")}
                     for i in tr["intents"]
                 ]),
-                use_container_width=True, hide_index=True,
+                hide_index=True,
             )
 
     st.subheader("메모리 (교훈 상태)")
@@ -568,7 +568,7 @@ with tab_ops:
         if i["kind"].startswith("memory_")
     ]
     if mem_rows:
-        st.dataframe(pd.DataFrame(mem_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(mem_rows), hide_index=True)
     else:
         st.caption("승격된 교훈 없음 — admission 게이트 통과분이 생기면 여기 표시된다.")
 
@@ -576,7 +576,7 @@ with tab_ops:
     lib_path = STATE / "alpha_library_CRYPTO.json"
     if lib_path.exists():
         factors = json.loads(lib_path.read_text(encoding="utf-8"))["factors"]
-        st.dataframe(pd.DataFrame(factors), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(factors), hide_index=True)
 
     st.subheader("월간 self-improve 제안서 (승인은 코드/문서 경로로만)")
     proposals = sorted((ROOT / "data" / "proposals").glob("*.md")) if (ROOT / "data" / "proposals").exists() else []
