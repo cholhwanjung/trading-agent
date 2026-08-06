@@ -444,8 +444,11 @@ async def main() -> int:
                     await notify(env, f"{market} 실계좌 오류", f"{type(outcome).__name__}: {outcome}")
             else:
                 meta = guards[market].last_decision or {}
+                # degraded = 브로커 장애로 실주문만 건너뛴 상태. 결정·가상 arm 은 기록됐다.
+                degraded = bool(outcome.error and outcome.error.startswith("execution_skipped"))
+                status = "ok" if outcome.accepted else ("degraded" if degraded else "rejected")
                 print(
-                    f"market={market} status={'ok' if outcome.accepted else 'rejected'}"
+                    f"market={market} status={status}"
                     f" n_orders={len(outcome.orders)}"
                     f" violations={meta.get('risk_violations', [])}"
                     f" mdd={meta.get('mdd')}"

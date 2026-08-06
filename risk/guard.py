@@ -94,12 +94,21 @@ class RiskGuardedPolicy:
                     "risk_violations": [f"forbidden_pattern key={key}"],
                     "circuit_open": False,
                     "equity": None,
+                    "equity_error": None,  # 브로커 조회 전 동결 — venue 장애와 무관
                     "mdd": 0.0,
                 }
                 self._save_state({**state, "prev_weights": frozen, "account_key": self.account_key})
                 return frozen
 
-        equity = await self.equity_fn() if self.equity_fn else None
+        # 평가액은 브로커 조회다 — 실패해도 결정 자체는 공개 시세만으로 성립하므로
+        # 예외로 스텝을 죽이지 않고 사유만 남긴다. 호출부는 이 사유를 보고 실주문을
+        # 건너뛴다(MDD 검증이 불가한 상태로는 집행하지 않는다).
+        equity, equity_error = None, None
+        if self.equity_fn:
+            try:
+                equity = await self.equity_fn()
+            except Exception as e:
+                equity_error = f"{type(e).__name__}: {str(e)[:200]}"
         peak = state.get("peak_equity")
         mdd = 0.0
         if equity is not None:
@@ -120,6 +129,7 @@ class RiskGuardedPolicy:
             "risk_violations": decision.violations,
             "circuit_open": decision.circuit_open,
             "equity": equity,
+            "equity_error": equity_error,  # None 아니면 브로커 조회 실패 — 실주문 스킵 사유
             "mdd": round(mdd, 4),
         }
         self._save_state(

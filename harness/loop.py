@@ -8,7 +8,7 @@ verifier가 에이전트보다 먼저라는 원칙의 실행 지점: 이 루프�
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from adapters.base import MarketAdapter, Observation, OrderResult, bar_observation_window
@@ -90,15 +90,43 @@ async def run_daily_step(
     """시장 1개의 하루치 스텝. 관측은 누출 감사를 통과해야만 정책에 전달된다.
 
     snapshot_dir 지정 시 감사 직후 관측 스냅샷을 기록한다(결정 실패해도 관측은 보존).
+
+    **브로커 장애 격리**: 관측·결정은 공개 시세만으로 성립하는데, 계좌 조회(보유·평가액)는
+    브로커에 의존한다. 브로커가 죽었다고 스텝 전체를 실패시키면 그날의 결정·가상 병행
+    운용 기록까지 사라져 측정 시계열에 구멍이 남는다(승격 판정을 그만큼 늦춘다). 그래서
+    계좌 조회 실패는 스텝을 중단시키지 않고 결정까지 진행한 뒤 **실주문만 건너뛴다**
+    (`execution_mode=degraded`). 평가액을 못 읽으면 MDD 검증이 불가하므로, 검증 없는
+    집행을 하지 않는다는 뜻이기도 하다. degraded 여부는 로그에 남아 사후에 '실주문까지
+    검증된 날'과 구분할 수 있다 — 라벨 없이 섞이면 측정 하네스가 자기를 속이게 된다.
     """
 
     obs = await adapter.observe_and_audit(symbols, asof_day)
     if snapshot_dir is not None:
         write_observation_snapshot(snapshot_dir, obs)
-    positions = await adapter.get_positions()
+
+    venue_error: str | None = None
+    try:
+        positions = await adapter.get_positions()
+    except Exception as e:
+        positions, venue_error = [], f"{type(e).__name__}: {str(e)[:200]}"
+
     weights = await policy.decide(obs, positions)
     validate_weights(weights)
-    result = await adapter.submit_allocation(weights)
+
+    # 평가액 조달 실패(정책 내부의 리스크 게이트 입력)도 같은 degraded 사유로 취급
+    meta = getattr(policy, "last_decision", None) or {}
+    venue_error = venue_error or meta.get("equity_error")
+
+    if venue_error:
+        result = OrderResult(
+            market=adapter.market,
+            submitted_at=datetime.now(timezone.utc),
+            accepted=False,
+            error=f"execution_skipped venue_unavailable — {venue_error}",
+        )
+    else:
+        result = await adapter.submit_allocation(weights)
+
     logger.log(
         adapter.market,
         "daily_step",
@@ -106,6 +134,7 @@ async def run_daily_step(
             "policy": policy.name,
             # LLM 정책의 결정 메타(근거·인용 ID·시나리오) — 로그 감사용, 없으면 None
             "decision": getattr(policy, "last_decision", None),
+            "execution_mode": "degraded" if venue_error else "live",
             "asof_day": obs.asof_day,
             "collected_at": obs.collected_at,
             "n_bars": {s: len(b) for s, b in obs.bars.items()},
