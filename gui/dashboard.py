@@ -28,7 +28,9 @@ from eval.meta import combined_index, load_arm_history, load_meta_shadow  # noqa
 from eval.perf import drawdown_series, perf_stats  # noqa: E402
 from eval.rolling import ROLLING_K, meta_shadow_delta, rolling_report  # noqa: E402
 from gui.panels import (  # noqa: E402
+    admission_progress,
     decision_for_day,
+    episodic_ledger,
     exposure_turnover,
     kill_switch_active,
     latest_meta_event,
@@ -40,11 +42,13 @@ from gui.panels import (  # noqa: E402
     load_observation,
     load_regime,
     market_health,
+    promoted_memories,
     read_recent_decisions,
     scenario_outcomes,
     treasury_dryrun_report,
     usage_report,
     veto_rows,
+    weekly_reflections,
 )
 from harness.env import load_env  # noqa: E402
 from risk.engine import RiskLimits  # noqa: E402
@@ -101,7 +105,9 @@ def pie(data: dict[str, float], title: str) -> None:
     st.altair_chart(chart, width="stretch")
 
 
-tab_dash, tab_obs, tab_chat, tab_ops = st.tabs(["📊 대시보드", "🔭 관측", "💬 챗", "🔧 운영"])
+tab_dash, tab_obs, tab_mem, tab_chat, tab_ops = st.tabs(
+    ["📊 대시보드", "🔭 관측", "📓 메모리", "💬 챗", "🔧 운영"]
+)
 
 
 # ── 대시보드 ──
@@ -381,6 +387,109 @@ with tab_obs:
             st.caption("이 시장에 시나리오 기록이 아직 없음.")
 
 
+# ── 메모리 (회고 · 승격 파이프라인 · 원장) ──
+
+with tab_mem:
+    st.caption(
+        "메모리 store 를 그대로 읽는다 — 읽기 전용. 승격·retire·importance 갱신은 자동 "
+        "게이트의 단독 권한이라 여기에 조작 UI 를 두지 않는다."
+    )
+    mem_market = st.selectbox("시장", MARKETS, key="mem_market")
+
+    st.subheader("주간 회고")
+    st.caption(
+        "일요일 스텝에서 생성 — 최근 7일 결정(결과 기입분)의 승률·평균 성과와 인용된 "
+        "신호/메모리별 기여. 요약문은 통계 리포트를 LLM 이 옮겨 쓴 것으로, 판정 근거는 "
+        "어디까지나 아래 수치다."
+    )
+    reflections = weekly_reflections(ROOT / "data" / "memory.sqlite", mem_market, date.today())
+    if not reflections:
+        st.caption("아직 회고 없음 — 결정이 쌓이고 첫 일요일 스텝이 돌면 생성된다.")
+    newest_ok = next((r["day"] for r in reflections if r["status"] == "ok"), None)
+    for r in reflections:
+        rep = r["report"]
+        if r["status"] == "ok":
+            title = (
+                f"✅ {r['day']} · {rep.get('n_decisions', 0)}건 · "
+                f"승률 {rep.get('win_rate', 0):.0%} · 평균 {rep.get('mean_outcome', 0):+.3%}"
+            )
+        elif r["status"] == "missing":
+            title = f"⚠️ {r['day']} · 미생성 (대상 결정 {r['eligible']}건은 있었음)"
+        else:
+            title = f"⚪ {r['day']} · 표본 부족 ({r['eligible']}건, 최소 미달)"
+        # 가장 최근 '생성된' 회고만 펼쳐 둔다 — 최신 주가 미생성이어도 읽을 게 보이도록
+        with st.expander(title, expanded=r["day"] == newest_ok):
+            if r["status"] == "missing":
+                st.warning(
+                    "이 주의 일요일 스텝이 돌지 않아 회고가 유실됐다. 회고는 그 주에만 "
+                    "생성되므로 이후 스텝이 소급하지 않는다."
+                )
+                continue
+            if r["status"] == "insufficient":
+                st.caption("결과가 기입된 결정이 최소 건수에 못 미쳐 생성 대상이 아니었다(정상).")
+                continue
+            st.markdown(r["summary"])
+            st.caption(f"창: `{rep.get('window', ['?', '?'])[0]} ~ {rep.get('window', ['?', '?'])[1]}`")
+            # 기여 항목은 많아야 두어 건이고 ID 가 길다 — 표로 만들면 열이 잘려 오히려 안 읽힌다
+            for label, credit in (("신호 기여", rep.get("signal_credit")),
+                                  ("메모리 기여", rep.get("memory_credit"))):
+                st.caption(label)
+                if credit:
+                    for cid, v in credit.items():
+                        st.markdown(f"- `{cid}` — {v['n']}건, 평균 {v['mean_outcome']:+.3%}")
+                else:
+                    st.caption("— 인용 없음")
+
+    st.divider()
+    st.subheader("승격 파이프라인 (episodic → semantic/procedural)")
+    st.caption(
+        "패턴별 반복 표본과 부호검정 p 값 — 승격 게이트가 실제로 보는 숫자를 그대로 표시. "
+        "단일 매매로는 승격되지 않으며, 반복 n 과 유의성이 게이트다. `pending` 은 아직 "
+        "다음 관측이 없어 결과가 안 채워진 건수."
+    )
+    prog = admission_progress(ROOT / "data" / "memory.sqlite", mem_market)
+    ledger = episodic_ledger(ROOT / "data" / "memory.sqlite", mem_market, limit=200)
+    promoted = promoted_memories(ROOT / "data" / "memory.sqlite", mem_market)
+
+    mc = st.columns(4)
+    mc[0].metric("episodic 기록", len(ledger))
+    mc[1].metric("후보 패턴", len(prog))
+    mc[2].metric("게이트 통과", sum(1 for r in prog if r["stage"].startswith("게이트")))
+    mc[3].metric("승격됨 (semantic+procedural)", len(promoted))
+
+    if prog:
+        prog_df = pd.DataFrame(prog).set_index("pattern")
+        st.dataframe(
+            prog_df.style.format(
+                {"mean_outcome": "{:+.3%}", "p_value": "{:.3f}"}, na_rep="—"
+            )
+        )
+    else:
+        st.caption("아직 결과가 기입된 패턴 표본이 없다.")
+
+    st.caption("승격 이후 (probation → active/retired)")
+    if promoted:
+        st.dataframe(pd.DataFrame(promoted), hide_index=True)
+    else:
+        st.caption("승격된 교훈 없음 — 위 표에서 표본·유의성 진행도를 확인.")
+
+    st.divider()
+    st.subheader("episodic 원장 (일간 결정 기록)")
+    st.caption(
+        "결정 1건 = 기록 1건. `outcome` 은 행동 수익 − 무행동(직전 배분 유지) 수익으로 "
+        "다음 관측에서 소급 기입된다 — '안 사도 올랐다'를 '잘한 매수'와 구분하는 값."
+    )
+    if ledger:
+        st.dataframe(
+            pd.DataFrame(ledger).style.format(
+                {"outcome": "{:+.3%}", "importance": "{:.2f}"}, na_rep="— (대기)"
+            ),
+            hide_index=True,
+        )
+    else:
+        st.caption("아직 기록 없음.")
+
+
 # ── 챗 (게이트웨이 프록시) ──
 
 with tab_chat:
@@ -557,20 +666,6 @@ with tab_ops:
                 ]),
                 hide_index=True,
             )
-
-    st.subheader("메모리 (교훈 상태)")
-    context = load_context()
-    mem_rows = [
-        {"id": i["id"], "kind": i["kind"], "status": i["content"].get("status", ""),
-         "importance": i["content"].get("importance", ""), "outcome": i["content"].get("outcome", ""),
-         "content": i["content"].get("text", "")}
-        for i in context["items"]
-        if i["kind"].startswith("memory_")
-    ]
-    if mem_rows:
-        st.dataframe(pd.DataFrame(mem_rows), hide_index=True)
-    else:
-        st.caption("승격된 교훈 없음 — admission 게이트 통과분이 생기면 여기 표시된다.")
 
     st.subheader("Alpha 팩터 라이브러리")
     lib_path = STATE / "alpha_library_CRYPTO.json"

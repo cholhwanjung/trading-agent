@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from eval.meta import load_arm_history
@@ -357,3 +357,157 @@ def usage_report(log_dir: Path) -> dict:
         "total_in": total_in,
         "total_out": total_out,
     }
+
+
+# ── 메모리 스토어 (읽기 전용 표시 경로) ──
+#
+# 챗 grounding 용 컨텍스트 조립과는 별개 경로다. 저쪽은 LLM 프롬프트에 통째로 들어가는
+# 사실원이라 항목이 늘수록 토큰이 불고 인용 정확도가 떨어져서 시장별 최근 몇 건으로
+# 잘라야 한다. 사람이 읽는 화면은 그 제약을 받을 이유가 없으므로 store 를 직접 읽는다.
+# 쓰기는 하지 않는다 — 승격·retire·importance 는 전부 자동 게이트의 단독 권한이다.
+
+
+def _query(db_path: Path, market: str, **kw) -> list:
+    """메모리 store 를 짧게 열고 닫는다 — 일일 루프의 쓰기와 락을 다투지 않도록."""
+    if not Path(db_path).exists():
+        return []
+    from memory.store import MemoryStore
+
+    store = MemoryStore(db_path)
+    try:
+        return store.query(market, **kw)
+    finally:
+        store.close()
+
+
+def _daily_episodic(entries: list) -> list:
+    """주간 회고 엔트리를 제외한 순수 일간 결정 기록."""
+    return [e for e in entries if e.data.get("kind") != "weekly_reflection"]
+
+
+def weekly_reflections(db_path: Path, market: str, today: date) -> list[dict]:
+    """주차별 회고 — 기록된 주 + 있어야 했는데 없는 주를 함께 최신순으로.
+
+    회고는 일요일 스텝에서만 생성되므로, 일요일 잡이 걸러진 주는 그대로 유실된다.
+    표본 부족(창 안에 결과 기입된 결정이 최소 건수 미만)으로 안 만들어진 주와
+    구분해서 표시해야 운용 사고를 정상 동작으로 오해하지 않는다.
+    """
+    from reflection.weekly import MIN_ENTRIES, WINDOW_DAYS
+
+    entries = _query(db_path, market, store="episodic")
+    if not entries:
+        return []
+    daily = _daily_episodic(entries)
+    if not daily:
+        return []
+    logged = {
+        e.day: {
+            # content 는 "[{market} 주간 reflection {day}] {요약}" 형태 — 접두를 떼고 본문만
+            "summary": e.content.split("] ", 1)[-1],
+            "report": e.data.get("report") or {},
+        }
+        for e in entries
+        if e.data.get("kind") == "weekly_reflection"
+    }
+
+    first = min(e.day for e in daily)
+    sunday = first + timedelta(days=(6 - first.weekday()) % 7)
+    rows: list[dict] = []
+    while sunday <= today:
+        since = sunday - timedelta(days=WINDOW_DAYS)
+        eligible = sum(1 for e in daily if e.outcome is not None and since < e.day <= sunday)
+        row = {"day": sunday.isoformat(), "eligible": eligible}
+        if sunday in logged:
+            rows.append({**row, "status": "ok", **logged[sunday]})
+        elif eligible >= MIN_ENTRIES:
+            rows.append({**row, "status": "missing", "summary": "", "report": {}})
+        else:
+            rows.append({**row, "status": "insufficient", "summary": "", "report": {}})
+        sunday += timedelta(days=7)
+    return list(reversed(rows))
+
+
+def admission_progress(db_path: Path, market: str) -> list[dict]:
+    """패턴별 승격 진행도 — 승격 게이트가 실제로 보는 표본을 그대로 재현.
+
+    게이트와 같은 필터(결과 기입됨 · active · 이미 승격에 쓰인 표본 제외)를 쓰므로,
+    "왜 아직 승격이 없는가"를 표본 수와 p 값으로 직접 읽을 수 있다.
+    """
+    from memory.admission import ALPHA, MIN_N, sign_test_p
+
+    episodic = _daily_episodic(_query(db_path, market, store="episodic", status="active"))
+    promoted = _query(db_path, market, store="semantic") + _query(
+        db_path, market, store="procedural"
+    )
+    used = {src for e in promoted for src in e.data.get("source_ids", [])}
+
+    by_pattern: dict[str, list] = {}
+    for e in episodic:
+        if e.pattern_key:
+            by_pattern.setdefault(e.pattern_key, []).append(e)
+
+    rows: list[dict] = []
+    for key, group in by_pattern.items():
+        fresh = [e for e in group if e.id not in used and e.outcome is not None]
+        pending = sum(1 for e in group if e.outcome is None)
+        n = len(fresh)
+        k_pos = sum(1 for e in fresh if e.outcome > 0)
+        mean = sum(e.outcome for e in fresh) / n if n else None
+        p = None
+        if n:
+            p = min(sign_test_p(k_pos, n), sign_test_p(n - k_pos, n))
+        if n < MIN_N:
+            stage = f"표본 {n}/{MIN_N}"
+        elif p is not None and p <= ALPHA:
+            stage = "게이트 통과 (다음 스텝에 승격)"
+        else:
+            stage = f"유의성 미달 (p={p:.3f})"
+        rows.append({
+            "pattern": key,
+            "n": n,
+            "pending": pending,
+            "k_pos": k_pos,
+            "mean_outcome": mean,
+            "p_value": p,
+            "stage": stage,
+        })
+    return sorted(rows, key=lambda r: (-r["n"], r["pattern"]))
+
+
+def promoted_memories(db_path: Path, market: str) -> list[dict]:
+    """semantic/procedural 전 상태(probation·active·retired) — 승격 이후의 생애."""
+    rows: list[dict] = []
+    for store_name in ("semantic", "procedural"):
+        for e in _query(db_path, market, store=store_name):
+            rows.append({
+                "id": e.id,
+                "store": store_name,
+                "status": e.status,
+                "pattern": e.pattern_key,
+                "n": e.data.get("n"),
+                "p_value": e.data.get("p_value"),
+                "mean_outcome": e.data.get("mean_outcome"),
+                "probation_until": e.data.get("probation_until"),
+                "importance": e.importance,
+                "content": e.content,
+            })
+    return sorted(rows, key=lambda r: (r["status"], r["id"]))
+
+
+def episodic_ledger(db_path: Path, market: str, limit: int = 60) -> list[dict]:
+    """일간 결정 기록 원장 — 최신순. outcome 은 다음 관측에서 소급 기입된다."""
+    rows = [
+        {
+            "day": e.day.isoformat(),
+            "pattern": e.pattern_key,
+            "outcome": e.outcome,
+            "status": e.status,
+            "importance": e.importance,
+            "cited": " ".join(
+                e.data.get("cited_signal_ids", []) + e.data.get("cited_memory_ids", [])
+            ),
+            "content": e.content,
+        }
+        for e in _daily_episodic(_query(db_path, market, store="episodic"))
+    ]
+    return list(reversed(rows))[:limit]
