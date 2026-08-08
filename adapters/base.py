@@ -82,6 +82,24 @@ class OrderResult:
     error: str | None = None
 
 
+# 브로커가 "장이 닫혀 있다"는 뜻으로 돌려주는 거부 문구. 브로커마다 표현이 달라
+# 코드가 아니라 메시지로 식별할 수밖에 없다(공통 에러코드 규약이 없다).
+_MARKET_CLOSED_HINTS = (
+    "영업일이 아닙니다",  # KIS 모의투자 — 주말·공휴일
+    "장운영시간이 아닙니다",  # KIS — 장 시작 전/마감 후
+    "market is closed",
+)
+
+
+def is_market_closed_error(error: str | None) -> bool:
+    """주문 거부 사유가 '장 마감'인지. 운영 장애와 구분하기 위한 판정.
+
+    장이 닫혀 있으면 체결될 주문 자체가 없으므로 이것은 실패가 아니다. 실패로 세면
+    주말마다 종료코드·통지·대시보드 경고가 켜져서 진짜 장애 신호가 그 잡음에 묻힌다.
+    """
+    return bool(error) and any(hint in error for hint in _MARKET_CLOSED_HINTS)
+
+
 def observation_window(asof_day: date, lookback: int | None = None) -> tuple[date, date]:
     """뉴스·일반 관측의 캘린더 윈도우 [t-lookback, t-1]. end=t-1(당일 차단, 불변).
 

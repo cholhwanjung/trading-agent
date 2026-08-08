@@ -409,9 +409,14 @@ with tab_mem:
     for r in reflections:
         rep = r["report"]
         if r["status"] == "ok":
+            # 승률은 동점 제외 분모라 전부 동점인 주에는 None — 그때는 승률 자리를 비운다
+            wr = rep.get("win_rate")
+            ties = rep.get("n_ties") or 0
             title = (
-                f"✅ {r['day']} · {rep.get('n_decisions', 0)}건 · "
-                f"승률 {rep.get('win_rate', 0):.0%} · 평균 {rep.get('mean_outcome', 0):+.3%}"
+                f"✅ {r['day']} · {rep.get('n_decisions', 0)}건"
+                + (f" (무승부 {ties})" if ties else "")
+                + f" · 승률 {'—' if wr is None else format(wr, '.0%')}"
+                + f" · 평균 {rep.get('mean_outcome', 0):+.3%}"
             )
         elif r["status"] == "missing":
             title = f"⚠️ {r['day']} · 미생성 (대상 결정 {r['eligible']}건은 있었음)"
@@ -445,7 +450,8 @@ with tab_mem:
     st.caption(
         "패턴별 반복 표본과 부호검정 p 값 — 승격 게이트가 실제로 보는 숫자를 그대로 표시. "
         "단일 매매로는 승격되지 않으며, 반복 n 과 유의성이 게이트다. `pending` 은 아직 "
-        "다음 관측이 없어 결과가 안 채워진 건수."
+        "다음 관측이 없어 결과가 안 채워진 건수, `ties` 는 행동이 결과를 바꾸지 못한 "
+        "건수(휴장·배분 무변동)로 부호검정 표본에서 빠진다."
     )
     prog = admission_progress(ROOT / "data" / "memory.sqlite", mem_market)
     ledger = episodic_ledger(ROOT / "data" / "memory.sqlite", mem_market, limit=200)

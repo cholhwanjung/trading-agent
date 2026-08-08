@@ -12,6 +12,7 @@ from adapters.base import (
     assert_no_leakage,
     bar_observation_window,
     configure_observation,
+    is_market_closed_error,
     observation_window,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "assert_no_leakage",
     "bar_observation_window",
     "configure_observation",
+    "is_market_closed_error",
     "observation_window",
 ]

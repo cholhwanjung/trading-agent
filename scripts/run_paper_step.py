@@ -61,7 +61,7 @@ from regime import (  # noqa: E402
     propose_meta_weights,
     update_regime_signal,
 )
-from adapters import configure_observation  # noqa: E402
+from adapters import configure_observation, is_market_closed_error  # noqa: E402
 from risk import (  # noqa: E402
     RiskEngine,
     RiskGuardedPolicy,
@@ -446,7 +446,17 @@ async def main() -> int:
                 meta = guards[market].last_decision or {}
                 # degraded = 브로커 장애로 실주문만 건너뛴 상태. 결정·가상 arm 은 기록됐다.
                 degraded = bool(outcome.error and outcome.error.startswith("execution_skipped"))
-                status = "ok" if outcome.accepted else ("degraded" if degraded else "rejected")
+                # closed = 장 마감(주말·공휴일)으로 인한 거부. 체결될 주문이 없었을 뿐이라
+                # 실패가 아니다 — 종료코드도 통지도 올리지 않는다.
+                closed = is_market_closed_error(outcome.error)
+                if outcome.accepted:
+                    status = "ok"
+                elif closed:
+                    status = "closed"
+                elif degraded:
+                    status = "degraded"
+                else:
+                    status = "rejected"
                 print(
                     f"market={market} status={status}"
                     f" n_orders={len(outcome.orders)}"
@@ -454,7 +464,7 @@ async def main() -> int:
                     f" mdd={meta.get('mdd')}"
                     + (f" error={outcome.error}" if outcome.error else "")
                 )
-                if not outcome.accepted:
+                if not outcome.accepted and not closed:
                     exit_code = 1
                     if is_live:
                         await notify(env, f"{market} 실계좌 주문 거부", outcome.error or "accepted=False")

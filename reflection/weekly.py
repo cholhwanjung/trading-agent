@@ -47,12 +47,19 @@ def compute_weekly_report(store: MemoryStore, market: str, asof_day: date) -> di
             for k, v in sorted(values.items())
         }
 
+    # 동점(outcome == 0) = 행동이 결과를 바꾸지 못한 날(휴장·배분 무변동). 승률의 분모에
+    # 넣으면 무승부가 패배로 계상돼 성과가 실제보다 나빠 보인다. 다만 "며칠은 아무 차이도
+    # 못 만들었다"도 읽어야 할 사실이라, 빼서 감추지 않고 n_ties 로 함께 보고한다.
+    decisive = [o for o in outcomes if o != 0]
     return {
         "market": market,
         "window": [since.isoformat(), asof_day.isoformat()],
         "n_decisions": len(entries),
+        "n_ties": len(outcomes) - len(decisive),
         "mean_outcome": round(sum(outcomes) / len(outcomes), 5),
-        "win_rate": round(sum(1 for o in outcomes if o > 0) / len(outcomes), 3),
+        "win_rate": (
+            round(sum(1 for o in decisive if o > 0) / len(decisive), 3) if decisive else None
+        ),
         "signal_credit": _agg(signal_credit),
         "memory_credit": _agg(memory_credit),
     }

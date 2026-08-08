@@ -245,7 +245,8 @@ _FAIL_MARKERS = ("status=fail", "status=error")
 _MKT_STATUS = re.compile(r"(?:market=|\[)([A-Za-z_]+)\]?\s+status=(\w+)")
 _MKT_CYCLE_OK = re.compile(r"\[([A-Za-z_]+)\]\s+cycle_done")  # alpha_lab 시장 완료
 # observed·triggered 등 중간 상태는 무시(최신 '종결' 만 반영).
-# no_trigger(워처 무발동 틱)·closed(장외 게이팅 스킵)=정상, rejected(트리거 주문 거부)=실패.
+# no_trigger(워처 무발동 틱)·closed(장 마감 — 워처 게이팅 스킵 / 브로커의 비영업일 거부)
+# =정상, rejected(장은 열렸는데 주문이 거부됨)=실패.
 # degraded=브로커 장애로 실주문만 스킵(결정·가상 arm 은 정상) — 주의가 필요하니 실패로 센다.
 _TERMINAL = {"ok", "error", "fail", "no_trigger", "closed", "rejected", "degraded"}
 
@@ -430,8 +431,8 @@ def weekly_reflections(db_path: Path, market: str, today: date) -> list[dict]:
 def admission_progress(db_path: Path, market: str) -> list[dict]:
     """패턴별 승격 진행도 — 승격 게이트가 실제로 보는 표본을 그대로 재현.
 
-    게이트와 같은 필터(결과 기입됨 · active · 이미 승격에 쓰인 표본 제외)를 쓰므로,
-    "왜 아직 승격이 없는가"를 표본 수와 p 값으로 직접 읽을 수 있다.
+    게이트와 같은 필터(결과 기입됨 · active · 동점 제외 · 이미 승격에 쓰인 표본 제외)를
+    쓰므로, "왜 아직 승격이 없는가"를 표본 수와 p 값으로 직접 읽을 수 있다.
     """
     from memory.admission import ALPHA, MIN_N, sign_test_p
 
@@ -448,7 +449,11 @@ def admission_progress(db_path: Path, market: str) -> list[dict]:
 
     rows: list[dict] = []
     for key, group in by_pattern.items():
-        fresh = [e for e in group if e.id not in used and e.outcome is not None]
+        # 동점(outcome == 0)은 게이트가 표본에서 빼므로 여기서도 뺀다 — 표시가 게이트와
+        # 어긋나면 "n 이 5인데 왜 승격이 안 되나" 같은 오해가 생긴다. 대신 별도 열로 센다.
+        scored = [e for e in group if e.id not in used and e.outcome is not None]
+        fresh = [e for e in scored if e.outcome != 0]
+        ties = len(scored) - len(fresh)
         pending = sum(1 for e in group if e.outcome is None)
         n = len(fresh)
         k_pos = sum(1 for e in fresh if e.outcome > 0)
@@ -465,6 +470,7 @@ def admission_progress(db_path: Path, market: str) -> list[dict]:
         rows.append({
             "pattern": key,
             "n": n,
+            "ties": ties,
             "pending": pending,
             "k_pos": k_pos,
             "mean_outcome": mean,

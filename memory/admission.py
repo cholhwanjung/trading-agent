@@ -4,6 +4,11 @@
 비대칭(APV): 유의한 성공 패턴 → semantic(소프트 프라이어),
 유의한 실패 패턴 → procedural Forbidden(고신뢰 시 하드 veto 소스).
 단일 매매 승격은 구조적으로 불가 — n 과 유의성이 게이트다.
+
+동점(outcome == 0)은 표본에서 제외한다 — 부호검정 표준. outcome 은 행동 수익 −
+무행동 수익이므로 0 은 "행동이 결과를 바꾸지 못했다"는 뜻이지 실패가 아니다. 휴장일
+결정(가격 불변)과 배분 무변동 결정이 여기 해당하는데, 이를 음(-)으로 세면 Forbidden
+쪽으로만 편향된다 — 동점 4건에 실제 음수 1건이면 p=0.031 로 하드 veto 가 서는 식이다.
 """
 
 from __future__ import annotations
@@ -63,7 +68,7 @@ def promote_candidates(
     episodic = [
         e
         for e in store.query(market, store="episodic", status="active")
-        if e.outcome is not None and e.pattern_key
+        if e.outcome is not None and e.outcome != 0 and e.pattern_key
     ]
     by_pattern: dict[str, list[MemoryEntry]] = {}
     for e in episodic:
@@ -144,8 +149,13 @@ def review_probation(store: MemoryStore, market: str, asof_day: date) -> list[di
             oos = [
                 e
                 for e in store.query(market, store="episodic", pattern_key=entry.pattern_key)
-                # 승격에 쓰인 원천 표본은 OOS 가 아니다 — in-sample 재사용 = 자기 검증 오염
-                if e.outcome is not None and e.id not in source_ids and promoted < e.day <= asof_day
+                # 승격에 쓰인 원천 표본은 OOS 가 아니다 — in-sample 재사용 = 자기 검증 오염.
+                # 동점도 제외 — 전부 동점이면 oos_mean == 0 이라 부호 판정이 무조건 실패로
+                # 떨어져, 검증되지 않은 패턴이 아니라 '검증할 기회가 없던' 패턴이 퇴출된다.
+                if e.outcome is not None
+                and e.outcome != 0
+                and e.id not in source_ids
+                and promoted < e.day <= asof_day
             ]
             expected_sign = 1 if entry.data["kind"] == "success" else -1
             if len(oos) >= MIN_PROBATION_N:
