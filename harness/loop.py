@@ -61,6 +61,16 @@ def _observation_snapshot(obs: Observation) -> dict:
              "source": n.source, "url": n.url}
             for n in obs.news
         ],
+        # 공시된 그대로의 재무를 남긴다 — 과거 재무는 정정공시로 사후에 바뀔 수 있어,
+        # 이 스냅샷이 없으면 "그때 실제로 본 값"을 나중에 재현할 수 없다.
+        "financials": {
+            symbol: {
+                "filed": f.filed.isoformat(), "period_end": f.period_end.isoformat(),
+                "basis": f.basis, "net_income": f.net_income, "eps_diluted": f.eps_diluted,
+                "equity": f.equity, "liabilities": f.liabilities,
+            }
+            for symbol, f in obs.financials.items()
+        },
     }
 
 

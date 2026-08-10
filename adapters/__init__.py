@@ -15,9 +15,11 @@ from adapters.base import (
     is_market_closed_error,
     observation_window,
 )
+from adapters.financials import Financials
 
 __all__ = [
     "Bar",
+    "Financials",
     "LeakageError",
     "MarketAdapter",
     "NewsItem",

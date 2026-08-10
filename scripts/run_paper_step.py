@@ -136,6 +136,7 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
                 live_guard=guard,
                 alpaca_key=env.get("ALPACA_PAPER_API_KEY"),  # 뉴스 원천(체결과 분리)
                 alpaca_secret=env.get("ALPACA_PAPER_SECRET"),
+                sec_user_agent=env.get("SEC_USER_AGENT"),
             ),
             US_UNIVERSE,
         )
@@ -143,7 +144,12 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
         from adapters.alpaca import AlpacaPaperAdapter
 
         out["US"] = (
-            AlpacaPaperAdapter(env["ALPACA_PAPER_API_KEY"], env["ALPACA_PAPER_SECRET"], US_UNIVERSE),
+            AlpacaPaperAdapter(
+                env["ALPACA_PAPER_API_KEY"],
+                env["ALPACA_PAPER_SECRET"],
+                US_UNIVERSE,
+                sec_user_agent=env.get("SEC_USER_AGENT"),
+            ),
             US_UNIVERSE,
         )
     # 계좌 형식(8자리-상품코드 2자리)이 맞을 때만 — 아니면 잔고·주문이 전부 실패한다
@@ -414,6 +420,7 @@ async def main() -> int:
                 print(
                     f"market={market} status=observed asof={obs.asof_day}"
                     f" n_bars={ {s: len(b) for s, b in obs.bars.items()} } n_news={len(obs.news)}"
+                    f" n_financials={len(obs.financials)}"
                     f" positions={[(p.symbol, round(p.market_value, 2)) for p in positions]}"
                 )
             return 0

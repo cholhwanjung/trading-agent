@@ -212,6 +212,14 @@ class KISPaperAdapter(MarketAdapter):
             news += await fetch_dart_disclosures(self._dart_key, symbols, start, end)
         return news
 
+    async def get_financials(self, symbols: list[str], asof_day: date):
+        if not self._dart_key:
+            return {}
+        from adapters.dart import fetch_dart_financials
+
+        _, end = observation_window(asof_day)
+        return await fetch_dart_financials(self._dart_key, symbols, end)
+
     # ── 계좌 ──
 
     async def _balance(self) -> dict:

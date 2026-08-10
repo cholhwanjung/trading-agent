@@ -72,6 +72,7 @@ class KISOverseasAdapter(MarketAdapter):
         live_guard: LiveGuard | None = None,  # 실전 절대 금액 가드(모의는 None)
         alpaca_key: str | None = None,  # US 뉴스 원천(체결과 분리 — KIS 는 무료 뉴스 없음)
         alpaca_secret: str | None = None,
+        sec_user_agent: str | None = None,  # SEC 공시·재무 조회 식별자 (키 아님)
     ) -> None:
         assert mode in ("demo", "real"), f"mode={mode!r} — 'demo' 또는 'real'"
         assert exchange in QUOTE_EXCD, f"exchange={exchange!r} — {sorted(QUOTE_EXCD)}"
@@ -89,6 +90,7 @@ class KISOverseasAdapter(MarketAdapter):
         self.live_guard = live_guard
         self._alpaca_key = alpaca_key
         self._alpaca_secret = alpaca_secret
+        self._sec_user_agent = sec_user_agent
 
     async def close(self) -> None:
         await self.session.close()
@@ -139,10 +141,20 @@ class KISOverseasAdapter(MarketAdapter):
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
         # 체결은 KIS, 뉴스는 Alpaca(무료) — venue 분리. 키 없으면 빈 리스트.
+        from adapters.edgar import fetch_edgar_filings
         from adapters.news_us import fetch_us_news
 
         start, end = observation_window(asof_day)
-        return await fetch_us_news(self._alpaca_key, self._alpaca_secret, symbols, start, end)
+        news = await fetch_us_news(self._alpaca_key, self._alpaca_secret, symbols, start, end)
+        # 공시는 뉴스와 별개 원천(키 불필요) — 실계좌 경로에서도 이벤트 채널을 얇게 두지 않는다.
+        news += await fetch_edgar_filings(symbols, start, end, user_agent=self._sec_user_agent)
+        return news
+
+    async def get_financials(self, symbols: list[str], asof_day: date):
+        from adapters.edgar import fetch_edgar_financials
+
+        _, end = observation_window(asof_day)
+        return await fetch_edgar_financials(symbols, end, user_agent=self._sec_user_agent)
 
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         """현재 체결가(same-day, 지연 가능) — 행동(지정가 산정) 전용."""

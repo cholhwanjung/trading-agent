@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
+from adapters.financials import Financials
+
 
 # 관측 윈도우 기본값. 상한은 항상 t-1(당일 t 데이터 절대 포함 금지) — 이게 누출 통제의 본질이며
 # 아래 길이 값과 무관하게 불변이다. 운영 스크립트가 configure_observation()으로 .env 값을 주입해
@@ -62,6 +64,7 @@ class Observation:
     """어댑터가 반환하는 관측 묶음. 모든 관측은 이 컨테이너로 감사된다.
 
     collected_at: 수집 시각(UTC). asof_day: 관측 기준일 t. 봉=최근 N거래일·뉴스=N캘린더일(상한 t-1).
+    financials: 분기 재무 스냅샷(symbol -> 값). 저속 채널이라 창 길이가 아니라 제출일 상한만 건다.
     """
 
     market: str
@@ -69,6 +72,7 @@ class Observation:
     collected_at: datetime
     bars: dict[str, list[Bar]] = field(default_factory=dict)  # symbol -> 봉 리스트
     news: list[NewsItem] = field(default_factory=list)
+    financials: dict[str, Financials] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -160,6 +164,15 @@ def assert_no_leakage(obs: Observation) -> None:
                 f"leakage market={obs.market} news_day={news_day} "
                 f"window=[{news_start},{end}] asof={obs.asof_day} headline={item.headline!r}"
             )
+    # 재무는 회계기간이 아니라 **공시 제출일**로 자른다. 분기 종료 후 수 주 뒤에야 공시되므로
+    # 종료일 기준으로 자르면 그 사이 날짜의 관측이 아직 발표되지 않은 실적을 아는 셈이 된다.
+    # 하한은 두지 않는다 — 분기 공시라 며칠~수개월 묵은 것이 정상이다.
+    for symbol, fin in obs.financials.items():
+        if fin.filed > end:
+            raise LeakageError(
+                f"leakage market={obs.market} symbol={symbol} "
+                f"filed={fin.filed} max={end} asof={obs.asof_day} period_end={fin.period_end}"
+            )
 
 
 class MarketAdapter(ABC):
@@ -200,6 +213,15 @@ class MarketAdapter(ABC):
     @abstractmethod
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
         """최근 N 캘린더일에 발행된 뉴스만 반환. published_at >= t(당일) 인 건 제외."""
+
+    async def get_financials(
+        self, symbols: list[str], asof_day: date
+    ) -> dict[str, Financials]:
+        """제출일이 t-1 이하인 최신 분기 재무. 원천이 없는 시장은 빈 dict.
+
+        기본 미구현이 아니라 빈 반환 — 재무 대응물이 없는 시장(크립토)이 정상 상태다.
+        """
+        return {}
 
     @abstractmethod
     async def get_positions(self) -> list[Position]:
@@ -243,12 +265,14 @@ class MarketAdapter(ABC):
         asof_day = asof_day or datetime.now(timezone.utc).date()
         bars = await self.get_ohlcv(symbols, asof_day)
         news = await self.get_news(symbols, asof_day)
+        financials = await self.get_financials(symbols, asof_day)
         return Observation(
             market=self.market,
             asof_day=asof_day,
             collected_at=datetime.now(timezone.utc),
             bars=bars,
             news=news,
+            financials=financials,
         )
 
 

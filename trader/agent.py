@@ -19,6 +19,7 @@ from adapters.base import Bar, Observation, Position
 from llm import LLMRouter
 from trader.events import upcoming_events
 from trader.features import InsufficientHistoryError, compute_features
+from trader.fundamentals import observed_fundamentals
 from trader.schema import parse_decision
 
 HistoryFn = Callable[[list[str], date], Awaitable[dict[str, list[Bar]]]]
@@ -87,6 +88,7 @@ def build_user_prompt(
         s: [{"day": str(b.day), "close": b.close, "volume": b.volume} for b in bars]
         for s, bars in obs.bars.items()
     }
+    fundamentals = observed_fundamentals(obs)
     payload = {
         "asof_day": str(obs.asof_day),
         "features": features,  # None = 이력 부족으로 계산 불가
@@ -101,6 +103,13 @@ def build_user_prompt(
         "verified_lessons": lessons or [],
         "alpha_signals": alpha_signals or {},
     }
+    if fundamentals:
+        payload["fundamentals"] = {
+            "note": "가장 최근 공시된 분기 재무. period_end 가 오래됐으면 그만큼 묵은 값이고, "
+            "basis=annual 은 직전 연간 실적으로 물러섰다는 뜻이다. 값이 비어 있으면 "
+            "적자·자본잠식 등으로 비율이 성립하지 않는 경우다.",
+            **fundamentals,
+        }
     if events:
         payload["upcoming_events"] = {
             "note": "사전 공지된 일정(결과 아님) — 이벤트 직전 리스크 노출은 스스로 판단하라.",
@@ -264,6 +273,7 @@ class LLMTrader:
         self.last_base_weights = base_alloc  # ablation 병행용 (무메모리 arm)
         self.last_decision = {
             "features": features,  # 감사·pattern_key 계산용
+            "fundamentals": observed_fundamentals(obs),  # 프롬프트 주입분 감사
             "alpha_signals_provided": sorted(signals),
             "retrieved_memory_ids": [le["id"] for le in lessons],
             "influence": influence,

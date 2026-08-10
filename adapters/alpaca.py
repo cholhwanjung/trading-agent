@@ -19,6 +19,7 @@ from adapters.base import (
     Position,
     observation_window,
 )
+from adapters.financials import Financials
 from adapters.retry import with_retry
 
 TRADE_BASE = "https://paper-api.alpaca.markets"
@@ -34,10 +35,12 @@ class AlpacaPaperAdapter(MarketAdapter):
         secret: str,
         universe: list[str],  # 예: ["SPY"]
         min_notional: float = 10.0,
+        sec_user_agent: str | None = None,  # SEC 공시·재무 조회 식별자 (키 아님)
     ) -> None:
         self.universe = universe
         self.min_notional = min_notional
         self._key, self._secret = api_key, secret
+        self._sec_user_agent = sec_user_agent
         self._client = httpx.AsyncClient(
             headers={"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": secret},
             timeout=15.0,
@@ -86,10 +89,23 @@ class AlpacaPaperAdapter(MarketAdapter):
         return out
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
+        from adapters.edgar import fetch_edgar_filings
         from adapters.news_us import fetch_us_news
 
         start, end = observation_window(asof_day)
-        return await fetch_us_news(self._key, self._secret, symbols, start, end)
+        news = await fetch_us_news(self._key, self._secret, symbols, start, end)
+        # 공시를 구조화 이벤트로 관측에 편입 (같은 뉴스 채널). 헤드라인은 의무공시의 대체재가
+        # 아니다 — 8-K 는 4영업일 내 제출 의무라 적시성·완결성이 다르다.
+        news += await fetch_edgar_filings(
+            symbols, start, end, user_agent=self._sec_user_agent
+        )
+        return news
+
+    async def get_financials(self, symbols: list[str], asof_day: date) -> dict[str, Financials]:
+        from adapters.edgar import fetch_edgar_financials
+
+        _, end = observation_window(asof_day)
+        return await fetch_edgar_financials(symbols, end, user_agent=self._sec_user_agent)
 
     async def get_equity(self) -> float:
         account = await self._get(f"{TRADE_BASE}/v2/account")
