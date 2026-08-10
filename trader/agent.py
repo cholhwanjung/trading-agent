@@ -15,7 +15,7 @@ from datetime import date
 from pathlib import Path
 
 from adapters.allocation import CASH
-from adapters.base import Bar, Observation, Position
+from adapters.base import DISCLOSURE_SOURCES, Bar, Observation, Position
 from llm import LLMRouter
 from trader.events import upcoming_events
 from trader.features import InsufficientHistoryError, compute_features
@@ -76,18 +76,24 @@ def build_user_prompt(
     debate: dict | None = None,
     trigger: dict | None = None,
     max_news: int = 10,
+    max_disclosures: int = 10,
     events: list[dict] | None = None,
 ) -> str:
     """관측을 구조화 텍스트로 — 자유 산문 없이 JSON 블록 나열.
 
     lessons 는 admission+probation 을 통과한 active 교훈만 (검증 전 개입 금지).
     events 는 사전 공지된 미래 일정(공개 정보) — 관측 상한과 무관한 별도 컨텍스트.
+    공시는 뉴스와 같은 리스트로 실려오지만 별도 블록으로 낸다 — 한 리스트를 앞에서
+    잘라 쓰면 어댑터가 뒤에 이어붙인 공시가 한 건도 남지 않고, 둘은 고르는 기준도
+    다르다(뉴스는 최신순, 공시는 재료성).
     """
 
     recent = {
         s: [{"day": str(b.day), "close": b.close, "volume": b.volume} for b in bars]
         for s, bars in obs.bars.items()
     }
+    news = [n for n in obs.news if n.source not in DISCLOSURE_SOURCES]
+    disclosures = [n for n in obs.news if n.source in DISCLOSURE_SOURCES]
     fundamentals = observed_fundamentals(obs)
     payload = {
         "asof_day": str(obs.asof_day),
@@ -95,7 +101,7 @@ def build_user_prompt(
         "recent_bars": recent,
         "news_headlines": [
             {"day": str(n.published_at.date()), "headline": n.headline}
-            for n in obs.news[:max_news]
+            for n in news[:max_news]
         ],
         "current_positions": [
             {"symbol": p.symbol, "market_value": p.market_value} for p in positions
@@ -109,6 +115,16 @@ def build_user_prompt(
             "basis=annual 은 직전 연간 실적으로 물러섰다는 뜻이다. 값이 비어 있으면 "
             "적자·자본잠식 등으로 비율이 성립하지 않는 경우다.",
             **fundamentals,
+        }
+    if disclosures:
+        payload["disclosures"] = {
+            "note": "규제기관에 접수된 공시 원문의 제목·접수일. 기자의 해석이 섞이는 뉴스와 "
+            "달리 발행 주체가 회사 자신이고 접수일이 확정 사실이다. 본문은 주입되지 "
+            "않으므로 제목이 시사하는 바를 넘겨짚지 말 것.",
+            "items": [
+                {"day": str(n.published_at.date()), "headline": n.headline}
+                for n in disclosures[:max_disclosures]
+            ],
         }
     if events:
         payload["upcoming_events"] = {

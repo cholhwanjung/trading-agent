@@ -1,6 +1,7 @@
 """Market Adapters — 시장별 데이터 수집 + 배분비율→주문 변환."""
 
 from adapters.base import (
+    DISCLOSURE_SOURCES,
     Bar,
     LeakageError,
     MarketAdapter,
@@ -18,6 +19,7 @@ from adapters.base import (
 from adapters.financials import Financials
 
 __all__ = [
+    "DISCLOSURE_SOURCES",
     "Bar",
     "Financials",
     "LeakageError",

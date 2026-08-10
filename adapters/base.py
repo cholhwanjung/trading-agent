@@ -49,6 +49,12 @@ class NewsItem:
     url: str | None = None
 
 
+# 공시 어댑터가 NewsItem.source 에 붙이는 값. 공시는 수집·누출검증을 뉴스와 같은 리스트로
+# 통과하지만(둘 다 published_at 기준 윈도우 판정) 소비 시점에는 갈라내야 한다 —
+# 어댑터가 뉴스 뒤에 이어붙이고 소비자가 앞에서 잘라 쓰면 공시가 통째로 잘려나간다.
+DISCLOSURE_SOURCES: frozenset[str] = frozenset({"DART", "SEC"})
+
+
 @dataclass(frozen=True)
 class Position:
     """자산 1종의 현재 보유 상태."""

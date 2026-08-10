@@ -2,7 +2,9 @@
 
 두 채널을 별개로 둔다.
   1. **공시 이벤트** — 유니버스 종목의 접수 공시를 '구조화 이벤트'(보고서명 + 접수일)로
-     NewsItem 에 매핑해 KR 관측에 뉴스와 함께 넣는다. rich 리포트 본문은 주입하지 않는다.
+     NewsItem 에 매핑한다. 관측 리스트는 뉴스와 공유하지만(윈도우 판정이 같다) 프롬프트
+     에서는 별도 채널로 나뉜다. rich 리포트 본문은 주입하지 않는다. 상시 접수되는 잡음
+     보고서는 여기서 걸러 상한을 재료성 공시가 쓰게 한다.
   2. **재무** — 단일회사 전체 재무제표에서 손익 누적 구간과 재무상태표 시점값을 뽑는다.
      TTM 산식·비율 계산은 여기서 하지 않는다(순수 모듈이 맡는다).
 
@@ -34,6 +36,18 @@ STOCK_TO_CORP: dict[str, str] = {
     "005380": "00164742",  # 현대차(현대자동차)
     "035420": "00266961",  # NAVER
 }
+
+
+# 상시 배경 잡음 보고서 — 보고서명 부분일치로 거른다([기재정정] 접두어도 함께 걸린다).
+# 임원·주요주주 개인의 지분 변동 보고는 대형주에서 거의 매일 접수되는데(실측: 한 주 38건
+# 중 25건), 접수일 정렬이라 실적·투자·배당 같은 재료성 공시를 상한 밖으로 밀어낸다.
+# 5% 룰의 대량보유상황보고서는 지배구조 재료라 남긴다 — 이름이 달라 여기 걸리지 않는다.
+_NOISE_REPORTS: tuple[str, ...] = ("특정증권등소유상황보고서",)
+
+
+def _is_material(report_nm: str) -> bool:
+    """잡음 보고서명이 아니면 True — 확실한 잡음만 제거하고 미등록 종류는 통과시킨다."""
+    return not any(noise in report_nm for noise in _NOISE_REPORTS)
 
 
 def _to_news(row: dict) -> NewsItem | None:
@@ -88,6 +102,8 @@ async def fetch_dart_disclosures(
             if data.get("status") not in ("000", "013"):  # 013 = 데이터 없음(정상)
                 continue
             for row in data.get("list") or []:
+                if not _is_material(row.get("report_nm") or ""):
+                    continue
                 item = _to_news(row)
                 if item and start <= item.published_at.date() <= end:
                     out.append(item)
