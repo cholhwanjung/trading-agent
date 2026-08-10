@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from eval.meta import load_arm_history
@@ -268,6 +268,39 @@ def _market_statuses(out_tail: list[str]) -> dict[str, str]:
         if c:
             latest[c.group(1)] = "ok"
     return latest
+
+
+def running_jobs(state_dir: Path, now: datetime | None = None) -> list[dict]:
+    """지금 돌고 있는 잡 목록 — 락 파일의 실행 표식에서 읽는다(락은 건드리지 않는다).
+
+    out 로그의 `status=ok` 는 **그 시장의 주문 왕복이 끝났다**는 뜻일 뿐, 런 전체의 종료가
+    아니다. 뒤이어 메모리 파이프라인·주간 회고·shadow 채널이 더 돌기 때문에, 로그 tail 만
+    보면 아직 진행 중인데도 완료로 읽힌다 — 그 상태에서 기기를 재우면 남은 단계가 통째로
+    유실된다. 그래서 완료 추정과 별개로 '살아 있는 프로세스'를 직접 확인한다.
+    """
+    from harness.lock import read_run_marker
+
+    now = now or datetime.now(timezone.utc)
+    out: list[dict] = []
+    if not state_dir.exists():
+        return out
+    for path in sorted(state_dir.glob("*.lock")):
+        marker = read_run_marker(path)
+        if not marker:
+            continue
+        elapsed = None
+        try:
+            started = datetime.fromisoformat(marker["started_at"])
+            elapsed = int((now - started).total_seconds())
+        except (KeyError, ValueError, TypeError):
+            started = None
+        out.append({
+            "label": marker.get("label") or path.stem,
+            "pid": marker.get("pid"),
+            "started_at": marker.get("started_at"),
+            "elapsed_s": elapsed,
+        })
+    return sorted(out, key=lambda r: r["label"])
 
 
 def _tail(path: Path, n: int) -> list[str]:

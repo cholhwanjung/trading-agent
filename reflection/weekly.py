@@ -19,6 +19,15 @@ IMPORTANCE_STEP = 0.05
 IMPORTANCE_MIN, IMPORTANCE_MAX = 0.1, 0.9
 
 
+def last_sunday(day: date) -> date:
+    """day 이하의 가장 가까운 일요일(day 가 일요일이면 day 자신).
+
+    주간 회고의 기준일이다. 호출부가 "오늘이 일요일인가"로 가르면 그 일요일에 실행이
+    없었을 때 해당 주 회고가 영구 유실되므로, 기준일을 되돌려 잡아 다음 실행이 메우게 한다.
+    """
+    return day - timedelta(days=(day.weekday() + 1) % 7)
+
+
 def compute_weekly_report(store: MemoryStore, market: str, asof_day: date) -> dict | None:
     """최근 7일 episodic(결과 있는 것만) 집계 — 결정론, LLM 불필요."""
     since = asof_day - timedelta(days=WINDOW_DAYS)

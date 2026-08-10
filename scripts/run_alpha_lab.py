@@ -27,6 +27,7 @@ from harness import (  # noqa: E402
     JsonlLogger,
     load_env,
     make_usage_sink,
+    single_instance,
     wait_for_network,
     with_deadline,
 )
@@ -118,6 +119,13 @@ async def main() -> int:
     if not markets:
         print("status=fail detail=실행할 시장 없음(키/인자 확인)")
         return 1
+
+    # 단일 인스턴스 락 — 주간 잡이라 겹칠 일은 드물지만, 락 파일이 실행중 표식을 겸해
+    # 대시보드가 "지금 alpha 사이클이 돌고 있음"을 알 수 있게 한다(수 분~수십 분 걸리는 잡).
+    lock = single_instance(STATE_DIR / "run_alpha_lab.lock", label="alpha 사이클")
+    if lock is None:
+        print("status=skip detail=이미 실행 중 — 중복 실행 차단")
+        return 0
 
     # wake/부팅 직후 실행 시 네트워크(DNS+TCP) 준비 대기 — LLM·패널 수집 조기 실패 방지.
     if not await wait_for_network():

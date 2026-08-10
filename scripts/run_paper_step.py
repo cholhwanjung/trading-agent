@@ -337,14 +337,17 @@ async def run_memory_pipeline(
         logger.log(market, "memory_probation", event)
     for event in review_retention(memory, market, today):
         logger.log(market, "memory_retention", event)
-    if today.weekday() == 6:  # 일요일: 주간 reflection
-        from reflection import run_weekly
+    # 주간 reflection — "오늘이 일요일인가"가 아니라 "가장 최근 일요일 회고가 있는가"로 판정.
+    # 요일로 가르면 그 일요일에 잡이 안 돌았을 때(기기 절전으로 launchd 가 wake 이후 catch-up
+    # 하면 실행일이 월요일이 된다) 그 주 회고가 영구 유실된다 — 실제로 두 주를 그렇게 잃었다.
+    # run_weekly 는 같은 날 리포트가 있으면 LLM 호출 전에 멱등 스킵하므로 매일 불러도 안전하다.
+    from reflection import last_sunday, run_weekly
 
-        report, ref_events = await run_weekly(memory, market, today, router)
-        if report:
-            logger.log(market, "weekly_reflection", report)
-        for event in ref_events:
-            logger.log(market, "weekly_credit", event)
+    report, ref_events = await run_weekly(memory, market, last_sunday(today), router)
+    if report:
+        logger.log(market, "weekly_reflection", report)
+    for event in ref_events:
+        logger.log(market, "weekly_credit", event)
 
 
 _VALID_MARKETS = {"KR", "US", "CRYPTO"}
@@ -381,7 +384,9 @@ async def main() -> int:
     # 상태 파일(risk_*·live_notional_*)을 레이스로 덮어쓰지 않게 한다(실계좌 경로 필수).
     # 시장셋별 키라 장 시간이 다른 잡(KR 10:00 vs CRYPTO,US 23:00)은 서로 막지 않는다.
     markets_key = "-".join(sorted(args.markets)) if args.markets else "all"
-    lock = single_instance(STATE_DIR / f"run_paper_step_{markets_key}.lock")
+    lock = single_instance(
+        STATE_DIR / f"run_paper_step_{markets_key}.lock", label=f"페이퍼 스텝 {markets_key}"
+    )
     if lock is None:
         print(f"status=skip detail=이미 실행 중(markets={markets_key}) — 중복 실행 차단")
         return 0

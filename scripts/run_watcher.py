@@ -81,7 +81,7 @@ async def main() -> int:
 
     # 단일 인스턴스 락 — 15분 인터벌 틱이 이전(느린) 틱과 겹치면 같은 계좌에 중복 주문하고
     # risk_{market}.json 을 레이스로 덮어쓴다. 시장별 키로 자기 중첩을 차단.
-    lock = single_instance(STATE_DIR / f"run_watcher_{market}.lock")
+    lock = single_instance(STATE_DIR / f"run_watcher_{market}.lock", label=f"워처 {market}")
     if lock is None:
         print(f"status=skip detail=이미 실행 중(market={market}) — 중복 실행 차단")
         return 0

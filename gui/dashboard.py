@@ -44,6 +44,7 @@ from gui.panels import (  # noqa: E402
     market_health,
     promoted_memories,
     read_recent_decisions,
+    running_jobs,
     scenario_outcomes,
     treasury_dryrun_report,
     usage_report,
@@ -104,6 +105,30 @@ def pie(data: dict[str, float], title: str) -> None:
     )
     st.altair_chart(chart, width="stretch")
 
+
+@st.fragment(run_every=10)
+def running_banner() -> None:
+    """실행 중인 잡을 최상단에 계속 표시 — 탭과 무관하게 보이도록 tabs 앞에 둔다.
+
+    로그의 `status=ok` 는 그 시장의 주문 왕복이 끝났다는 뜻일 뿐 런 전체의 완료가 아니다.
+    그걸 완료로 읽고 기기를 재우면 뒤따르는 단계가 통째로 유실되므로(실제로 주간 회고를
+    그렇게 잃었다), 살아 있는 프로세스를 직접 확인해 별도로 알린다. 10초마다 자동 갱신.
+    """
+    jobs = running_jobs(STATE)
+    if not jobs:
+        return
+    for job in jobs:
+        seconds = job["elapsed_s"]
+        elapsed = f"{seconds // 60}분 {seconds % 60}초 경과" if seconds is not None else "경과 시간 미상"
+        st.warning(f"🔄 **실행 중** — {job['label']} · {elapsed} (pid {job['pid']})")
+    st.caption(
+        "이 표시가 떠 있는 동안 기기를 재우면 남은 단계(메모리 승격·주간 회고·shadow 채널)가 "
+        "유실됩니다. 잡 로그의 `status=ok` 는 해당 시장의 주문 왕복이 끝났다는 뜻일 뿐 "
+        "런 전체의 완료가 아닙니다."
+    )
+
+
+running_banner()
 
 tab_dash, tab_obs, tab_mem, tab_chat, tab_ops = st.tabs(
     ["📊 대시보드", "🔭 관측", "📓 메모리", "💬 챗", "🔧 운영"]
