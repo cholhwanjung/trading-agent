@@ -55,6 +55,7 @@ from memory import (  # noqa: E402
 from regime import (  # noqa: E402
     compute_market_vol,
     INDEX_PROXY,
+    compute_jm_features,
     compute_macro_regime,
     compute_regime,
     load_market_signals,
@@ -524,6 +525,20 @@ async def main() -> int:
                     "proxy": INDEX_PROXY.get(market),
                 })
                 print(f"market={market} vol_state={vol.state} rv20={vol.realized_vol}")
+
+            # jump model 피처 (shadow) — 룰 기반 FSM 과 같은 프록시·같은 창으로 나란히 계산.
+            # 하방편차·Sortino 는 실현변동성이 못 보는 하락 편중과 리스크조정수익을 담는다.
+            # 계산·로깅만, 결정/리스크 미개입 — 두 접근의 라이브 비교가 쌓인 뒤 판정한다.
+            jm = await compute_jm_features(adapter, market, today)
+            if jm is not None:
+                logger.log(market, "jm_features", {
+                    "downside_dev_10": jm.downside_dev,
+                    "sortino_20": jm.sortino_20,
+                    "sortino_60": jm.sortino_60,
+                    "n_bars": jm.n_bars, "proxy": INDEX_PROXY.get(market),
+                })
+                print(f"market={market} dd10={jm.downside_dev} sortino20={jm.sortino_20}"
+                      f" sortino60={jm.sortino_60} n_bars={jm.n_bars}")
 
             # 배분 집중도·실효 분산 (shadow) — 종목당 상한이 못 보는 동조 리스크.
             # 계산·로깅만, Risk Engine 미개입 — 검증 후 집중도 상한 게이트 승격 대상.
