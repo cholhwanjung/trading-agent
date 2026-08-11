@@ -22,6 +22,8 @@ from adapters.base import (
 )
 from adapters.retry import with_retry
 
+OHLCV_LIMIT = 1000  # Binance klines 1회 응답 행 수 상한 — 넘겨 요청해도 여기서 잘린다
+
 
 async def _ensure_markets(client) -> None:
     """ccxt 마켓 메타를 1회만 프리로드(캐시). markets 가 이미 있으면 즉시 반환.
@@ -76,6 +78,39 @@ class BinanceTestnetAdapter(MarketAdapter):
                 if start <= day <= end:
                     bars.append(Bar(day=day, open=o, high=h, low=lo, close=c, volume=v))
             out[symbol] = bars
+        return out
+
+    async def _fetch_bars_history(
+        self, symbols: list[str], start: date, end: date
+    ) -> dict[str, list[Bar]]:
+        """장기 창 전용 — since 커서로 1회 응답 상한(1000행)을 이어붙인다.
+
+        limit 를 요청 일수만큼 키워도 거래소가 1000행에서 자르는데, 자를 때 남는 것은
+        since 부터의 **가장 오래된** 1000봉이다 — 창을 길게 잡을수록 최근 구간이 통째로
+        빠지고, 그게 봉 개수만 보면 정상으로 보인다. 마지막 봉 다음으로 커서를 밀어
+        end 까지 채운다. 상한 t-1 은 [start, end] 필터가 유지한다.
+        """
+        since = int(datetime.combine(start, time(), tzinfo=timezone.utc).timestamp() * 1000)
+        end_ms = int(datetime.combine(end, time(), tzinfo=timezone.utc).timestamp() * 1000)
+        await _ensure_markets(self.data)
+        out: dict[str, list[Bar]] = {}
+        for symbol in symbols:
+            bars: dict[date, Bar] = {}
+            cursor = since
+            while cursor <= end_ms:
+                raw = await with_retry(
+                    lambda s=symbol, cur=cursor: self.data.fetch_ohlcv(s, "1d", cur, OHLCV_LIMIT)
+                )
+                if not raw:
+                    break
+                for ts, o, h, lo, c, v in raw:
+                    day = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date()
+                    if start <= day <= end:
+                        bars[day] = Bar(day=day, open=o, high=h, low=lo, close=c, volume=v)
+                if len(raw) < OHLCV_LIMIT:  # 마지막 페이지
+                    break
+                cursor = int(raw[-1][0]) + 1
+            out[symbol] = sorted(bars.values(), key=lambda b: b.day)
         return out
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:

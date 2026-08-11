@@ -14,6 +14,7 @@ import asyncio
 import json
 import statistics
 import time
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,6 +28,7 @@ PAPER_BASE = "https://openapivts.koreainvestment.com:29443"
 REAL_BASE = "https://openapi.koreainvestment.com:9443"
 TOKEN_SAFETY_S = 600  # 만료 10분 전부터 재발급
 RATE_GAP_S = 0.6  # 모의투자 초당 2건 제한(EGW00201) — 요청 간 최소 간격
+HISTORY_MAX_PAGES = 12  # 장기 조회 페이지 상한(1회 ~100행 → ~1200거래일) — 폭주 방지
 
 
 class KISSession:
@@ -117,6 +119,37 @@ class KISSession:
         return await self._client.post(path, headers=headers, json=body)
 
 
+async def paginate_daily(
+    fetch_page: Callable[[date], Awaitable[list[Bar]]], start: date, end: date
+) -> list[Bar]:
+    """기준일 역순 일봉 API 를 [start, end] 전 구간으로 이어붙인다 (오름차순·중복 제거).
+
+    KIS 시세는 국내·해외 모두 1회 응답이 ~100행에서 잘리고 기준일에서 과거로 내려간다.
+    한 번만 부르면 300일 창을 요청해도 최근 ~100봉만 와서, 크래시 없이 **요청보다 짧은
+    창**으로 통과한다. fetch_page(cursor) 가 [start, cursor] 봉을 오름차순으로 돌려주면
+    그 페이지의 최소 날짜 직전으로 커서를 당겨 start 까지 거슬러 올라간다.
+
+    커서는 매 회 최소 하루씩 줄고 페이지 수도 상한을 둬 응답이 이상해도 멈춘다. 요청
+    간격은 세션 스로틀이 지키므로(초당 건수 제한) 여기서 따로 대기하지 않는다.
+
+    '기준일에서 과거로 자른다'는 전제가 원천에서 깨지면 다시 짧은 창으로 조용히 통과한다 —
+    그래서 국면 로그에 실제로 받은 봉 수를 남긴다(요청 창 대비 대조가 유일한 확인 수단).
+    """
+    bars: dict[date, Bar] = {}
+    cursor = end
+    for _ in range(HISTORY_MAX_PAGES):
+        if cursor < start:
+            break
+        page = await fetch_page(cursor)
+        if not page:  # 더 과거 데이터 없음(상장 이전 등)
+            break
+        bars.update({b.day: b for b in page})
+        if page[0].day <= start:  # 요청 하한 도달
+            break
+        cursor = page[0].day - timedelta(days=1)
+    return sorted(bars.values(), key=lambda b: b.day)
+
+
 def summarize_flows(rows: list[dict], short: int = 5, long: int = 20) -> dict:
     """투자자별 순매수 요약 — 최근 short 일 합(백만원)과 z-점수.
 
@@ -180,26 +213,40 @@ class KISPaperAdapter(MarketAdapter):
                 )
         return sorted(bars, key=lambda b: b.day)
 
+    async def _daily_page(self, symbol: str, start: date, cursor: date) -> list[Bar]:
+        """[start, cursor] 일봉 1페이지 — 응답은 cursor 에서 과거로 최대 100행."""
+        data = await self.session.get(
+            "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+            tr_id="FHKST03010100",
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol,
+                "FID_INPUT_DATE_1": start.strftime("%Y%m%d"),
+                "FID_INPUT_DATE_2": cursor.strftime("%Y%m%d"),
+                "FID_PERIOD_DIV_CODE": "D",
+                "FID_ORG_ADJ_PRC": "0",  # 수정주가
+            },
+        )
+        return self._parse_daily(data.get("output2") or [], start, cursor)
+
     async def _fetch_bars(
         self, symbols: list[str], start: date, end: date
     ) -> dict[str, list[Bar]]:
-        # API 1회 응답 최대 100행 — 기본 lookback(90일)은 1회 조회로 충분
-        out: dict[str, list[Bar]] = {}
-        for symbol in symbols:
-            data = await self.session.get(
-                "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-                tr_id="FHKST03010100",
-                params={
-                    "FID_COND_MRKT_DIV_CODE": "J",
-                    "FID_INPUT_ISCD": symbol,
-                    "FID_INPUT_DATE_1": start.strftime("%Y%m%d"),
-                    "FID_INPUT_DATE_2": end.strftime("%Y%m%d"),
-                    "FID_PERIOD_DIV_CODE": "D",
-                    "FID_ORG_ADJ_PRC": "0",  # 수정주가
-                },
-            )
-            out[symbol] = self._parse_daily(data.get("output2") or [], start, end)
-        return out
+        # 관측·주문 경로 — 창이 짧아(최근 N거래일) 1회 조회(최대 100행)로 충분
+        return {s: await self._daily_page(s, start, end) for s in symbols}
+
+    async def _fetch_bars_history(
+        self, symbols: list[str], start: date, end: date
+    ) -> dict[str, list[Bar]]:
+        """장기 창 전용 — 100행 상한을 커서 페이지네이션으로 넘긴다(국면·feature 입력).
+
+        300일 창은 ~205거래일이라 1회 조회로는 절반도 안 온다. 상한 t-1 은 호출부가
+        정한 end 를 그대로 쓰고 파싱에서 재확인하므로 페이지를 이어도 유지된다.
+        """
+        return {
+            s: await paginate_daily(lambda c, s=s: self._daily_page(s, start, c), start, end)
+            for s in symbols
+        }
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
         from adapters.news_kr import fetch_kr_news

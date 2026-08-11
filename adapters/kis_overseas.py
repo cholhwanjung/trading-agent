@@ -31,7 +31,7 @@ from adapters.base import (
     Position,
     observation_window,
 )
-from adapters.kis import PAPER_BASE, REAL_BASE, KISSession
+from adapters.kis import PAPER_BASE, REAL_BASE, KISSession, paginate_daily
 
 if TYPE_CHECKING:
     from risk.live import LiveGuard
@@ -118,26 +118,54 @@ class KISOverseasAdapter(MarketAdapter):
                 )
         return sorted(bars, key=lambda b: b.day)
 
+    async def _daily_page(
+        self, symbol: str, start: date, cursor: date, bymd: str = ""
+    ) -> list[Bar]:
+        """[start, cursor] 일봉 1페이지 — 최대 ~100행, 기준일에서 과거로.
+
+        bymd 공란은 '최근부터'. 응답 자체는 상한을 안 지키므로 [start, cursor] 필터로
+        당일 봉을 막는다(파싱에서 재확인).
+        """
+        data = await self.session.get(
+            "/uapi/overseas-price/v1/quotations/dailyprice",
+            tr_id="HHDFS76240000",  # 실전/모의 공통
+            params={
+                "AUTH": "",
+                "EXCD": self.excd,
+                "SYMB": symbol,
+                "GUBN": "0",  # 일봉
+                "BYMD": bymd,
+                "MODP": "1",  # 수정주가
+            },
+        )
+        return self._parse_daily(data.get("output2") or [], start, cursor)
+
     async def _fetch_bars(
         self, symbols: list[str], start: date, end: date
     ) -> dict[str, list[Bar]]:
-        # 1회 응답 최대 ~100행(기준일 역순) — 기본 lookback(90일)은 1회 조회로 충분
-        out: dict[str, list[Bar]] = {}
-        for symbol in symbols:
-            data = await self.session.get(
-                "/uapi/overseas-price/v1/quotations/dailyprice",
-                tr_id="HHDFS76240000",  # 실전/모의 공통
-                params={
-                    "AUTH": "",
-                    "EXCD": self.excd,
-                    "SYMB": symbol,
-                    "GUBN": "0",  # 일봉
-                    "BYMD": "",  # 공란 = 최근부터
-                    "MODP": "1",  # 수정주가
-                },
-            )
-            out[symbol] = self._parse_daily(data.get("output2") or [], start, end)
-        return out
+        # 관측·주문 경로 — 창이 짧아(최근 N거래일) 1회 조회(최대 ~100행)로 충분
+        return {s: await self._daily_page(s, start, end) for s in symbols}
+
+    async def _fetch_bars_history(
+        self, symbols: list[str], start: date, end: date
+    ) -> dict[str, list[Bar]]:
+        """장기 창 전용 — ~100행 상한을 커서 페이지네이션으로 넘긴다(국면·feature 입력).
+
+        300일 창은 ~205거래일이라 1회 조회로는 절반도 안 온다. 상한 t-1 은 호출부가 정한
+        end 를 그대로 쓰고 파싱에서 재확인하므로 페이지를 이어도 유지된다.
+
+        첫 페이지는 BYMD 공란 — 관측 경로와 **같은 요청 형태**다. 이어받는 페이지의 기준일은
+        직전 페이지 최소일−1 이라 휴장일에 떨어질 수 있는데, 그때 응답이 어떻게 오는지 원천
+        보증이 없다. 첫 페이지를 검증된 형태로 두면 최악의 경우에도 1회 조회분은 확보된다.
+        """
+
+        async def page(symbol: str, cursor: date) -> list[Bar]:
+            bymd = "" if cursor == end else cursor.strftime("%Y%m%d")
+            return await self._daily_page(symbol, start, cursor, bymd)
+
+        return {
+            s: await paginate_daily(lambda c, s=s: page(s, c), start, end) for s in symbols
+        }
 
     async def get_news(self, symbols: list[str], asof_day: date) -> list[NewsItem]:
         # 체결은 KIS, 뉴스는 Alpaca(무료) — venue 분리. 키 없으면 빈 리스트.

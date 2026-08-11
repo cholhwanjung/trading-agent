@@ -190,12 +190,23 @@ class MarketAdapter(ABC):
     async def _fetch_bars(
         self, symbols: list[str], start: date, end: date
     ) -> dict[str, list[Bar]]:
-        """[start, end] 구간 일봉 조회 — get_ohlcv/get_ohlcv_history 의 공통 소스.
+        """[start, end] 구간 일봉 조회 (1회) — 관측·주문 경로(get_ohlcv)의 시세 소스.
 
         실브로커 어댑터는 이것만 구현하면 두 조회 메서드가 기본 제공된다.
         Mock/baseline 은 get_ohlcv 를 직접 재정의해도 된다.
         """
         raise NotImplementedError(f"{type(self).__name__}는 _fetch_bars 미구현")
+
+    async def _fetch_bars_history(
+        self, symbols: list[str], start: date, end: date
+    ) -> dict[str, list[Bar]]:
+        """[start, end] **전 구간** 일봉 — get_ohlcv_history 전용 읽기 경로.
+
+        기본은 _fetch_bars 위임(1회 조회로 구간이 다 오는 원천). 1회 응답 행 수가
+        제한된 원천은 **이것만** 재정의해 페이지네이션을 붙인다 — 집행에 쓰이는
+        _fetch_bars 는 그대로 둬서 주문 경로에 조회 횟수·실패면을 늘리지 않는다.
+        """
+        return await self._fetch_bars(symbols, start, end)
 
     async def get_ohlcv(self, symbols: list[str], asof_day: date) -> dict[str, list[Bar]]:
         """최근 N '거래일'의 일봉을 symbol별로 반환. same-day(t) 봉 포함 금지.
@@ -211,8 +222,13 @@ class MarketAdapter(ABC):
     async def get_ohlcv_history(
         self, symbols: list[str], asof_day: date, lookback_days: int = 90
     ) -> dict[str, list[Bar]]:
-        """feature 계산용 장기 일봉 [t-lookback, t-1] (상한 t-1 은 동일 강제)."""
-        return await self._fetch_bars(
+        """feature 계산용 장기 일봉 [t-lookback, t-1] (상한 t-1 은 동일 강제).
+
+        요청한 창이 실제로 다 와야 한다 — 시세 API 가 1회 응답을 잘라도 크래시가 아니라
+        **짧은 창**으로 조용히 통과하고, 그 위에서 계산되는 롤링 피크·긴 반감기 피처가
+        설계보다 약해진다. 이어붙이기는 _fetch_bars_history 가 담당한다.
+        """
+        return await self._fetch_bars_history(
             symbols, asof_day - timedelta(days=lookback_days), asof_day - timedelta(days=1)
         )
 
