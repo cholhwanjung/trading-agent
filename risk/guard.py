@@ -91,6 +91,9 @@ class RiskGuardedPolicy:
                 self.last_decision = {
                     **inner_meta,
                     "weights_pre_risk": raw,
+                    # 저널이 이 키로 미집행 원안을 반사실 기록에 남긴다 — 동결된 배분만
+                    # 남기면 veto 된 패턴의 표본이 끊겨 재검증이 불가능해지기 때문.
+                    "counterfactual_key": key,
                     "risk_violations": [f"forbidden_pattern key={key}"],
                     "circuit_open": False,
                     "equity": None,

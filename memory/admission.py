@@ -148,7 +148,11 @@ def review_probation(store: MemoryStore, market: str, asof_day: date) -> list[di
             source_ids = set(entry.data.get("source_ids", []))
             oos = [
                 e
-                for e in store.query(market, store="episodic", pattern_key=entry.pattern_key)
+                # veto 로 미집행된 원안도 표본이다 — 하드 veto 가 서면 그 패턴의 집행
+                # 기록이 끊겨 검증 자체가 불가능해진다. 이 표본은 제약을 푸는 방향으로만
+                # 작동한다(승격 경로는 episodic 만 본다).
+                for name in ("episodic", "counterfactual")
+                for e in store.query(market, store=name, pattern_key=entry.pattern_key)
                 # 승격에 쓰인 원천 표본은 OOS 가 아니다 — in-sample 재사용 = 자기 검증 오염.
                 # 동점도 제외 — 전부 동점이면 oos_mean == 0 이라 부호 판정이 무조건 실패로
                 # 떨어져, 검증되지 않은 패턴이 아니라 '검증할 기회가 없던' 패턴이 퇴출된다.

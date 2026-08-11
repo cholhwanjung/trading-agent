@@ -36,7 +36,11 @@ def review_retention(store: MemoryStore, market: str, asof_day: date) -> list[di
             source_ids = set(entry.data.get("source_ids", []))
             recent = [
                 e
-                for e in store.query(market, store="episodic", pattern_key=entry.pattern_key)
+                # veto 로 미집행된 원안 포함 — Forbidden 이 서면 그 패턴의 집행 기록이
+                # 끊겨(동결 배분은 hold 로 남는다) 무효화 증거가 영원히 모이지 않는다.
+                # 가상 결과를 표본으로 받아 제약이 스스로를 영구화하지 못하게 한다.
+                for name in ("episodic", "counterfactual")
+                for e in store.query(market, store=name, pattern_key=entry.pattern_key)
                 if e.outcome is not None and e.id not in source_ids and since <= e.day <= asof_day
             ]
             if len(recent) < MIN_VALIDITY_N:

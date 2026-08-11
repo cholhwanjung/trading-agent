@@ -69,7 +69,7 @@ def record_decision(
         f"[{market} {day}] {key} — 배분 { {k: round(v, 2) for k, v in weights.items()} }. "
         f"근거: {decision_meta.get('rationale', '')[:200]}"
     )
-    return store.add(
+    entry_id = store.add(
         market,
         "episodic",
         day,
@@ -87,18 +87,66 @@ def record_decision(
         pattern_key=key,
         embedding=embedding,
     )
+    _record_counterfactual(store, market, day, prev_weights, features, decision_meta,
+                           prices, entry_id)
+    return entry_id
+
+
+def _record_counterfactual(
+    store: MemoryStore,
+    market: str,
+    day: date,
+    prev_weights: dict[str, float] | None,
+    features: dict[str, dict | None],
+    decision_meta: dict,
+    prices: dict[str, float],
+    executed_id: str,
+) -> None:
+    """veto 로 집행되지 않은 원안을 가상 결과 계측용으로 남긴다.
+
+    하드 veto 는 배분을 직전 값으로 동결하므로 집행 기록의 행동 성분이 hold 로 바뀐다.
+    그러면 veto 된 패턴(risk_on/risk_off)의 표본이 다시는 쌓이지 않아, 그 패턴을 무효화할
+    증거를 제약 자신이 차단한다 — 한 번 선 제약이 영구화되는 구조다. 집행은 그대로 막되
+    원안의 가상 성과만 계속 계측해 재검증 루프를 닫는다.
+    """
+    key = decision_meta.get("counterfactual_key")
+    weights = decision_meta.get("weights_pre_risk")
+    if not (key and weights):
+        return
+    store.add(
+        market,
+        "counterfactual",
+        day,
+        f"[{market} {day}] {key} — veto 된 원안 "
+        f"{ {k: round(v, 2) for k, v in weights.items()} } (미집행)",
+        data={
+            "weights": weights,
+            "prev_weights": prev_weights,
+            "prices": prices,
+            "features": features,
+            "executed_id": executed_id,
+        },
+        pattern_key=key,
+    )
 
 
 def fill_pending_outcomes(
     store: MemoryStore, market: str, prices_now: dict[str, float], today: date
 ) -> list[tuple[str, float]]:
-    """outcome 미기입 episodic 에 (행동 − 무행동) 수익 차이를 소급 기입.
+    """outcome 미기입 기록에 (행동 − 무행동) 수익 차이를 소급 기입.
 
     entry.prices = 결정 당시 t-1 종가, prices_now = 현재 t-1 종가 → 보유 구간 수익률.
     prev_weights 가 없으면(첫 결정) 무행동 기준이 없어 절대 초과수익 대신 0 대비로 기록.
+    veto 된 원안(counterfactual)도 같은 산식으로 계측한다 — 배분과 기준가만 있으면
+    되고, 집행 여부와 무관하게 "그 배분이었다면"의 초과수익이 정의된다.
     """
     filled: list[tuple[str, float]] = []
-    for entry in store.query(market, store="episodic", outcome_missing=True):
+    entries = [
+        e
+        for name in ("episodic", "counterfactual")
+        for e in store.query(market, store=name, outcome_missing=True)
+    ]
+    for entry in entries:
         if entry.day >= today:
             continue  # 아직 다음 관측이 없다
         entry_prices = entry.data.get("prices") or {}

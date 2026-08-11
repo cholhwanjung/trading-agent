@@ -1,4 +1,4 @@
-"""메모리 3-store — SQLite 단일 파일, 시장별 네임스페이스 격리.
+"""메모리 4-store — SQLite 단일 파일, 시장별 네임스페이스 격리.
 
 한 테이블 + (market, store) 네임스페이스. 임베딩은 float32 blob — 규모가 수백 건
 수준이라 코사인은 Python 으로 충분(sqlite-vec/FAISS 는 규모 커지면).
@@ -7,6 +7,10 @@ store 종류:
 - episodic   — 매매 1건 전체 맥락 (원천 기록, outcome 은 다음 날 소급 기입)
 - semantic   — admission 통과 교훈 (probation → active)
 - procedural — 플레이북·Forbidden 실패 패턴 (하드 veto 소스)
+- counterfactual — Forbidden veto 로 집행되지 않은 원안의 가상 결과. 퇴출·재검증
+  표본으로만 쓰고 승격 표본으로는 쓰지 않는다(제약을 해제할 수는 있어도 새로 만들
+  수는 없다). episodic 과 섞지 않는 이유는 회고·집계·표시가 전부 "집행된 결정"을
+  세기 때문 — 별도 네임스페이스면 기존 소비자가 자동으로 안전하다.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-STORES = ("episodic", "semantic", "procedural")
+STORES = ("episodic", "semantic", "procedural", "counterfactual")
 STATUSES = ("active", "probation", "retired")
 
 _SCHEMA = """

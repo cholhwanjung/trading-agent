@@ -550,3 +550,40 @@ def episodic_ledger(db_path: Path, market: str, limit: int = 60) -> list[dict]:
         for e in _daily_episodic(_query(db_path, market, store="episodic"))
     ]
     return list(reversed(rows))[:limit]
+
+
+def _veto_verdict(outcome: float | None) -> str:
+    """원안의 사후 성과로 본 veto 판정 — 부호가 곧 판정이다."""
+    if outcome is None:
+        return "대기"
+    if outcome > 0:
+        return "veto 손해 (원안이 유리했다)"
+    if outcome < 0:
+        return "veto 적중 (원안이 불리했다)"
+    return "동점"
+
+
+def counterfactual_ledger(db_path: Path, market: str, limit: int = 60) -> list[dict]:
+    """하드 veto 로 집행되지 않은 원안 원장 — 최신순. 그 판단이 옳았는지 사후 계측.
+
+    `outcome` 은 원안대로 갔다면의 초과수익, `executed_outcome` 은 대신 동결된 실제
+    결정의 초과수익이다. veto 는 배분을 직전 값으로 얼려 행동을 hold 로 만들기 때문에
+    막힌 패턴의 표본이 그대로 끊긴다 — 이 기록이 없으면 한 번 선 제약을 무효화할
+    증거가 영영 모이지 않는다. 양수가 쌓이면 퇴출 심사가 제약을 푼다.
+    """
+    entries = _query(db_path, market, store="counterfactual")
+    if not entries:
+        return []
+    executed = {e.id: e.outcome for e in _query(db_path, market, store="episodic")}
+    rows = [
+        {
+            "day": e.day.isoformat(),
+            "pattern": e.pattern_key,
+            "outcome": e.outcome,
+            "executed_outcome": executed.get(e.data.get("executed_id")),
+            "verdict": _veto_verdict(e.outcome),
+            "content": e.content,
+        }
+        for e in entries
+    ]
+    return list(reversed(rows))[:limit]

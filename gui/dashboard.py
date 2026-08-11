@@ -29,6 +29,7 @@ from eval.perf import drawdown_series, perf_stats  # noqa: E402
 from eval.rolling import ROLLING_K, meta_shadow_delta, rolling_report  # noqa: E402
 from gui.panels import (  # noqa: E402
     admission_progress,
+    counterfactual_ledger,
     decision_for_day,
     episodic_ledger,
     exposure_turnover,
@@ -519,6 +520,30 @@ with tab_mem:
         )
     else:
         st.caption("아직 기록 없음.")
+
+    st.divider()
+    st.subheader("veto 원장 (집행되지 않은 원안)")
+    st.caption(
+        "Forbidden 패턴에 걸려 동결된 결정의 '원안대로 갔다면' 결과. 집행은 막되 가상 "
+        "성과는 계속 계측한다 — veto 는 배분을 직전 값으로 얼려 행동을 hold 로 만들기 "
+        "때문에 막힌 패턴의 표본이 그대로 끊긴다. 이 기록이 없으면 한 번 선 제약을 "
+        "무효화할 증거가 영영 모이지 않는다. `outcome` 이 양수로 쌓이면 퇴출 심사가 "
+        "제약을 푼다. 이 표본은 제약을 해제할 때만 쓰이고 승격에는 쓰이지 않는다."
+    )
+    vetoed = counterfactual_ledger(ROOT / "data" / "memory.sqlite", mem_market, limit=200)
+    if vetoed:
+        vc = st.columns(3)
+        vc[0].metric("veto 건수", len(vetoed))
+        vc[1].metric("veto 적중", sum(1 for r in vetoed if (r["outcome"] or 0) < 0))
+        vc[2].metric("veto 손해", sum(1 for r in vetoed if (r["outcome"] or 0) > 0))
+        st.dataframe(
+            pd.DataFrame(vetoed).style.format(
+                {"outcome": "{:+.3%}", "executed_outcome": "{:+.3%}"}, na_rep="— (대기)"
+            ),
+            hide_index=True,
+        )
+    else:
+        st.caption("하드 veto 발동 이력 없음 — Forbidden 패턴이 아직 승격되지 않았다.")
 
 
 # ── 챗 (게이트웨이 프록시) ──
