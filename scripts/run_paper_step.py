@@ -55,6 +55,7 @@ from memory import (  # noqa: E402
 from regime import (  # noqa: E402
     compute_market_vol,
     INDEX_PROXY,
+    compute_jm_features,
     compute_macro_regime,
     compute_regime,
     load_market_signals,
@@ -498,14 +499,17 @@ async def main() -> int:
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)
 
             # 시장 국면 (shadow) — 계산·로깅만, 결정/리스크 미개입. 검증 후 승격.
+            # n_bars 는 실제로 받은 봉 수 — 요청한 창(LOOKBACK_DAYS)보다 짧게 오면 롤링 피크·
+            # 낙폭이 설계보다 얕은 이력에서 나오는데, 그건 값만 봐서는 구분이 안 된다.
             regime = await compute_regime(adapter, market, today)
             if regime is not None:
                 logger.log(market, "regime", {
                     "state": regime.state, "distribution_days": regime.distribution_days,
-                    "drawdown": regime.drawdown, "proxy": INDEX_PROXY.get(market),
+                    "drawdown": regime.drawdown, "n_bars": regime.n_bars,
+                    "proxy": INDEX_PROXY.get(market),
                 })
                 print(f"market={market} regime={regime.state} dd={regime.distribution_days}"
-                      f" drawdown={regime.drawdown}")
+                      f" drawdown={regime.drawdown} n_bars={regime.n_bars}")
             # 최신 regime 을 cross-job 공유 상태에 병합 — 이 잡이 자기 시장만 봐도, 메타 제안은
             # 공유 상태에서 전 시장을 읽어 완전해진다(장 시간 분리로 인한 부분 제안·시장 탈락 방지).
             update_regime_signal(
@@ -521,9 +525,24 @@ async def main() -> int:
             if vol is not None:
                 logger.log(market, "market_vol", {
                     "state": vol.state, "realized_vol_20d": vol.realized_vol,
-                    "proxy": INDEX_PROXY.get(market),
+                    "n_bars": vol.n_bars, "proxy": INDEX_PROXY.get(market),
                 })
-                print(f"market={market} vol_state={vol.state} rv20={vol.realized_vol}")
+                print(f"market={market} vol_state={vol.state} rv20={vol.realized_vol}"
+                      f" n_bars={vol.n_bars}")
+
+            # jump model 피처 (shadow) — 룰 기반 FSM 과 같은 프록시·같은 창으로 나란히 계산.
+            # 하방편차·Sortino 는 실현변동성이 못 보는 하락 편중과 리스크조정수익을 담는다.
+            # 계산·로깅만, 결정/리스크 미개입 — 두 접근의 라이브 비교가 쌓인 뒤 판정한다.
+            jm = await compute_jm_features(adapter, market, today)
+            if jm is not None:
+                logger.log(market, "jm_features", {
+                    "downside_dev_10": jm.downside_dev,
+                    "sortino_20": jm.sortino_20,
+                    "sortino_60": jm.sortino_60,
+                    "n_bars": jm.n_bars, "proxy": INDEX_PROXY.get(market),
+                })
+                print(f"market={market} dd10={jm.downside_dev} sortino20={jm.sortino_20}"
+                      f" sortino60={jm.sortino_60} n_bars={jm.n_bars}")
 
             # 배분 집중도·실효 분산 (shadow) — 종목당 상한이 못 보는 동조 리스크.
             # 계산·로깅만, Risk Engine 미개입 — 검증 후 집중도 상한 게이트 승격 대상.

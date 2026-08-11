@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date
 
+from regime.jm import JumpFeatures, compute_jump_features
 from regime.macro import MacroRegime, classify_macro
 from regime.pulse import RegimeResult, classify_regime
 from regime.vol import VolResult, classify_vol
@@ -41,6 +42,22 @@ async def compute_market_vol(adapter, market: str, asof_day: date) -> VolResult 
     try:
         bars = await adapter.get_ohlcv_history([proxy], asof_day, lookback_days=VOL_LOOKBACK_DAYS)
         return classify_vol([b.close for b in bars.get(proxy, [])])
+    except Exception:
+        return None
+
+
+async def compute_jm_features(adapter, market: str, asof_day: date) -> JumpFeatures | None:
+    """지수 프록시 jump model 피처. 프록시 없음/조회 실패 → None (fail-open).
+
+    FSM(`compute_regime`)과 **같은 LOOKBACK_DAYS·같은 프록시**를 쓴다 — 두 접근의 차이가
+    입력 차이로 오염되면 나중에 무엇이 나은지 판정할 수 없다.
+    """
+    proxy = INDEX_PROXY.get(market)
+    if not proxy:
+        return None
+    try:
+        bars = await adapter.get_ohlcv_history([proxy], asof_day, lookback_days=LOOKBACK_DAYS)
+        return compute_jump_features([b.close for b in bars.get(proxy, [])])
     except Exception:
         return None
 
