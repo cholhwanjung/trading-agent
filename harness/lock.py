@@ -51,6 +51,28 @@ def single_instance(lock_path: Path, label: str | None = None) -> IO | None:
     return fh
 
 
+def market_locks(state_dir: Path, markets: list[str], label: str) -> list[IO] | None:
+    """시장(계좌) 단위 락 — 같은 계좌를 건드리는 **서로 다른 잡** 사이의 상호 배제.
+
+    잡 이름으로 락을 잡으면 자기 중첩만 막고 교차 중첩은 못 막는다. 실제로 위험한 것은
+    후자다 — 15분 워처와 일일 스텝은 다른 잡이지만 같은 시장의 같은 계좌에 주문하고
+    같은 `risk_{market}.json`·`live_notional_{market}.json` 을 read-modify-write 한다.
+    락 키를 잡이 아니라 시장으로 두면 누가 먼저 잡든 그 계좌에는 한 번에 하나만 붙는다.
+
+    all-or-nothing: 하나라도 이미 잡혀 있으면 취득분을 전부 반납하고 None 을 돌려준다.
+    부분 취득으로 진행하면 요청한 시장 중 일부만 매매하는 절반짜리 런이 된다.
+    """
+    acquired: list[IO] = []
+    for market in sorted(markets):
+        fh = single_instance(state_dir / f"account_{market}.lock", label=f"{label} {market}")
+        if fh is None:
+            for held in acquired:
+                held.close()
+            return None
+        acquired.append(fh)
+    return acquired
+
+
 def read_run_marker(lock_path: Path) -> dict | None:
     """락 파일의 실행 표식을 읽어 **지금 살아 있는** 런만 반환. 락은 건드리지 않는다.
 

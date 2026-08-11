@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from adapters import configure_observation  # noqa: E402
-from harness import JsonlLogger, load_env, make_usage_sink, single_instance  # noqa: E402
+from harness import JsonlLogger, load_env, make_usage_sink, market_locks  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 from risk import RiskEngine, RiskGuardedPolicy, account_fingerprint  # noqa: E402
 from scripts.run_paper_step import (  # noqa: E402
@@ -79,10 +79,11 @@ async def main() -> int:
     env = load_env(ROOT / ".env")
     configure_observation(env)  # 관측 윈도우 길이 .env 오버라이드(실험 변수, 미설정 시 기본)
 
-    # 단일 인스턴스 락 — 15분 인터벌 틱이 이전(느린) 틱과 겹치면 같은 계좌에 중복 주문하고
-    # risk_{market}.json 을 레이스로 덮어쓴다. 시장별 키로 자기 중첩을 차단.
-    lock = single_instance(STATE_DIR / f"run_watcher_{market}.lock", label=f"워처 {market}")
-    if lock is None:
+    # 계좌 락 — 15분 인터벌 틱이 이전(느린) 틱과 겹치거나, **일일 스텝과 겹쳐** 같은 계좌에
+    # 중복 주문하고 risk_{market}.json 을 레이스로 덮어쓰는 것을 차단. 키가 시장이라
+    # 페이퍼 스텝과 같은 락을 두고 경합한다(먼저 잡은 쪽이 끝날 때까지 다른 쪽은 스킵).
+    locks = market_locks(STATE_DIR, [market], label="워처")
+    if locks is None:
         print(f"status=skip detail=이미 실행 중(market={market}) — 중복 실행 차단")
         return 0
 
@@ -174,7 +175,8 @@ async def main() -> int:
     finally:
         await _close(adapter)
         await router.close()
-        lock.close()  # 락 해제 (프로세스 종료로도 커널이 해제하나 즉시 반납)
+        for lock in locks:  # 락 해제 (프로세스 종료로도 커널이 해제하나 즉시 반납)
+            lock.close()
 
 
 if __name__ == "__main__":

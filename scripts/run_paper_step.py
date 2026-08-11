@@ -34,9 +34,9 @@ from harness import (  # noqa: E402
     RandomPolicy,
     load_env,
     make_usage_sink,
+    market_locks,
     notify,
     run_all_markets,
-    single_instance,
     wait_for_network,
     with_deadline,
 )
@@ -98,7 +98,30 @@ def load_prev_weights(state_path: Path) -> dict[str, float] | None:
 
 def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
     out: dict[str, tuple[object, list[str]]] = {}
-    if env.get("BINANCE_TESTNET_API_KEY") and env.get("BINANCE_TESTNET_SECRET"):
+    # CRYPTO: Upbit 실계좌 키가 있으면 실자금(KRW 마켓)으로, 없으면 Binance testnet 으로.
+    # 상한은 KRW 표기다 — LiveGuard 는 통화를 모르고 명목 절대값만 비교하므로, 어댑터가
+    # 넘기는 금액 단위(Upbit=원)와 상한 단위가 반드시 같아야 한다.
+    if env.get("UPBIT_API_KEY") and env.get("UPBIT_SECRET"):
+        from adapters.upbit import UpbitAdapter
+        from risk import LiveCaps, LiveGuard
+
+        out["CRYPTO"] = (
+            UpbitAdapter(
+                env["UPBIT_API_KEY"],
+                env["UPBIT_SECRET"],
+                CRYPTO_UNIVERSE,
+                live_guard=LiveGuard(
+                    LiveCaps(
+                        max_order_notional=float(env.get("LIVE_MAX_ORDER_KRW") or 300_000),
+                        max_daily_notional=float(env.get("LIVE_MAX_DAILY_KRW") or 700_000),
+                        kill_switch_path=STATE_DIR / "KILL_SWITCH",
+                        state_path=STATE_DIR / "live_notional_CRYPTO.json",
+                    )
+                ),
+            ),
+            CRYPTO_UNIVERSE,
+        )
+    elif env.get("BINANCE_TESTNET_API_KEY") and env.get("BINANCE_TESTNET_SECRET"):
         from adapters.ccxt_adapter import BinanceTestnetAdapter
 
         out["CRYPTO"] = (
@@ -381,14 +404,14 @@ async def main() -> int:
     env = load_env(ROOT / ".env")
     configure_observation(env)  # 관측 윈도우 길이 .env 오버라이드(실험 변수, 미설정 시 기본)
 
-    # 단일 인스턴스 락 — 같은 시장셋의 catch-up/중복 런이 같은 계좌에 이중 주문하거나
-    # 상태 파일(risk_*·live_notional_*)을 레이스로 덮어쓰지 않게 한다(실계좌 경로 필수).
-    # 시장셋별 키라 장 시간이 다른 잡(KR 10:00 vs CRYPTO,US 23:00)은 서로 막지 않는다.
-    markets_key = "-".join(sorted(args.markets)) if args.markets else "all"
-    lock = single_instance(
-        STATE_DIR / f"run_paper_step_{markets_key}.lock", label=f"페이퍼 스텝 {markets_key}"
-    )
-    if lock is None:
+    # 계좌 락 — catch-up/중복 런이 같은 계좌에 이중 주문하거나 상태 파일(risk_*·
+    # live_notional_*)을 레이스로 덮어쓰지 않게 한다(실계좌 경로 필수). 키가 시장이라
+    # 워처(같은 계좌, 다른 잡)와도 상호 배제되고, 장 시간이 다른 시장은 서로 막지 않는다.
+    # 시장 미지정 런은 키 있는 시장 전부를 매매하므로 전 시장을 잡는다.
+    markets = sorted(args.markets) if args.markets else sorted(_VALID_MARKETS)
+    markets_key = ",".join(markets)
+    locks = market_locks(STATE_DIR, markets, label="페이퍼 스텝")
+    if locks is None:
         print(f"status=skip detail=이미 실행 중(markets={markets_key}) — 중복 실행 차단")
         return 0
 
@@ -650,7 +673,8 @@ async def main() -> int:
             if close:
                 await close()
         await router.close()
-        lock.close()  # 락 해제 (프로세스 종료로도 커널이 해제하나 즉시 반납)
+        for lock in locks:  # 락 해제 (프로세스 종료로도 커널이 해제하나 즉시 반납)
+            lock.close()
 
 
 if __name__ == "__main__":

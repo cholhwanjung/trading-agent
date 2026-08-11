@@ -5,6 +5,8 @@
 
 시세/주문 분리: OHLCV·티커는 메인넷 공개 API(실제 시장 데이터, testnet 클라인은
 주기 초기화로 이력 ~1개월뿐), 주문·잔고만 testnet. 관측 품질과 검증 격리를 동시에.
+같은 분리를 체결 거래소가 바뀌어도 유지하려고 시세 채널을 BinanceDataFeed 로 떼어냈다
+(Upbit 체결 어댑터가 관측을 USDT 기준 그대로 물려받는다 — 심볼 계보 보존).
 """
 
 from __future__ import annotations
@@ -36,30 +38,21 @@ async def _ensure_markets(client) -> None:
         await with_retry(client.load_markets, attempts=5, base_delay=2.0)
 
 
-class BinanceTestnetAdapter(MarketAdapter):
-    market = "CRYPTO"
+class BinanceDataFeed:
+    """Binance 메인넷 공개 API 시세·뉴스 채널 (키 불필요).
 
-    def __init__(
-        self,
-        api_key: str,
-        secret: str,
-        universe: list[str],  # 예: ["BTC/USDT", "ETH/USDT"]
-        quote: str = "USDT",
-        min_notional: float = 10.0,  # Binance spot 최소 주문 금액
-    ) -> None:
+    체결 거래소와 분리된 관측 원천이다. 체결이 어디서 일어나든 관측 심볼·통화(USDT)를
+    한 곳으로 고정해, 거래소를 바꿔도 봉·피처·메모리 pattern_key 의 시계열 계보가
+    끊기지 않게 한다. 체결 venue 어댑터가 상속해 쓴다.
+    """
+
+    def __init__(self) -> None:
         import ccxt.async_support as ccxt_async
 
         # timeout(ms) 명시 — 무설정 시 라이브러리 기본에 의존하지 않도록 브로커 REST(15s)와 통일
-        self.ex = ccxt_async.binance({"apiKey": api_key, "secret": secret, "timeout": 15000})
-        self.ex.set_sandbox_mode(True)  # testnet.binance.vision 라우팅 (주문·잔고)
-        self.data = ccxt_async.binance({"timeout": 15000})  # 메인넷 공개 API (시세 — 키 불필요)
-        self.universe = universe
-        self.quote = quote
-        self.min_notional = min_notional
+        self.data = ccxt_async.binance({"timeout": 15000})
 
-    async def close(self) -> None:
-        """aiohttp 세션 정리. 사용 후 반드시 호출."""
-        await self.ex.close()
+    async def close_data(self) -> None:
         await self.data.close()
 
     async def _fetch_bars(
@@ -128,6 +121,32 @@ class BinanceTestnetAdapter(MarketAdapter):
             ticker = await with_retry(lambda s=symbol: self.data.fetch_ticker(s))
             out[symbol] = float(ticker["last"])
         return out
+
+
+class BinanceTestnetAdapter(BinanceDataFeed, MarketAdapter):
+    market = "CRYPTO"
+
+    def __init__(
+        self,
+        api_key: str,
+        secret: str,
+        universe: list[str],  # 예: ["BTC/USDT", "ETH/USDT"]
+        quote: str = "USDT",
+        min_notional: float = 10.0,  # Binance spot 최소 주문 금액
+    ) -> None:
+        import ccxt.async_support as ccxt_async
+
+        super().__init__()  # 시세 채널(메인넷 공개)
+        self.ex = ccxt_async.binance({"apiKey": api_key, "secret": secret, "timeout": 15000})
+        self.ex.set_sandbox_mode(True)  # testnet.binance.vision 라우팅 (주문·잔고)
+        self.universe = universe
+        self.quote = quote
+        self.min_notional = min_notional
+
+    async def close(self) -> None:
+        """aiohttp 세션 정리. 사용 후 반드시 호출."""
+        await self.ex.close()
+        await self.close_data()
 
     async def _snapshot(self) -> tuple[float, dict[str, float], dict[str, float]]:
         """(quote 현금, 보유수량, 현재가) — 잔고 1회 + 유니버스 전 종목 티커 조회."""
