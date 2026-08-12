@@ -63,6 +63,7 @@ from regime import (  # noqa: E402
     update_regime_signal,
 )
 from adapters import configure_observation, is_market_closed_error  # noqa: E402
+from adapters.universe import ETF, asset_class, resolve_asset_caps  # noqa: E402
 from risk import (  # noqa: E402
     RiskEngine,
     RiskGuardedPolicy,
@@ -72,16 +73,33 @@ from risk import (  # noqa: E402
 )
 from trader import LLMTrader  # noqa: E402
 
-# 시장별 유니버스 — 설명 가능한 메이저 집중(2026-07-20, 사용자 승인): 뉴스·데이터
-# 커버리지가 좋은 대형 종목만. 버핏식 원칙(사업 이해·경영진)이 문자 그대로 작동하는 대상.
+# 관측 유니버스 — 뉴스·데이터 커버리지가 좋은 대형 종목 + 광범위 지수 ETF.
 CRYPTO_UNIVERSE = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # 메이저 3종 (전부 연구 유니버스 소속)
-US_UNIVERSE = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]  # 나스닥 메가캡 5
-KR_UNIVERSE = ["005930", "000660", "005380", "035420"]  # 삼성전자·SK하이닉스·현대차·NAVER
+US_UNIVERSE = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "SCHX"]  # 메가캡 5 + 미국 대형주 ETF
+KR_UNIVERSE = ["005930", "000660", "005380", "035420", "278530"]  # 대형 4 + KOSPI200 ETF
+
+# 집행 유니버스 — 배분 벡터의 정의역. 관측보다 좁을 수 있다.
+# 소액 계좌에서는 개별주 1주 값이 종목당 상한을 넘어 어떤 비중도 표현되지 않는다.
+# 그 종목에 배분을 내면 투영이 매번 통째로 현금으로 되돌리므로, 낼 수 있는 주문만
+# 정의역에 두고 개별 종목은 판단 근거로만 관측한다.
+TRADABLE = {
+    "CRYPTO": CRYPTO_UNIVERSE,
+    "US": ["SCHX"],
+    "KR": ["278530"],
+}
+_EQUITY_CAP = {"CRYPTO": 0.40, "US": 0.35, "KR": 0.40}
+_MIN_CASH = 0.10
 LIMITS = {
-    # 개별 종목은 지수 ETF 보다 변동성이 크다 — 종목당 상한을 유니버스 크기에 맞춰 강화
-    "CRYPTO": RiskLimits(max_weight_per_asset=0.40, min_cash=0.10, max_daily_turnover=0.50, mdd_circuit=0.20),
-    "US": RiskLimits(max_weight_per_asset=0.35, min_cash=0.10, max_daily_turnover=0.50, mdd_circuit=0.15),
-    "KR": RiskLimits(max_weight_per_asset=0.40, min_cash=0.10, max_daily_turnover=0.50, mdd_circuit=0.15),
+    # 개별 종목은 지수 ETF 보다 변동성이 크다 — 종목당 상한을 유니버스 크기에 맞춰 강화.
+    # ETF 상한은 최대 구성종목 노출이 개별주 상한을 넘지 않는 선에서 따로 도출한다.
+    market: RiskLimits(
+        max_weight_per_asset=_EQUITY_CAP[market],
+        min_cash=_MIN_CASH,
+        max_daily_turnover=0.50,
+        mdd_circuit=0.20 if market == "CRYPTO" else 0.15,
+        asset_caps=resolve_asset_caps(symbols, _EQUITY_CAP[market], _MIN_CASH),
+    )
+    for market, symbols in TRADABLE.items()
 }
 STATE_DIR = ROOT / "data" / "state"
 # 시장별 최신 regime 의 cross-job 공유 — 장 시간 분리로 시장이 별도 잡이어도 메타 제안이 전 시장을 본다.
@@ -107,8 +125,21 @@ def last_recorded_weights(memory: MemoryStore, market: str) -> dict[str, float] 
     return (entries[-1].data or {}).get("weights") if entries else None
 
 
+def kis_real_ready(env: dict[str, str]) -> bool:
+    return bool(
+        env.get("KIS_REAL_APP_KEY")
+        and env.get("KIS_REAL_APP_SECRET")
+        # 계좌 형식(8자리-상품코드 2자리)이 맞을 때만 — 아니면 잔고·주문이 전부 실패한다
+        and "-" in env.get("KIS_REAL_ACCOUNT", "")
+    )
+
+
 def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
     out: dict[str, tuple[object, list[str]]] = {}
+    # 통합증거금 계좌 하나를 KR·US 가 함께 쓴다. 시장마다 배분 벡터가 따로 있어 각각
+    # 합이 1 이므로, 현금을 지분으로 나누지 않으면 두 시장이 같은 돈을 두 번 주문한다.
+    # 지분값은 시장 간 메타 배분이 검증될 때까지의 자리표시자다(현재 기본 1:1:1 → KR:US = 1:1).
+    kis_share = 0.5 if kis_real_ready(env) else 1.0
     # CRYPTO: Upbit 실계좌 키가 있으면 실자금(KRW 마켓)으로, 없으면 Binance testnet 으로.
     # 상한은 KRW 표기다 — LiveGuard 는 통화를 모르고 명목 절대값만 비교하므로, 어댑터가
     # 넘기는 금액 단위(Upbit=원)와 상한 단위가 반드시 같아야 한다.
@@ -144,11 +175,7 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
     # US: 실전 KIS 해외주식 키가 있으면 실계좌(실자금)로, 없으면 Alpaca 페이퍼로.
     # 실전은 비율 Risk Engine 이 못 막는 절대 금액을 LiveGuard(1회/일일 상한 + kill switch)로
     # 보완한다. 실전 토큰은 전용 캐시 파일로 재사용(발급 분당 1회·잦은 발급 제한 회피).
-    if (
-        env.get("KIS_REAL_APP_KEY")
-        and env.get("KIS_REAL_APP_SECRET")
-        and "-" in env.get("KIS_REAL_ACCOUNT", "")
-    ):
+    if kis_real_ready(env):
         from adapters.kis_overseas import KISOverseasAdapter
         from risk import LiveCaps, LiveGuard
 
@@ -172,6 +199,7 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
                 alpaca_key=env.get("ALPACA_PAPER_API_KEY"),  # 뉴스 원천(체결과 분리)
                 alpaca_secret=env.get("ALPACA_PAPER_SECRET"),
                 sec_user_agent=env.get("SEC_USER_AGENT"),
+                bucket_share=kis_share,
             ),
             US_UNIVERSE,
         )
@@ -187,16 +215,45 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
             ),
             US_UNIVERSE,
         )
-    # 계좌 형식(8자리-상품코드 2자리)이 맞을 때만 — 아니면 잔고·주문이 전부 실패한다
-    if (
+    # KR: 실전 KIS 키가 있으면 실계좌(US 와 같은 계좌·같은 원화 현금), 없으면 모의.
+    # 실전 토큰은 해외와 같은 앱 키라 캐시 파일을 공유해야 재발급 제한에 안 걸린다.
+    if kis_real_ready(env):
+        from adapters.kis import KISDomesticAdapter
+        from risk import LiveCaps, LiveGuard
+
+        out["KR"] = (
+            KISDomesticAdapter(
+                env["KIS_REAL_APP_KEY"],
+                env["KIS_REAL_APP_SECRET"],
+                env["KIS_REAL_ACCOUNT"],
+                KR_UNIVERSE,
+                token_cache=STATE_DIR / "kis_real_token.json",
+                mode="real",
+                dart_api_key=env.get("DART_API_KEY"),
+                # 상한은 크립토와 별도 변수다 — 같은 원화라도 계좌·주문 크기가 다르다.
+                # 이 상한을 넘는 주문은 축소가 아니라 통째로 스킵되므로, 정상 배분
+                # 1건(순자산 × 종목당 상한)보다 넉넉해야 매수가 조용히 멈추지 않는다.
+                live_guard=LiveGuard(
+                    LiveCaps(
+                        max_order_notional=float(env.get("LIVE_MAX_ORDER_KR_KRW") or 500_000),
+                        max_daily_notional=float(env.get("LIVE_MAX_DAILY_KR_KRW") or 1_000_000),
+                        kill_switch_path=STATE_DIR / "KILL_SWITCH",
+                        state_path=STATE_DIR / "live_notional_KR.json",
+                    )
+                ),
+                bucket_share=kis_share,
+            ),
+            KR_UNIVERSE,
+        )
+    elif (
         env.get("KIS_PAPER_APP_KEY")
         and env.get("KIS_PAPER_APP_SECRET")
         and "-" in env.get("KIS_PAPER_ACCOUNT", "")
     ):
-        from adapters.kis import KISPaperAdapter
+        from adapters.kis import KISDomesticAdapter
 
         out["KR"] = (
-            KISPaperAdapter(
+            KISDomesticAdapter(
                 env["KIS_PAPER_APP_KEY"],
                 env["KIS_PAPER_APP_SECRET"],
                 env["KIS_PAPER_ACCOUNT"],
@@ -322,6 +379,8 @@ def build_market_policy(
     risk_path = STATE_DIR / f"risk_{market}.json"
     trader = LLMTrader(
         router, market, symbols, adapter.get_ohlcv_history,
+        # 관측은 유니버스 전체, 배분은 낼 수 있는 주문만 — 개별 종목은 판단 근거로 남는다
+        tradable=TRADABLE[market],
         memory_fn=make_memory_fn(memory, router, market),
         signals_fn=make_signals_fn(env, market, symbols),
         # debate 트리거 입력: 직전 배분(대형 변경 감지) + 사용자 강제 소집
@@ -362,9 +421,17 @@ async def run_memory_pipeline(
                 embedding = (await router.embed([rationale]))[0]
         except Exception:
             pass  # 임베딩 실패는 비치명 — pattern_key 폴백
+        # 지수 ETF 의 feature 는 상태 태그에서 뺀다. 지수는 구성종목의 가중 평균이라
+        # 같은 시장 팩터가 두 번 들어가고, 유니버스에 ETF 를 더한 것만으로 평균이 옮겨져
+        # 과거에 쌓은 키와 비교가 안 된다 — 반복 관측이 승격의 전제라 그 단절이 곧
+        # 학습 초기화다. 전체 feature 는 결정 로그에 그대로 남아 감사에는 지장이 없다.
+        key_features = {
+            s: f for s, f in (decision_meta.get("features") or {}).items()
+            if asset_class(s) != ETF
+        }
         entry_id = record_decision(
             memory, market, today, llm_weights, prev_weights,
-            decision_meta.get("features", {}), decision_meta, prices, embedding=embedding,
+            key_features, decision_meta, prices, embedding=embedding,
         )
         if entry_id:
             logger.log(market, "memory_record", {"id": entry_id})

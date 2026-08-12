@@ -27,6 +27,9 @@ class RiskLimits:
     min_cash: float = 0.10
     max_daily_turnover: float = 0.50  # 0.5 * Σ|Δw| 상한
     mdd_circuit: float = 0.15  # 초과 시 서킷브레이커
+    # 심볼별 상한 예외. 종목당 상한은 단일 종목 고유위험을 막는 장치인데, 지수 ETF 는
+    # 그 위험이 이미 구성 비중만큼 희석돼 있어 개별주와 같은 값을 쓸 근거가 없다.
+    asset_caps: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -71,12 +74,13 @@ class RiskEngine:
         for symbol in sorted(w):
             if symbol == CASH:
                 continue
-            if w[symbol] > lim.max_weight_per_asset:
+            cap = lim.asset_caps.get(symbol, lim.max_weight_per_asset)
+            if w[symbol] > cap:
                 violations.append(
-                    f"max_weight symbol={symbol} weight={w[symbol]:.4f} limit={lim.max_weight_per_asset}"
+                    f"max_weight symbol={symbol} weight={w[symbol]:.4f} limit={cap}"
                 )
-                w[CASH] += w[symbol] - lim.max_weight_per_asset
-                w[symbol] = lim.max_weight_per_asset
+                w[CASH] += w[symbol] - cap
+                w[symbol] = cap
 
         # 4. 최소 현금 비중 — 비현금 자산 비례 축소
         if w[CASH] < lim.min_cash:

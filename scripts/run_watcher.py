@@ -35,6 +35,7 @@ from risk import RiskEngine, RiskGuardedPolicy, account_fingerprint  # noqa: E40
 from scripts.run_paper_step import (  # noqa: E402
     LIMITS,
     STATE_DIR,
+    TRADABLE,
     build_adapters,
     load_prev_weights,
 )
@@ -140,6 +141,7 @@ async def main() -> int:
         risk_path = STATE_DIR / f"risk_{market}.json"
         trader = LLMTrader(
             router, market, symbols, adapter.get_ohlcv_history,
+            tradable=TRADABLE[market],  # 일간 스텝과 같은 계좌·같은 정의역
             signals_fn=signals_fn,
             prev_weights_fn=lambda p=risk_path: load_prev_weights(p),
         )

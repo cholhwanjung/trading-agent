@@ -17,6 +17,7 @@ from pathlib import Path
 
 from adapters.allocation import CASH
 from adapters.base import DISCLOSURE_SOURCES, Bar, Observation, Position
+from adapters.universe import universe_meta
 from llm import LLMRouter
 from trader.events import upcoming_events
 from trader.features import InsufficientHistoryError, compute_features
@@ -36,7 +37,9 @@ SYSTEM_PROMPT = """\
 너는 {market} 시장의 포트폴리오 매니저다. 매일 1회, 자산 배분비율만으로 의사를 표현한다.
 
 제약 (위반 시 결정 전체가 거부된다):
-- 배분 대상은 유니버스 {universe} 와 "CASH" 뿐이다. 그 외 심볼 금지.
+- 배분 대상은 {tradable} 와 "CASH" 뿐이다. 그 외 심볼 금지.
+- 관측은 {universe} 전체를 받는다. 배분할 수 없는 종목도 판단 근거로 쓰되, 그 판단은
+  해당 종목을 담고 있는 ETF 의 비중으로만 표현된다(지수 내 구성 비중만큼만 전달).
 - 모든 비중 ≥ 0 (long-only), 합계 = 1.0. 현금도 포지션이다 — 확신이 없으면 현금 비중을 높여라.
 - 관측 데이터는 전일까지다. 오늘의 가격은 알 수 없다.
 - verified_lessons 는 반복 검증을 통과한 과거 교훈이다. 참고했다면 해당 id 를
@@ -80,6 +83,7 @@ def build_user_prompt(
     max_disclosures: int = 10,
     events: list[dict] | None = None,
     budget: object | None = None,
+    universe_meta: dict[str, dict] | None = None,
 ) -> str:
     """관측을 구조화 텍스트로 — 자유 산문 없이 JSON 블록 나열.
 
@@ -111,6 +115,16 @@ def build_user_prompt(
         "verified_lessons": lessons or [],
         "alpha_signals": alpha_signals or {},
     }
+    if universe_meta:
+        payload["universe_meta"] = {
+            "note": "asset_class=etf 인 종목에는 PER·ROE 같은 재무 비율이 존재하지 않는다 — "
+            "수집에 실패한 것이 아니라 적용 대상이 아니다. 지수 ETF 의 가치 판단은 "
+            "구성종목의 재무·뉴스에서 유추하고 그 근거를 rationale 에 남겨라. "
+            "replication=synthetic 은 선물·스왑 복제라 롤오버 비용이 가격에 드러나지 "
+            "않은 채 수익률에서 빠진다. tradable=false 인 종목은 관측·판단 전용이며 "
+            "비중을 배정할 수 없다.",
+            **universe_meta,
+        }
     if fundamentals:
         payload["fundamentals"] = {
             "note": "가장 최근 공시된 분기 재무. period_end 가 오래됐으면 그만큼 묵은 값이고, "
@@ -164,8 +178,9 @@ class LLMTrader:
         self,
         router: LLMRouter,
         market: str,
-        universe: list[str],
+        universe: list[str],  # 관측 대상
         history_fn: HistoryFn,
+        tradable: list[str] | None = None,  # 배분 벡터의 정의역. None = 관측과 동일
         tier: str = "smart",
         memory_fn: Callable[[Observation, dict], Awaitable[list[dict]]] | None = None,
         signals_fn: Callable[[Observation], Awaitable[dict]] | None = None,
@@ -178,6 +193,7 @@ class LLMTrader:
         self.router = router
         self.market = market
         self.universe = universe
+        self.tradable = list(tradable) if tradable else list(universe)
         self.history_fn = history_fn
         self.tier = tier
         self.memory_fn = memory_fn  # active 교훈만 반환해야 한다 (memory.retrieval)
@@ -192,7 +208,9 @@ class LLMTrader:
         self, obs, positions, features, lessons: list[dict], signals: dict,
         debate: dict | None = None, trigger: dict | None = None, budget=None,
     ):
-        system = SYSTEM_PROMPT.format(market=self.market, universe=self.universe)
+        system = SYSTEM_PROMPT.format(
+            market=self.market, universe=self.universe, tradable=self.tradable
+        )
         if self.playbook:
             system += "\n\n" + self.playbook
         if trigger:
@@ -209,13 +227,14 @@ class LLMTrader:
                         obs, positions, features, lessons, signals, debate, trigger,
                         events=upcoming_events(self.market, obs.asof_day),
                         budget=budget,
+                        universe_meta=universe_meta(self.universe, self.tradable),
                     ),
                 }
             ],
             max_tokens=4096,
             json_mode=True,
         )
-        decision = parse_decision(resp.text, self.universe)
+        decision = parse_decision(resp.text, self.tradable)
         allocation = dict(decision.allocation)
         allocation.setdefault(CASH, 0.0)
         return allocation, decision, resp

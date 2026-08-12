@@ -22,7 +22,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from adapters.allocation import build_budget, project_to_executable, weights_from_quantities
+from adapters.allocation import (
+    bucket_cash,
+    build_budget,
+    project_to_executable,
+    weights_from_quantities,
+)
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -73,6 +78,7 @@ class KISOverseasAdapter(MarketAdapter):
         alpaca_key: str | None = None,  # US 뉴스 원천(체결과 분리 — KIS 는 무료 뉴스 없음)
         alpaca_secret: str | None = None,
         sec_user_agent: str | None = None,  # SEC 공시·재무 조회 식별자 (키 아님)
+        bucket_share: float = 1.0,  # 이 계좌의 현금 중 US 몫 (계좌 단독 사용이면 1.0)
     ) -> None:
         assert mode in ("demo", "real"), f"mode={mode!r} — 'demo' 또는 'real'"
         assert exchange in QUOTE_EXCD, f"exchange={exchange!r} — {sorted(QUOTE_EXCD)}"
@@ -91,6 +97,7 @@ class KISOverseasAdapter(MarketAdapter):
         self._alpaca_key = alpaca_key
         self._alpaca_secret = alpaca_secret
         self._sec_user_agent = sec_user_agent
+        self.bucket_share = bucket_share
 
     async def close(self) -> None:
         await self.session.close()
@@ -245,7 +252,9 @@ class KISOverseasAdapter(MarketAdapter):
                 "ITEM_CD": ref_symbol,
             },
         )
-        return float((data.get("output") or {}).get("echm_af_ord_psbl_amt") or 0)
+        # 통합증거금 여력은 계좌 하나의 값이라 국내와 공유된다 — 지분만 자기 몫으로 본다
+        total = float((data.get("output") or {}).get("echm_af_ord_psbl_amt") or 0)
+        return bucket_cash(total, self.bucket_share)
 
     async def get_budget(self, unit_prices: dict[str, float]):
         """해외주식도 정수 주만 거래된다 — 고가주는 1주가 계좌의 상당 비중이 된다.

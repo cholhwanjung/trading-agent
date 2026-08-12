@@ -1,11 +1,13 @@
-"""한국 주식 어댑터 — KIS(한국투자증권) 모의투자 (마지막 시장).
+"""한국 주식 어댑터 — KIS(한국투자증권) 국내주식. 모의/실전 겸용.
 
 - 토큰: 발급 분당 1회 제한 + 24h 유효 → 파일 캐시(data/state/kis_token.json)로
   일일 루프·검증 스크립트가 재발급 제한에 걸리지 않게 한다.
 - 시세: 기간별 일봉(FHKST03010100) — 모의/실전 동일 데이터. 수정주가 기준.
-- 잔고 VTTC8434R · 시장가 현금주문 VTTC0802U(매수)/VTTC0801U(매도) — 모의 전용 tr_id.
+- 잔고·주문 tr_id 는 모의/실전이 다르다(V… / T…) — mode 로 전환.
 - 뉴스: 무료 원천 미정 — 빈 리스트 (DART 공시 연동은 향후 작업).
 - KR 은 정수 주식 수만 주문 가능 — qty < 1주 는 dust 로 스킵.
+- 통합증거금 계좌는 국내와 해외가 같은 원화 현금을 쓴다. 시장마다 배분 벡터가 따로
+  있으므로 현금은 bucket_share 지분만 자기 몫으로 본다.
 """
 
 from __future__ import annotations
@@ -17,18 +19,35 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 
-from adapters.allocation import build_budget, project_to_executable, weights_from_quantities
+from adapters.allocation import (
+    bucket_cash,
+    build_budget,
+    project_to_executable,
+    weights_from_quantities,
+)
 from adapters.base import Bar, MarketAdapter, NewsItem, OrderResult, Position, observation_window
 from adapters.retry import with_retry
+
+if TYPE_CHECKING:  # 런타임 임포트는 순환(risk → adapters.allocation)을 만든다
+    from risk.live import LiveGuard
 
 PAPER_BASE = "https://openapivts.koreainvestment.com:29443"
 REAL_BASE = "https://openapi.koreainvestment.com:9443"
 TOKEN_SAFETY_S = 600  # 만료 10분 전부터 재발급
 RATE_GAP_S = 0.6  # 모의투자 초당 2건 제한(EGW00201) — 요청 간 최소 간격
 HISTORY_MAX_PAGES = 12  # 장기 조회 페이지 상한(1회 ~100행 → ~1200거래일) — 폭주 방지
+
+BALANCE_TR = {"real": "TTTC8434R", "demo": "VTTC8434R"}
+ORDER_TR = {
+    ("real", "buy"): "TTTC0802U",
+    ("real", "sell"): "TTTC0801U",
+    ("demo", "buy"): "VTTC0802U",
+    ("demo", "sell"): "VTTC0801U",
+}
 
 
 class KISSession:
@@ -168,7 +187,7 @@ def summarize_flows(rows: list[dict], short: int = 5, long: int = 20) -> dict:
     return out
 
 
-class KISPaperAdapter(MarketAdapter):
+class KISDomesticAdapter(MarketAdapter):
     market = "KR"
 
     def __init__(
@@ -178,14 +197,23 @@ class KISPaperAdapter(MarketAdapter):
         account: str,  # "12345678-01" (계좌 8자리-상품코드 2자리)
         universe: list[str],  # 예: ["069500"] (KODEX 200)
         token_cache: Path,
+        mode: str = "demo",  # "demo" = 모의투자 / "real" = 실자금
         min_notional: float = 10_000.0,  # KRW — 1주 미만 잔주문 방지
         dart_api_key: str | None = None,  # 있으면 공시를 관측 뉴스에 편입
+        live_guard: LiveGuard | None = None,  # 실전 절대 금액 가드(모의는 None)
+        bucket_share: float = 1.0,  # 이 계좌의 현금 중 KR 몫 (계좌 단독 사용이면 1.0)
     ) -> None:
-        self.session = KISSession(app_key, app_secret, Path(token_cache), PAPER_BASE)
+        assert mode in ("demo", "real"), f"mode={mode!r} — 'demo' 또는 'real'"
+        self.session = KISSession(
+            app_key, app_secret, Path(token_cache), PAPER_BASE if mode == "demo" else REAL_BASE
+        )
         self.cano, _, self.prdt = account.partition("-")
         self.universe = universe
+        self.mode = mode
         self.min_notional = min_notional
         self._dart_key = dart_api_key
+        self.live_guard = live_guard
+        self.bucket_share = bucket_share
 
     async def close(self) -> None:
         await self.session.close()
@@ -272,7 +300,7 @@ class KISPaperAdapter(MarketAdapter):
     async def _balance(self) -> dict:
         return await self.session.get(
             "/uapi/domestic-stock/v1/trading/inquire-balance",
-            tr_id="VTTC8434R",  # 모의투자 잔고조회
+            tr_id=BALANCE_TR[self.mode],
             params={
                 "CANO": self.cano,
                 "ACNT_PRDT_CD": self.prdt,
@@ -305,10 +333,18 @@ class KISPaperAdapter(MarketAdapter):
     async def get_positions(self) -> list[Position]:
         return self._parse_positions(await self._balance())
 
+    def _bucket(self, data: dict) -> tuple[float, float]:
+        """잔고 응답 → (이 시장이 쓸 수 있는 현금, 이 시장의 순자산).
+
+        예수금(dnca_tot_amt)은 T+2 정산 미반영으로 과대계상 — 총평가에서 역산한다.
+        """
+        total_eval = float((data.get("output2") or [{}])[0].get("tot_evlu_amt") or 0)
+        held = sum(p.market_value for p in self._parse_positions(data))
+        cash = bucket_cash(total_eval - held, self.bucket_share)
+        return cash, cash + held
+
     async def get_equity(self) -> float:
-        data = await self._balance()
-        total = (data.get("output2") or [{}])[0]
-        return float(total.get("tot_evlu_amt") or 0)  # 예수금 + 평가액
+        return self._bucket(await self._balance())[1]
 
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         """실시간 체결가 — 당일, 행동 전용(실시간 이벤트 트리거 감시·재결정 입력)."""
@@ -370,7 +406,7 @@ class KISPaperAdapter(MarketAdapter):
     async def _post_order(self, side: str, symbol: str, qty: int) -> dict:
         """시장가 현금주문. EGW00201(초당 제한)은 게이트웨이 선차단 = 주문 미접수라
         재시도가 안전. 그 외 오류는 본문 포함해 즉시 실패 — 맹목 재시도는 중복 주문 위험."""
-        tr_id = "VTTC0802U" if side == "buy" else "VTTC0801U"  # 모의 매수/매도
+        tr_id = ORDER_TR[(self.mode, side)]
         body = {
             "CANO": self.cano,
             "ACNT_PRDT_CD": self.prdt,
@@ -396,33 +432,55 @@ class KISPaperAdapter(MarketAdapter):
 
     async def get_budget(self, unit_prices: dict[str, float]):
         """국내주식은 정수 주만 거래된다 — 1주 값이 곧 배분의 최소 눈금이다."""
-        data = await self._balance()
-        equity = float((data.get("output2") or [{}])[0].get("tot_evlu_amt") or 0)
-        cash = equity - sum(p.market_value for p in self._parse_positions(data))
+        cash, equity = self._bucket(await self._balance())
         return build_budget(
-            "KRW", equity, cash, unit_prices, lot=1, min_order=self.min_notional
+            "KRW",
+            equity,
+            cash,
+            unit_prices,
+            lot=1,
+            min_order=self.min_notional,
+            max_order=self.live_guard.caps.max_order_notional if self.live_guard else None,
         )
 
     async def submit_allocation(self, weights: dict[str, float]) -> OrderResult:
         now = datetime.now(timezone.utc)
+        today = now.date()
+        # kill switch — 사용자 수동 정지. 실자금 주문을 전면 차단(관측·결정은 이미 끝난 뒤).
+        if self.live_guard and self.live_guard.kill_switch_active():
+            return OrderResult(
+                market=self.market, submitted_at=now, accepted=False, error="kill_switch_active"
+            )
         try:
             data = await self._balance()  # 잔고 1회로 총평가·보유 동시 파싱
-            total_eval = float((data.get("output2") or [{}])[0].get("tot_evlu_amt") or 0)
-            positions = self._parse_positions(data)
-            held_qty = {p.symbol: p.quantity for p in positions}
-            # 예수금(dnca_tot_amt)은 T+2 정산 미반영으로 과대계상 — 총평가에서 역산
-            cash = total_eval - sum(p.market_value for p in positions)
+            cash, equity = self._bucket(data)
+            held_qty = {p.symbol: p.quantity for p in self._parse_positions(data)}
             prices = {s: await self._current_price(s) for s in self.universe}
 
             # 정수 주만 거래된다 — 1주 값이 목표 금액보다 크면 그 종목은 통째로 빠진다.
             plan = project_to_executable(
-                weights, held_qty, cash, prices, lot=1, min_notional=self.min_notional
+                weights,
+                held_qty,
+                cash,
+                prices,
+                lot=1,
+                min_notional=self.min_notional,
+                max_order_notional=self.live_guard.caps.max_order_notional
+                if self.live_guard else None,
             )
             final_qty = dict(held_qty)
             orders = []
             for it in plan.intents:
                 qty = int(it.qty)
+                if self.live_guard:
+                    reason = self.live_guard.check(it.notional, today)
+                    if reason:
+                        orders.append({"symbol": it.symbol, "side": it.side, "skipped": reason})
+                        plan.dropped[it.symbol] = reason
+                        continue
                 placed = await self._post_order(it.side, it.symbol, qty)
+                if self.live_guard:
+                    self.live_guard.charge(it.notional, today)  # 제출 성공분만 당일 누적
                 final_qty[it.symbol] = final_qty.get(it.symbol, 0.0) + (
                     qty if it.side == "buy" else -qty
                 )
@@ -440,7 +498,7 @@ class KISPaperAdapter(MarketAdapter):
                 submitted_at=now,
                 accepted=True,
                 orders=orders,
-                executed_weights=weights_from_quantities(final_qty, prices, total_eval),
+                executed_weights=weights_from_quantities(final_qty, prices, equity),
                 dropped=plan.dropped,
             )
         except Exception as e:  # 주문 실패는 예외가 아니라 결과로 — 러너가 로그로 남긴다

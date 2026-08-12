@@ -44,6 +44,20 @@ class BudgetSnapshot:
     min_step_weight: dict[str, float]  # symbol -> 1단위(1주)의 비중. 0 = 제약 없음
 
 
+def bucket_cash(cash: float, share: float) -> float:
+    """한 계좌를 여러 시장이 공유할 때, 그 시장이 쓸 수 있는 현금.
+
+    시장마다 배분 벡터가 따로 있고 각각 합이 1 이라, 같은 현금을 두 시장이 각자
+    자기 것으로 보면 합계 200% 를 주문하려 든다. 먼저 도는 쪽이 매수여력을 다 쓰고
+    나머지는 통째로 스킵되므로 결과가 실행 순서에 좌우된다.
+
+    나누는 것은 **현금뿐**이다 — 보유 종목은 어느 시장 것인지 이미 명확하다. 지분의
+    합이 1 이면 시장별 순자산의 합이 계좌 총자산과 같아진다.
+    """
+
+    return cash * share
+
+
 def build_budget(
     currency: str,
     equity: float,
