@@ -119,11 +119,28 @@ def build_user_prompt(
         payload["universe_meta"] = {
             "note": "asset_class=etf 인 종목에는 PER·ROE 같은 재무 비율이 존재하지 않는다 — "
             "수집에 실패한 것이 아니라 적용 대상이 아니다. 지수 ETF 의 가치 판단은 "
-            "구성종목의 재무·뉴스에서 유추하고 그 근거를 rationale 에 남겨라. "
+            "index_valuation 블록(시장 전체 배수)을 기준선으로 삼고 구성종목의 재무·"
+            "뉴스로 보정하며, 그 근거를 rationale 에 남겨라. "
             "replication=synthetic 은 선물·스왑 복제라 롤오버 비용이 가격에 드러나지 "
             "않은 채 수익률에서 빠진다. tradable=false 인 종목은 관측·판단 전용이며 "
             "비중을 배정할 수 없다.",
             **universe_meta,
+        }
+    if obs.index_valuation is not None:
+        iv = obs.index_valuation
+        payload["index_valuation"] = {
+            "note": "이 시장 전체의 밸류에이션 수준이다. 지수 ETF 에는 종목 재무 비율이 "
+            "존재하지 않으므로 ETF 의 안전마진은 이 값을 기준선으로 판단한다 — 개별 "
+            "종목 비율과 같은 단위라 어느 쪽이 시장보다 싼지 비싼지 비교할 수 있다. "
+            "proxy 는 같은 시장의 대표 지수를 담은 **다른 펀드**이며 보유 ETF 자신의 "
+            "지수가 아니다. 수준과 방향을 읽는 데 쓰고, 소수점까지 그 ETF 의 배수인 "
+            "것처럼 인용하지 말 것. dividend_yield 는 비율이다(0.0109 = 1.09%).",
+            "proxy": iv.proxy,
+            "index": iv.index,
+            "asof": str(iv.asof),
+            "pe": iv.pe,
+            "pb": iv.pb,
+            "dividend_yield": iv.dividend_yield,
         }
     if fundamentals:
         payload["fundamentals"] = {
@@ -336,6 +353,9 @@ class LLMTrader:
         self.last_decision = {
             "features": features,  # 감사·pattern_key 계산용
             "fundamentals": observed_fundamentals(obs),  # 프롬프트 주입분 감사
+            # None 이 곧 채널이 죽었다는 신호다 — 조회 실패를 예외로 올리지 않으므로
+            # 이 필드가 유일한 생사 기록이다.
+            "index_valuation": asdict(obs.index_valuation) if obs.index_valuation else None,
             "budget": asdict(budget) if budget is not None else None,  # 주입분 감사
             "alpha_signals_provided": sorted(signals),
             "retrieved_memory_ids": [le["id"] for le in lessons],

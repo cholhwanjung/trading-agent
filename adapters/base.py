@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
 from adapters.financials import Financials
+from adapters.index_valuation import IndexValuation
 
 
 # 관측 윈도우 기본값. 상한은 항상 t-1(당일 t 데이터 절대 포함 금지) — 이게 누출 통제의 본질이며
@@ -71,6 +72,8 @@ class Observation:
 
     collected_at: 수집 시각(UTC). asof_day: 관측 기준일 t. 봉=최근 N거래일·뉴스=N캘린더일(상한 t-1).
     financials: 분기 재무 스냅샷(symbol -> 값). 저속 채널이라 창 길이가 아니라 제출일 상한만 건다.
+    index_valuation: 시장 전체의 밸류에이션 수준(시장당 1건). 종목별이 아닌 이유는
+    지수 ETF 에 종목 재무가 없기 때문 — 대응물이 없는 시장은 None.
     """
 
     market: str
@@ -79,6 +82,7 @@ class Observation:
     bars: dict[str, list[Bar]] = field(default_factory=dict)  # symbol -> 봉 리스트
     news: list[NewsItem] = field(default_factory=list)
     financials: dict[str, Financials] = field(default_factory=dict)
+    index_valuation: IndexValuation | None = None
 
 
 @dataclass(frozen=True)
@@ -192,6 +196,12 @@ def assert_no_leakage(obs: Observation) -> None:
                 f"leakage market={obs.market} symbol={symbol} "
                 f"filed={fin.filed} max={end} asof={obs.asof_day} period_end={fin.period_end}"
             )
+    # 밸류에이션은 최근 종가로 계산되므로 기준일이 곧 가격의 날짜다 — 봉과 같은 상한을 건다.
+    if obs.index_valuation is not None and obs.index_valuation.asof > end:
+        raise LeakageError(
+            f"leakage market={obs.market} index_valuation_asof={obs.index_valuation.asof} "
+            f"max={end} asof={obs.asof_day} proxy={obs.index_valuation.proxy}"
+        )
 
 
 class MarketAdapter(ABC):
@@ -258,6 +268,17 @@ class MarketAdapter(ABC):
         """
         return {}
 
+    async def get_index_valuation(self, asof_day: date):
+        """이 시장의 밸류에이션 수준 1건. 대응물이 없는 시장은 None.
+
+        어댑터별로 재정의하지 않는다 — 원천을 고르는 기준이 브로커가 아니라 **시장**이라
+        (같은 US 라도 Alpaca 든 KIS 든 보는 시장 밸류에이션은 하나다) 구현체마다 두면
+        같은 한 줄이 복제된다.
+        """
+        from adapters.index_valuation import fetch_index_valuation
+
+        return await fetch_index_valuation(self.market, asof_day)
+
     @abstractmethod
     async def get_positions(self) -> list[Position]:
         """현재 페이퍼 계좌의 보유 포지션. 현금은 별도 조회(구현체 책임)."""
@@ -313,6 +334,7 @@ class MarketAdapter(ABC):
         bars = await self.get_ohlcv(symbols, asof_day)
         news = await self.get_news(symbols, asof_day)
         financials = await self.get_financials(symbols, asof_day)
+        index_valuation = await self.get_index_valuation(asof_day)
         return Observation(
             market=self.market,
             asof_day=asof_day,
@@ -320,6 +342,7 @@ class MarketAdapter(ABC):
             bars=bars,
             news=news,
             financials=financials,
+            index_valuation=index_valuation,
         )
 
 
