@@ -99,6 +99,10 @@ class OrderResult:
     error: str | None = None
     executed_weights: dict[str, float] | None = None
     dropped: dict[str, str] = field(default_factory=dict)
+    #: 주문 시점의 종목 상태(symbol -> 상태). 거래소가 종목을 멈추거나 가격이 제한폭에
+    #: 닿으면 주문이 나가도 체결되지 않는데, 그 사실이 결과에 남지 않으면 나중에 미체결의
+    #: 원인을 거래단위·예산 문제와 구분할 수 없다. 상태를 제공하지 않는 시장은 빈 dict.
+    quote_status: dict[str, dict] = field(default_factory=dict)
 
 
 # 브로커가 "장이 닫혀 있다"는 뜻으로 돌려주는 거부 문구. 브로커마다 표현이 달라

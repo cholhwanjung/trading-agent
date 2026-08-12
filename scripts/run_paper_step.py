@@ -616,6 +616,17 @@ async def main() -> int:
                     })
                     if drift > 0:
                         print(f"market={market} exec_drift_l1={drift:.4f} dropped={dropped}")
+                # 종목 거래 상태 (shadow) — 계산·로깅만, 주문 차단 없음. 정지·VI·제한폭에
+                # 닿은 종목은 주문이 나가도 체결되지 않아 미체결로만 남는데, 그것이 거래단위·
+                # 예산 때문에 못 담은 경우와 구분되지 않는다. 차단 승격 전에 라이브에서
+                # 무엇이 얼마나 잡히는지 먼저 센다.
+                quote_status = getattr(outcome, "quote_status", None) or {}
+                if quote_status:
+                    logger.log(market, "quote_status", {"symbols": quote_status})
+                    # 콘솔에는 주의가 필요한 것만 — 코드값은 분포 수집용이라 로그에만 남긴다.
+                    notable = {s: v for s, v in quote_status.items() if v.keys() - {"codes"}}
+                    if notable:
+                        print(f"market={market} quote_status={notable}")
 
             prices, day = await fetch_prices(adapter, symbols)
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)

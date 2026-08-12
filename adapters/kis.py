@@ -17,6 +17,7 @@ import json
 import statistics
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,6 +41,63 @@ REAL_BASE = "https://openapi.koreainvestment.com:9443"
 TOKEN_SAFETY_S = 600  # 만료 10분 전부터 재발급
 RATE_GAP_S = 0.6  # 모의투자 초당 2건 제한(EGW00201) — 요청 간 최소 간격
 HISTORY_MAX_PAGES = 12  # 장기 조회 페이지 상한(1회 ~100행 → ~1200거래일) — 폭주 방지
+
+# 현재가 응답에서 '지금 이 종목에 주문이 닿는가'를 말해주는 필드들. 시세 조회 한 번에
+# 같이 실려오므로 추가 호출이 없다 — 종전엔 체결가만 꺼내고 전부 버렸다.
+#
+# 판정하는 것과 기록만 하는 것을 나눈다. `_yn` 접미사 필드는 Y/N 이 자명하고 제한폭은
+# 산수라 판정할 수 있지만, 구분코드들은 값 표를 확보하지 못했다 — 정상 거래 중인 유니버스
+# 4종을 실제로 조회해 보니 iscd_stat_cls_code 가 "55", vi_cls_code 가 "N" 으로 왔다.
+# "00이 정상"이라는 첫 가정대로였다면 멀쩡한 종목을 전부 비정상으로 몰 뻔했다.
+# 그래서 코드값은 판정에 쓰지 않고 원값 그대로 쌓아 분포를 먼저 본다.
+
+
+@dataclass(frozen=True)
+class Quote:
+    """체결가 + 그 시점의 거래 가능 상태.
+
+    상한가·하한가는 값으로 온다(비율이 아니다). 현재가가 거기 닿아 있으면 그 방향 주문은
+    호가가 없어 체결되지 않는다 — 하한가에서 매도가 안 나가는 상황이 대표적이며, 종전에는
+    그것이 '미체결'로만 남아 거래단위·예산 때문에 못 담은 경우와 구분되지 않았다.
+    """
+
+    price: float
+    halted: bool  # 임시 정지(temp_stop_yn) — Y/N
+    liquidation: bool  # 정리매매(sltr_yn) — Y/N
+    upper_limit: float | None  # 상한가
+    lower_limit: float | None  # 하한가
+    codes: dict[str, str] = field(default_factory=dict)  # 구분코드 원값(판정 안 함)
+
+    @property
+    def at_upper(self) -> bool:
+        return self.upper_limit is not None and self.price >= self.upper_limit
+
+    @property
+    def at_lower(self) -> bool:
+        return self.lower_limit is not None and self.price <= self.lower_limit
+
+    @property
+    def tradable(self) -> bool:
+        """주문이 체결될 수 있는 상태인가. 의미가 자명한 Y/N 플래그만 본다.
+
+        상/하한가는 방향 의존이라 여기 넣지 않는다 — 하한가에서도 매수는 가능하다.
+        방향을 아는 호출부가 at_upper·at_lower 로 따로 판단해야 한다.
+        """
+        return not (self.halted or self.liquidation)
+
+    def flags(self) -> dict[str, object]:
+        """주의가 필요한 상태만 뽑는다. 정상이면 빈 dict — 코드값은 여기 넣지 않는다."""
+        out: dict[str, object] = {}
+        if self.halted:
+            out["halted"] = True
+        if self.liquidation:
+            out["liquidation"] = True
+        if self.at_upper:
+            out["at_upper_limit"] = self.upper_limit
+        if self.at_lower:
+            out["at_lower_limit"] = self.lower_limit
+        return out
+
 
 BALANCE_TR = {"real": "TTTC8434R", "demo": "VTTC8434R"}
 ORDER_TR = {
@@ -395,13 +453,45 @@ class KISDomesticAdapter(MarketAdapter):
 
     # ── 주문 ──
 
-    async def _current_price(self, symbol: str) -> float:
+    @staticmethod
+    def _parse_quote(output: dict) -> Quote:
+        """현재가 응답 → 체결가 + 거래 가능 상태. 상태 필드 결측은 정상으로 읽는다.
+
+        모의투자 응답이 실전과 필드 구성이 다를 수 있어, 없는 필드로 종목을 비정상 처리하면
+        멀쩡한 주문이 막힌다. 판정 재료가 없으면 판정하지 않는 쪽이 안전하다.
+        """
+
+        def _price(key: str) -> float | None:
+            raw = (output.get(key) or "").strip()
+            try:
+                value = float(raw)
+            except ValueError:
+                return None
+            return value or None  # 0 = 미제공(상/하한가 없는 종목)
+
+        return Quote(
+            price=float(output["stck_prpr"]),
+            halted=(output.get("temp_stop_yn") or "N").strip() == "Y",
+            liquidation=(output.get("sltr_yn") or "N").strip() == "Y",
+            upper_limit=_price("stck_mxpr"),
+            lower_limit=_price("stck_llam"),
+            codes={
+                key: value.strip()
+                for key in ("vi_cls_code", "iscd_stat_cls_code", "mrkt_warn_cls_code")
+                if (value := output.get(key))
+            },
+        )
+
+    async def _quote(self, symbol: str) -> Quote:
         data = await self.session.get(
             "/uapi/domestic-stock/v1/quotations/inquire-price",
             tr_id="FHKST01010100",
             params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
         )
-        return float(data["output"]["stck_prpr"])
+        return self._parse_quote(data["output"])
+
+    async def _current_price(self, symbol: str) -> float:
+        return (await self._quote(symbol)).price
 
     async def _post_order(self, side: str, symbol: str, qty: int) -> dict:
         """시장가 현금주문. EGW00201(초당 제한)은 게이트웨이 선차단 = 주문 미접수라
@@ -455,7 +545,15 @@ class KISDomesticAdapter(MarketAdapter):
             data = await self._balance()  # 잔고 1회로 총평가·보유 동시 파싱
             cash, equity = self._bucket(data)
             held_qty = {p.symbol: p.quantity for p in self._parse_positions(data)}
-            prices = {s: await self._current_price(s) for s in self.universe}
+            quotes = {s: await self._quote(s) for s in self.universe}
+            prices = {s: q.price for s, q in quotes.items()}
+            # 주문 시점의 종목 상태를 감사 로그로 넘긴다. **아직 주문을 막지는 않는다** —
+            # 판정이 실거래를 자르기 전에 라이브에서 무엇이 얼마나 잡히는지 먼저 본다.
+            # 코드값은 정상일 때도 남긴다(값 표가 없어 분포부터 모아야 한다).
+            quote_status = {
+                s: (q.flags() | ({"codes": q.codes} if q.codes else {}))
+                for s, q in quotes.items()
+            }
 
             # 정수 주만 거래된다 — 1주 값이 목표 금액보다 크면 그 종목은 통째로 빠진다.
             plan = project_to_executable(
@@ -500,6 +598,7 @@ class KISDomesticAdapter(MarketAdapter):
                 orders=orders,
                 executed_weights=weights_from_quantities(final_qty, prices, equity),
                 dropped=plan.dropped,
+                quote_status=quote_status,
             )
         except Exception as e:  # 주문 실패는 예외가 아니라 결과로 — 러너가 로그로 남긴다
             return OrderResult(
