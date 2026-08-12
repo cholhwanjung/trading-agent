@@ -96,6 +96,17 @@ def load_prev_weights(state_path: Path) -> dict[str, float] | None:
     return None
 
 
+def last_recorded_weights(memory: MemoryStore, market: str) -> dict[str, float] | None:
+    """직전에 기록된 배분(체결 기준). 없으면 None.
+
+    pattern_key 의 행동 성분은 '직전 대비 얼마나 바꿨나'다. 오늘은 체결 배분으로
+    기록하면서 직전은 목표 배분을 쓰면 두 기준이 섞인 차이가 키에 들어가, 같은 행동이
+    서로 다른 키로 흩어져 admission 의 반복 관측이 성립하지 않는다.
+    """
+    entries = memory.query(market, store="episodic")
+    return (entries[-1].data or {}).get("weights") if entries else None
+
+
 def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
     out: dict[str, tuple[object, list[str]]] = {}
     # CRYPTO: Upbit 실계좌 키가 있으면 실자금(KRW 마켓)으로, 없으면 Binance testnet 으로.
@@ -462,7 +473,9 @@ async def main() -> int:
         guards: dict[str, RiskGuardedPolicy] = {}
         prev_weights_by_market: dict[str, dict | None] = {}
         for market, (adapter, symbols) in adapters.items():
-            prev_weights_by_market[market] = load_prev_weights(STATE_DIR / f"risk_{market}.json")
+            prev_weights_by_market[market] = last_recorded_weights(memory, market) or (
+                load_prev_weights(STATE_DIR / f"risk_{market}.json")
+            )
             guard = build_market_policy(market, adapter, symbols, router, memory, env, debate)
             guards[market] = guard
             runs.append(MarketRun(adapter, guard, symbols))
@@ -514,9 +527,26 @@ async def main() -> int:
             guard = guards[market]
             llm_weights = None
             llm_base_weights = None
-            if not isinstance(results.get(market), Exception) and guard.last_decision:
+            executed_weights = None
+            outcome = results.get(market)
+            if not isinstance(outcome, Exception) and guard.last_decision:
                 llm_weights = load_prev_weights(guard.state_path)
                 llm_base_weights = getattr(guard.inner, "last_base_weights", None)
+                executed_weights = getattr(outcome, "executed_weights", None)
+                dropped = getattr(outcome, "dropped", None) or {}
+                if executed_weights and llm_weights:
+                    # 의도와 체결의 거리 — 예산·거래단위가 전략을 얼마나 잘라내는지의 지표.
+                    # 소액 계좌에서는 이 값이 곧 "결정이 계좌에 닿지 못한 정도"다.
+                    keys = set(llm_weights) | set(executed_weights)
+                    drift = sum(
+                        abs(llm_weights.get(k, 0.0) - executed_weights.get(k, 0.0)) for k in keys
+                    )
+                    logger.log(market, "execution_fidelity", {
+                        "intended": llm_weights, "executed": executed_weights,
+                        "drift_l1": round(drift, 6), "dropped": dropped,
+                    })
+                    if drift > 0:
+                        print(f"market={market} exec_drift_l1={drift:.4f} dropped={dropped}")
 
             prices, day = await fetch_prices(adapter, symbols)
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)
@@ -625,9 +655,14 @@ async def main() -> int:
                     print(f"market={market} status=flow_error detail={str(e)[:120]}")
 
             # ── 메모리 파이프라인 — 실패가 매매 루프를 죽이면 안 된다 ──
+            # 학습에는 **체결된** 배분을 쓴다. 목표 배분으로 성과를 귀속시키면, 정수 주·
+            # 최소 주문·명목 상한에 막혀 한 주도 못 산 종목의 등락이 그 결정의 공으로
+            # 잡힌다 — 보유한 적 없는 포트폴리오에서 교훈을 승격시키는 셈이다.
+            # 어댑터가 체결 배분을 못 주면(구현 전·주문 스킵) 의도로 물러선다.
             try:
                 await run_memory_pipeline(
-                    memory, market, today, llm_weights, prev_weights_by_market[market],
+                    memory, market, today, executed_weights or llm_weights,
+                    prev_weights_by_market[market],
                     guard.last_decision, prices, router, logger,
                 )
             except Exception as e:

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timezone
 
-from adapters.allocation import compute_order_deltas
+from adapters.allocation import project_to_executable, weights_from_quantities
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -180,17 +180,20 @@ class BinanceTestnetAdapter(BinanceDataFeed, MarketAdapter):
         now = datetime.now(timezone.utc)
         try:
             cash, qty, prices = await self._snapshot()
-            holdings = {s: q * prices[s] for s, q in qty.items()}
-
-            intents = compute_order_deltas(
-                weights, holdings, cash, prices, min_notional=self.min_notional
+            # 분수 거래 — 의도를 잘라내는 건 최소 주문 금액뿐이다.
+            plan = project_to_executable(
+                weights, qty, cash, prices, min_notional=self.min_notional
             )
-            if intents:
+            if plan.intents:
                 await _ensure_markets(self.ex)  # amount_to_precision 에 필요 (넉넉한 재시도·캐시됨)
+            final_qty = dict(qty)
             orders = []
-            for it in intents:
+            for it in plan.intents:
                 amount = float(self.ex.amount_to_precision(it.symbol, it.qty))
                 placed = await self.ex.create_order(it.symbol, "market", it.side, amount)
+                final_qty[it.symbol] = final_qty.get(it.symbol, 0.0) + (
+                    amount if it.side == "buy" else -amount
+                )
                 orders.append(
                     {
                         "symbol": it.symbol,
@@ -200,7 +203,15 @@ class BinanceTestnetAdapter(BinanceDataFeed, MarketAdapter):
                         "order_id": placed.get("id"),
                     }
                 )
-            return OrderResult(market=self.market, submitted_at=now, accepted=True, orders=orders)
+            total = cash + sum(q * prices[s] for s, q in qty.items())
+            return OrderResult(
+                market=self.market,
+                submitted_at=now,
+                accepted=True,
+                orders=orders,
+                executed_weights=weights_from_quantities(final_qty, prices, total),
+                dropped=plan.dropped,
+            )
         except Exception as e:  # 주문 실패는 예외가 아니라 결과로 — 러너가 로그로 남긴다
             return OrderResult(
                 market=self.market, submitted_at=now, accepted=False, error=str(e)[:300]

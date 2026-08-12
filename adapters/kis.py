@@ -20,7 +20,7 @@ from pathlib import Path
 
 import httpx
 
-from adapters.allocation import compute_order_deltas
+from adapters.allocation import project_to_executable, weights_from_quantities
 from adapters.base import Bar, MarketAdapter, NewsItem, OrderResult, Position, observation_window
 from adapters.retry import with_retry
 
@@ -399,21 +399,24 @@ class KISPaperAdapter(MarketAdapter):
         try:
             data = await self._balance()  # 잔고 1회로 총평가·보유 동시 파싱
             total_eval = float((data.get("output2") or [{}])[0].get("tot_evlu_amt") or 0)
-            holdings = {p.symbol: p.market_value for p in self._parse_positions(data)}
+            positions = self._parse_positions(data)
+            held_qty = {p.symbol: p.quantity for p in positions}
             # 예수금(dnca_tot_amt)은 T+2 정산 미반영으로 과대계상 — 총평가에서 역산
-            cash = total_eval - sum(holdings.values())
+            cash = total_eval - sum(p.market_value for p in positions)
             prices = {s: await self._current_price(s) for s in self.universe}
 
-            intents = compute_order_deltas(
-                weights, holdings, cash, prices, min_notional=self.min_notional
+            # 정수 주만 거래된다 — 1주 값이 목표 금액보다 크면 그 종목은 통째로 빠진다.
+            plan = project_to_executable(
+                weights, held_qty, cash, prices, lot=1, min_notional=self.min_notional
             )
+            final_qty = dict(held_qty)
             orders = []
-            for it in intents:
-                qty = int(it.qty or 0)  # KR 은 정수 주만
-                if qty < 1:
-                    orders.append({"symbol": it.symbol, "side": it.side, "skipped": "sub_share"})
-                    continue
+            for it in plan.intents:
+                qty = int(it.qty)
                 placed = await self._post_order(it.side, it.symbol, qty)
+                final_qty[it.symbol] = final_qty.get(it.symbol, 0.0) + (
+                    qty if it.side == "buy" else -qty
+                )
                 orders.append(
                     {
                         "symbol": it.symbol,
@@ -423,7 +426,14 @@ class KISPaperAdapter(MarketAdapter):
                         "order_id": (placed.get("output") or {}).get("ODNO"),
                     }
                 )
-            return OrderResult(market=self.market, submitted_at=now, accepted=True, orders=orders)
+            return OrderResult(
+                market=self.market,
+                submitted_at=now,
+                accepted=True,
+                orders=orders,
+                executed_weights=weights_from_quantities(final_qty, prices, total_eval),
+                dropped=plan.dropped,
+            )
         except Exception as e:  # 주문 실패는 예외가 아니라 결과로 — 러너가 로그로 남긴다
             return OrderResult(
                 market=self.market, submitted_at=now, accepted=False, error=str(e)[:300]

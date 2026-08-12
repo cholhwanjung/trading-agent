@@ -83,13 +83,22 @@ class Observation:
 
 @dataclass(frozen=True)
 class OrderResult:
-    """submit_allocation 결과. 어댑터가 배분비율을 주문으로 변환한 뒤 돌려준다."""
+    """submit_allocation 결과. 어댑터가 배분비율을 주문으로 변환한 뒤 돌려준다.
+
+    executed_weights 는 이 주문들이 반영된 뒤 **실제로 보유하게 되는** 배분이다. 목표와
+    다를 수 있다 — 정수 주 단위, 최소 주문 금액, 1회 명목 상한, 미체결 종목이 의도를
+    잘라내기 때문이다. 학습은 의도가 아니라 이 값을 써야 한다: 목표 배분으로 성과를
+    귀속시키면 보유한 적 없는 포트폴리오의 손익을 교훈으로 승격시키게 된다.
+    dropped 는 그렇게 잘려나간 종목과 사유(진단용).
+    """
 
     market: str
     submitted_at: datetime
     accepted: bool
     orders: list[dict] = field(default_factory=list)  # 어댑터별 주문 표현(Δq 포함)
     error: str | None = None
+    executed_weights: dict[str, float] | None = None
+    dropped: dict[str, str] = field(default_factory=dict)
 
 
 # 브로커가 "장이 닫혀 있다"는 뜻으로 돌려주는 거부 문구. 브로커마다 표현이 달라

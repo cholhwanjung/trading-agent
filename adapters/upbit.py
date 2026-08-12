@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from adapters.allocation import compute_order_deltas
+from adapters.allocation import project_to_executable, weights_from_quantities
 from adapters.base import MarketAdapter, OrderResult, Position
 from adapters.ccxt_adapter import BinanceDataFeed, _ensure_markets
 from adapters.retry import with_retry
@@ -113,19 +113,24 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
             )
         try:
             cash, _, qty, prices = await self._snapshot()
-            holdings = {s: q * prices[s] for s, q in qty.items()}
-
-            intents = compute_order_deltas(
-                weights, holdings, cash, prices, min_notional=self.min_notional
+            # 분수 거래라 lot 제약이 없다 — 잘려나가는 건 최소 주문(5,000원)과 1회 상한뿐.
+            plan = project_to_executable(
+                weights, qty, cash, prices,
+                min_notional=self.min_notional,
+                max_order_notional=self.live_guard.caps.max_order_notional
+                if self.live_guard else None,
             )
+            final_qty = dict(qty)
             orders = []
-            for it in intents:
+            for it in plan.intents:
                 notional = round(it.notional)  # KRW 는 원 단위 정수
                 # 절대 금액 가드 — 1회/일일 명목 상한(KRW). 초과 주문은 그 건만 스킵.
                 if self.live_guard:
+                    # 투영은 1회 상한만 알고 일일 누적은 모른다 — 그 판정은 여기서.
                     reason = self.live_guard.check(notional, today)
                     if reason:
                         orders.append({"symbol": it.symbol, "side": it.side, "skipped": reason})
+                        plan.dropped[it.symbol] = reason
                         continue
                 krw_symbol = self.to_krw_symbol(it.symbol)
                 if it.side == "buy":
@@ -142,6 +147,8 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
                     placed = await self.ex.create_order(krw_symbol, "market", "sell", filled_qty)
                 if self.live_guard:
                     self.live_guard.charge(notional, today)  # 제출 성공분만 당일 누적
+                delta = it.qty if it.side == "buy" else -(filled_qty or 0.0)
+                final_qty[it.symbol] = final_qty.get(it.symbol, 0.0) + delta
                 orders.append(
                     {
                         "symbol": it.symbol,
@@ -151,7 +158,15 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
                         "order_id": placed.get("id"),
                     }
                 )
-            return OrderResult(market=self.market, submitted_at=now, accepted=True, orders=orders)
+            total = cash + sum(q * prices[s] for s, q in qty.items())
+            return OrderResult(
+                market=self.market,
+                submitted_at=now,
+                accepted=True,
+                orders=orders,
+                executed_weights=weights_from_quantities(final_qty, prices, total),
+                dropped=plan.dropped,
+            )
         except Exception as e:  # 주문 실패는 예외가 아니라 결과로 — 러너가 로그로 남긴다
             return OrderResult(
                 market=self.market, submitted_at=now, accepted=False, error=str(e)[:300]

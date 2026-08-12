@@ -22,7 +22,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from adapters.allocation import compute_order_deltas
+from adapters.allocation import project_to_executable, weights_from_quantities
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -338,32 +338,49 @@ class KISOverseasAdapter(MarketAdapter):
             cash = await self._buying_power(self.universe[0], prices[self.universe[0]])
             pending = await self._pending_symbols()
 
-            intents = compute_order_deltas(
-                weights, holdings, cash, prices, min_notional=self.min_notional
+            # 정수 주만 거래된다 — 소액 계좌에서는 1주 값이 종목당 상한을 넘어 목표가
+            # 통째로 표현되지 못할 수 있고, 그 사실이 투영 결과에 남는다. 매수 체결가는
+            # 현재가보다 버퍼만큼 높으므로 그만큼 현금을 미리 떼고 계산한다(초과주문 방지).
+            plan = project_to_executable(
+                weights,
+                qty_held,
+                cash / (1 + self.limit_buffer),
+                prices,
+                lot=1,
+                min_notional=self.min_notional,
+                max_order_notional=self.live_guard.caps.max_order_notional
+                if self.live_guard else None,
             )
+            final_qty = dict(qty_held)
             orders = []
-            for it in intents:
+            for it in plan.intents:
                 if it.symbol in pending:
                     orders.append({"symbol": it.symbol, "side": it.side, "skipped": "open_order"})
+                    plan.dropped[it.symbol] = "open_order"
                     continue
                 limit = self._limit_price(it.side, prices[it.symbol])
-                if it.side == "buy":
-                    qty = int(it.notional / limit)  # 정수 주 — 잔여는 CASH 로 남는다
-                else:
-                    qty = min(int(it.qty or 0), int(qty_held.get(it.symbol, 0)))
-                if qty < 1:
-                    orders.append({"symbol": it.symbol, "side": it.side, "skipped": "sub_share"})
-                    continue
-                # 절대 금액 가드 — 1회/일일 명목 상한(실전만). 초과 주문은 스킵.
+                qty = int(it.qty)
+                if it.side == "sell":
+                    qty = min(qty, int(qty_held.get(it.symbol, 0)))
+                    if qty < 1:
+                        orders.append({"symbol": it.symbol, "side": it.side, "skipped": "no_shares"})
+                        plan.dropped[it.symbol] = "no_shares"
+                        continue
+                # 절대 금액 가드 — 1회/일일 명목 상한(실전만). 투영은 1회 상한만 알고
+                # 일일 누적은 모른다 — 그 판정은 여기서.
                 notional = round(qty * limit, 2)
                 if self.live_guard:
                     reason = self.live_guard.check(notional, today)
                     if reason:
                         orders.append({"symbol": it.symbol, "side": it.side, "skipped": reason})
+                        plan.dropped[it.symbol] = reason
                         continue
                 placed = await self._post_order(it.side, it.symbol, qty, limit)
                 if self.live_guard:
                     self.live_guard.charge(notional, today)  # 제출 성공분만 당일 누적
+                final_qty[it.symbol] = final_qty.get(it.symbol, 0.0) + (
+                    qty if it.side == "buy" else -qty
+                )
                 orders.append(
                     {
                         "symbol": it.symbol,
@@ -374,7 +391,15 @@ class KISOverseasAdapter(MarketAdapter):
                         "order_id": (placed.get("output") or {}).get("ODNO"),
                     }
                 )
-            return OrderResult(market=self.market, submitted_at=now, accepted=True, orders=orders)
+            total = cash + sum(holdings.values())
+            return OrderResult(
+                market=self.market,
+                submitted_at=now,
+                accepted=True,
+                orders=orders,
+                executed_weights=weights_from_quantities(final_qty, prices, total),
+                dropped=plan.dropped,
+            )
         except Exception as e:  # 주문 실패는 예외가 아니라 결과로 — 러너가 로그로 남긴다
             return OrderResult(
                 market=self.market, submitted_at=now, accepted=False, error=str(e)[:300]

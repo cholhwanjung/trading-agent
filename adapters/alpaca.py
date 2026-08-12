@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 
 import httpx
 
-from adapters.allocation import compute_order_deltas
+from adapters.allocation import CASH, project_to_executable, weights_from_quantities
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -128,20 +128,25 @@ class AlpacaPaperAdapter(MarketAdapter):
         try:
             account = await self._get(f"{TRADE_BASE}/v2/account")
             cash = float(account["cash"])
-            holdings = {p.symbol: p.market_value for p in await self.get_positions()}
+            positions = await self.get_positions()
+            # 분수 주 notional 주문이라 수량 대신 평가액을 '단가 1' 로 다뤄 투영한다 —
+            # 이 계좌에서는 거래단위가 의도를 잘라내지 않으므로 환산이 곧 항등이다.
+            values = {p.symbol: p.market_value for p in positions}
+            unit = {s: 1.0 for s in set(weights) | set(values) if s != CASH}
 
             # 미체결(pending) 주문이 있는 종목은 제외 — 포지션에 안 잡혀 중복 주문이 나간다
             open_orders = await self._get(f"{TRADE_BASE}/v2/orders", params={"status": "open"})
             pending = {o["symbol"] for o in open_orders}
 
-            # notional 주문이라 가격 불필요 (qty=None)
-            intents = compute_order_deltas(
-                weights, holdings, cash, prices=None, min_notional=self.min_notional
+            plan = project_to_executable(
+                weights, values, cash, unit, min_notional=self.min_notional
             )
+            final_values = dict(values)
             orders = []
-            for it in intents:
+            for it in plan.intents:
                 if it.symbol in pending:
                     orders.append({"symbol": it.symbol, "side": it.side, "skipped": "open_order"})
+                    plan.dropped[it.symbol] = "open_order"
                     continue
                 resp = await self._client.post(
                     f"{TRADE_BASE}/v2/orders",
@@ -155,6 +160,9 @@ class AlpacaPaperAdapter(MarketAdapter):
                 )
                 resp.raise_for_status()
                 placed = resp.json()
+                final_values[it.symbol] = final_values.get(it.symbol, 0.0) + (
+                    it.notional if it.side == "buy" else -it.notional
+                )
                 orders.append(
                     {
                         "symbol": it.symbol,
@@ -164,7 +172,16 @@ class AlpacaPaperAdapter(MarketAdapter):
                         "status": placed.get("status"),
                     }
                 )
-            return OrderResult(market=self.market, submitted_at=now, accepted=True, orders=orders)
+            return OrderResult(
+                market=self.market,
+                submitted_at=now,
+                accepted=True,
+                orders=orders,
+                executed_weights=weights_from_quantities(
+                    final_values, unit, cash + sum(values.values())
+                ),
+                dropped=plan.dropped,
+            )
         except Exception as e:
             return OrderResult(
                 market=self.market, submitted_at=now, accepted=False, error=str(e)[:300]
