@@ -22,7 +22,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from adapters.allocation import project_to_executable, weights_from_quantities
+from adapters.allocation import build_budget, project_to_executable, weights_from_quantities
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -246,6 +246,27 @@ class KISOverseasAdapter(MarketAdapter):
             },
         )
         return float((data.get("output") or {}).get("echm_af_ord_psbl_amt") or 0)
+
+    async def get_budget(self, unit_prices: dict[str, float]):
+        """해외주식도 정수 주만 거래된다 — 고가주는 1주가 계좌의 상당 비중이 된다.
+
+        기준 통화는 **USD**다. get_equity 는 환율 손익까지 담으려고 원화 총자산을 쓰지만,
+        여기서는 주문 통화와 1주 값이 같은 단위여야 비중 환산이 성립한다.
+        """
+        ref = self.universe[0]
+        if not unit_prices.get(ref):
+            return None  # 기준가가 없으면 매수여력 조회 자체가 불가
+        cash = await self._buying_power(ref, unit_prices[ref])
+        holdings = sum(p.market_value for p in self._parse_positions(await self._balance_rows()))
+        return build_budget(
+            "USD",
+            cash + holdings,
+            cash,
+            unit_prices,
+            lot=1,
+            min_order=self.min_notional,
+            max_order=self.live_guard.caps.max_order_notional if self.live_guard else None,
+        )
 
     async def get_equity(self) -> float:
         """버킷 평가액 — **원화 총자산**(FX-aware). 원화 담보로 산 미국 자산의 환율 손익까지

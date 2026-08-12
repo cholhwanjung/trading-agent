@@ -265,6 +265,18 @@ class MarketAdapter(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__}는 get_equity 미구현")
 
+    async def get_budget(self, unit_prices: dict[str, float]):
+        """결정 시점의 예산 제약(BudgetSnapshot) — 트레이더 관측용. 미제공이면 None.
+
+        unit_prices 는 t-1 종가다(당일 시세를 결정에 흘리지 않기 위해). 계좌 통화와
+        관측 통화가 다른 거래소는 이 값을 쓸 수 없지만, 그런 경우는 분수 거래라
+        거래단위 제약 자체가 없어 문제가 되지 않는다.
+
+        기본 미구현이 아니라 None — 예산 제약을 모르는 것이 곧 제약이 없다는 뜻은
+        아니므로, 값을 지어내지 않고 '모른다'로 둔다(프롬프트에서 블록 자체가 빠진다).
+        """
+        return None
+
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         """현재 체결가(same-day, 실시간). **행동 전용** — 관측·feature·학습에 쓰지 말 것
         실시간 이벤트 트리거와 주문 집행 용도.

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
@@ -78,6 +79,7 @@ def build_user_prompt(
     max_news: int = 10,
     max_disclosures: int = 10,
     events: list[dict] | None = None,
+    budget: object | None = None,
 ) -> str:
     """관측을 구조화 텍스트로 — 자유 산문 없이 JSON 블록 나열.
 
@@ -126,6 +128,15 @@ def build_user_prompt(
                 for n in disclosures[:max_disclosures]
             ],
         }
+    if budget is not None:
+        payload["budget"] = {
+            "note": "이 계좌에서 실제로 낼 수 있는 주문의 제약이다. 어떤 종목에 "
+            "min_step_weight 보다 작은 비중을 주면 한 주도 사지 못해 그 비중이 통째로 "
+            "현금으로 남는다(0 = 분수 거래라 제약 없음). 담을 수 없는 종목에 비중을 "
+            "배정하지 말고, 그만큼을 담을 수 있는 종목이나 현금으로 명시적으로 돌려라. "
+            "min_step_weight 가 종목당 상한보다 크면 그 종목은 이 계좌에서 편입 불가다.",
+            **asdict(budget),
+        }
     if events:
         payload["upcoming_events"] = {
             "note": "사전 공지된 일정(결과 아님) — 이벤트 직전 리스크 노출은 스스로 판단하라.",
@@ -159,6 +170,7 @@ class LLMTrader:
         memory_fn: Callable[[Observation, dict], Awaitable[list[dict]]] | None = None,
         signals_fn: Callable[[Observation], Awaitable[dict]] | None = None,
         prev_weights_fn: Callable[[], dict[str, float] | None] | None = None,
+        budget_fn: Callable[[dict[str, float]], Awaitable[object | None]] | None = None,
         debate: str = "auto",  # "auto"(트리거 시만) | "always"(사용자 요청) | "off"
     ) -> None:
         provider, model = router.spec(tier)  # 로그 표기용
@@ -171,13 +183,14 @@ class LLMTrader:
         self.memory_fn = memory_fn  # active 교훈만 반환해야 한다 (memory.retrieval)
         self.signals_fn = signals_fn  # OOS 검증 팩터 스코어 (alpha_lab.signals)
         self.prev_weights_fn = prev_weights_fn  # 대형 포지션 변경 트리거 기준
+        self.budget_fn = budget_fn  # 계좌 예산 제약 (adapters.allocation.BudgetSnapshot)
         self.debate = debate
         self.playbook = load_playbook()
         self.last_decision: dict | None = None
 
     async def _decide_once(
         self, obs, positions, features, lessons: list[dict], signals: dict,
-        debate: dict | None = None, trigger: dict | None = None,
+        debate: dict | None = None, trigger: dict | None = None, budget=None,
     ):
         system = SYSTEM_PROMPT.format(market=self.market, universe=self.universe)
         if self.playbook:
@@ -195,6 +208,7 @@ class LLMTrader:
                     "content": build_user_prompt(
                         obs, positions, features, lessons, signals, debate, trigger,
                         events=upcoming_events(self.market, obs.asof_day),
+                        budget=budget,
                     ),
                 }
             ],
@@ -233,8 +247,18 @@ class LLMTrader:
                 signals = (await self.signals_fn(obs)).get("signals", {})
             except Exception:
                 signals = {}  # 신호는 관측 보조 — 실패해도 결정은 진행
+        # 예산 제약 — 1주 값이 목표 금액보다 크면 그 종목은 애초에 담기지 않는다.
+        # 단가는 관측 t-1 종가를 넘긴다(당일 시세를 결정에 흘리지 않는다).
+        budget = None
+        if self.budget_fn:
+            try:
+                closes = {s: b[-1].close for s, b in obs.bars.items() if b}
+                budget = await self.budget_fn(closes)
+            except Exception:
+                budget = None  # 예산 조회 실패는 관측 보조 — 결정 자체는 진행
+
         base_alloc, base_decision, base_resp = await self._decide_once(
-            obs, positions, features, [], signals, trigger=trigger
+            obs, positions, features, [], signals, trigger=trigger, budget=budget
         )
 
         tokens = {"in": base_resp.input_tokens or 0, "out": base_resp.output_tokens or 0}
@@ -245,7 +269,7 @@ class LLMTrader:
             from memory.influence import blend_allocations
 
             mem_alloc, mem_decision, mem_resp = await self._decide_once(
-                obs, positions, features, lessons, signals, trigger=trigger
+                obs, positions, features, lessons, signals, trigger=trigger, budget=budget
             )
             tokens["in"] += mem_resp.input_tokens or 0
             tokens["out"] += mem_resp.output_tokens or 0
@@ -272,14 +296,17 @@ class LLMTrader:
             # 실시간 trigger 파라미터와 이름 충돌 방지 — debate 소집 사유는 debate_reason
             debate_reason = debate_trigger(final, prev, signals, forced=(self.debate == "always"))
             if debate_reason:
-                payload = build_user_prompt(obs, positions, features, lessons, signals, trigger=trigger)
+                payload = build_user_prompt(
+                    obs, positions, features, lessons, signals, trigger=trigger, budget=budget
+                )
                 debate_meta, d_tokens = await run_debate(
                     self.router, self.market, payload, final, debate_reason
                 )
                 tokens["in"] += d_tokens["in"]
                 tokens["out"] += d_tokens["out"]
                 re_alloc, re_decision, re_resp = await self._decide_once(
-                    obs, positions, features, lessons, signals, debate=debate_meta, trigger=trigger
+                    obs, positions, features, lessons, signals,
+                    debate=debate_meta, trigger=trigger, budget=budget,
                 )
                 tokens["in"] += re_resp.input_tokens or 0
                 tokens["out"] += re_resp.output_tokens or 0
@@ -290,6 +317,7 @@ class LLMTrader:
         self.last_decision = {
             "features": features,  # 감사·pattern_key 계산용
             "fundamentals": observed_fundamentals(obs),  # 프롬프트 주입분 감사
+            "budget": asdict(budget) if budget is not None else None,  # 주입분 감사
             "alpha_signals_provided": sorted(signals),
             "retrieved_memory_ids": [le["id"] for le in lessons],
             "influence": influence,

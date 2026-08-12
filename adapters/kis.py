@@ -20,7 +20,7 @@ from pathlib import Path
 
 import httpx
 
-from adapters.allocation import project_to_executable, weights_from_quantities
+from adapters.allocation import build_budget, project_to_executable, weights_from_quantities
 from adapters.base import Bar, MarketAdapter, NewsItem, OrderResult, Position, observation_window
 from adapters.retry import with_retry
 
@@ -393,6 +393,15 @@ class KISPaperAdapter(MarketAdapter):
                 raise RuntimeError(f"kis order rt_cd={data.get('rt_cd')} msg={data.get('msg1')}")
             return data
         raise RuntimeError("kis order rate-limit 재시도 소진 (EGW00201)")
+
+    async def get_budget(self, unit_prices: dict[str, float]):
+        """국내주식은 정수 주만 거래된다 — 1주 값이 곧 배분의 최소 눈금이다."""
+        data = await self._balance()
+        equity = float((data.get("output2") or [{}])[0].get("tot_evlu_amt") or 0)
+        cash = equity - sum(p.market_value for p in self._parse_positions(data))
+        return build_budget(
+            "KRW", equity, cash, unit_prices, lot=1, min_order=self.min_notional
+        )
 
     async def submit_allocation(self, weights: dict[str, float]) -> OrderResult:
         now = datetime.now(timezone.utc)

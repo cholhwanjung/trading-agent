@@ -10,7 +10,12 @@ from datetime import date, datetime, timezone
 
 import httpx
 
-from adapters.allocation import CASH, project_to_executable, weights_from_quantities
+from adapters.allocation import (
+    CASH,
+    build_budget,
+    project_to_executable,
+    weights_from_quantities,
+)
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -110,6 +115,17 @@ class AlpacaPaperAdapter(MarketAdapter):
     async def get_equity(self) -> float:
         account = await self._get(f"{TRADE_BASE}/v2/account")
         return float(account["equity"])
+
+    async def get_budget(self, unit_prices: dict[str, float]):
+        """notional 주문(분수 주)이라 1주 가격이 배분을 제약하지 않는다."""
+        account = await self._get(f"{TRADE_BASE}/v2/account")
+        return build_budget(
+            "USD",
+            float(account["equity"]),
+            float(account["cash"]),
+            {},
+            min_order=self.min_notional,
+        )
 
     async def get_positions(self) -> list[Position]:
         raw = await self._get(f"{TRADE_BASE}/v2/positions")

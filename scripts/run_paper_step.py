@@ -326,6 +326,8 @@ def build_market_policy(
         signals_fn=make_signals_fn(env, market, symbols),
         # debate 트리거 입력: 직전 배분(대형 변경 감지) + 사용자 강제 소집
         prev_weights_fn=lambda: load_prev_weights(risk_path),
+        # 예산 제약 관측 — 계좌가 표현할 수 없는 배분을 애초에 내지 않게 한다
+        budget_fn=adapter.get_budget,
         debate=debate,
     )
     return RiskGuardedPolicy(

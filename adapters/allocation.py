@@ -28,6 +28,54 @@ class OrderIntent:
 
 
 @dataclass(frozen=True)
+class BudgetSnapshot:
+    """이 계좌에서 배분을 얼마나 잘게 표현할 수 있는지 — 결정 시점의 예산 제약.
+
+    모든 값은 **비중**이다. 계좌마다 통화가 다르고 트레이더는 비중으로만 답하므로,
+    금액을 그대로 주면 매번 나눗셈을 시키게 되고 그 계산은 자주 틀린다.
+    """
+
+    currency: str
+    equity: float
+    cash_weight: float  # 지금 현금 비중
+    lot: float  # 최소 거래단위(0 = 분수 거래)
+    min_order_weight: float  # 최소 주문 금액의 비중 환산
+    max_order_weight: float | None  # 1회 주문 상한의 비중 환산
+    min_step_weight: dict[str, float]  # symbol -> 1단위(1주)의 비중. 0 = 제약 없음
+
+
+def build_budget(
+    currency: str,
+    equity: float,
+    cash: float,
+    unit_prices: dict[str, float],
+    *,
+    lot: float = 0.0,
+    min_order: float = 0.0,
+    max_order: float | None = None,
+) -> BudgetSnapshot | None:
+    """예산 제약을 비중 공간으로 환산. equity 가 0 이하면 판단할 근거가 없어 None.
+
+    unit_prices 는 **계좌 통화 기준** 1단위 가격이다. 분수 거래(lot=0)면 쓰이지 않는다.
+    """
+    if equity <= 0:
+        return None
+    return BudgetSnapshot(
+        currency=currency,
+        equity=round(equity, 2),
+        cash_weight=round(cash / equity, 4),
+        lot=lot,
+        min_order_weight=round(min_order / equity, 6),
+        max_order_weight=round(max_order / equity, 6) if max_order is not None else None,
+        min_step_weight={
+            s: round(lot * p / equity, 6) if lot > 0 else 0.0
+            for s, p in unit_prices.items()
+            if p
+        },
+    )
+
+
+@dataclass(frozen=True)
 class Projection:
     """목표 배분을 그 계좌에서 실제로 낼 수 있는 주문으로 투영한 결과."""
 

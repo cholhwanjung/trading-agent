@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from adapters.allocation import project_to_executable, weights_from_quantities
+from adapters.allocation import build_budget, project_to_executable, weights_from_quantities
 from adapters.base import MarketAdapter, OrderResult, Position
 from adapters.ccxt_adapter import BinanceDataFeed, _ensure_markets
 from adapters.retry import with_retry
@@ -88,6 +88,23 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
             if held > 0:
                 qty[symbol] = held
         return free_krw, total_krw, qty, prices
+
+    async def get_budget(self, unit_prices: dict[str, float]):
+        """분수 거래라 거래단위 제약은 없다 — 남는 건 최소 주문(5,000원)과 1회 상한.
+
+        unit_prices(관측 USDT)는 쓰지 않는다. 계좌 통화가 KRW 라 단위가 어긋나는데,
+        lot=0 이면 1단위 비중 자체가 성립하지 않아 필요가 없다.
+        """
+        free_krw, total_krw, qty, prices = await self._snapshot()
+        equity = total_krw + sum(q * prices[s] for s, q in qty.items())
+        return build_budget(
+            "KRW",
+            equity,
+            free_krw,
+            {},
+            min_order=self.min_notional,
+            max_order=self.live_guard.caps.max_order_notional if self.live_guard else None,
+        )
 
     async def get_equity(self) -> float:
         """계좌 총 평가액(KRW). MDD 서킷 입력 — 통화가 바뀌므로 어댑터 전환 시 상태 리셋 필요."""

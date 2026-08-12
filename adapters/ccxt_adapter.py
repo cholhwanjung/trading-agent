@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timezone
 
-from adapters.allocation import project_to_executable, weights_from_quantities
+from adapters.allocation import build_budget, project_to_executable, weights_from_quantities
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -167,6 +167,12 @@ class BinanceTestnetAdapter(BinanceDataFeed, MarketAdapter):
     async def get_equity(self) -> float:
         cash, qty, prices = await self._snapshot()
         return cash + sum(q * prices[s] for s, q in qty.items())
+
+    async def get_budget(self, unit_prices: dict[str, float]):
+        """분수 거래 — 거래단위 제약 없음. 최소 주문 금액만 비중으로 환산한다."""
+        cash, qty, prices = await self._snapshot()
+        equity = cash + sum(q * prices[s] for s, q in qty.items())
+        return build_budget(self.quote, equity, cash, {}, min_order=self.min_notional)
 
     async def get_positions(self) -> list[Position]:
         _, qty, prices = await self._snapshot()
