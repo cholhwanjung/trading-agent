@@ -74,6 +74,7 @@ class Observation:
     financials: 분기 재무 스냅샷(symbol -> 값). 저속 채널이라 창 길이가 아니라 제출일 상한만 건다.
     index_valuation: 시장 전체의 밸류에이션 수준(시장당 1건). 종목별이 아닌 이유는
     지수 ETF 에 종목 재무가 없기 때문 — 대응물이 없는 시장은 None.
+    etf_nav: ETF 의 전일 최종 순자산가치(symbol -> 주당 금액). 원천이 없는 시장은 빈 dict.
     """
 
     market: str
@@ -83,6 +84,7 @@ class Observation:
     news: list[NewsItem] = field(default_factory=list)
     financials: dict[str, Financials] = field(default_factory=dict)
     index_valuation: IndexValuation | None = None
+    etf_nav: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -268,6 +270,13 @@ class MarketAdapter(ABC):
         """
         return {}
 
+    async def get_etf_nav(self, symbols: list[str], asof_day: date) -> dict[str, float]:
+        """ETF 의 전일 최종 순자산가치(주당). 원천이 없는 시장은 빈 dict.
+
+        미구현이 아니라 빈 반환 — 순자산가치 대응물이 없는 시장이 정상 상태다.
+        """
+        return {}
+
     async def get_index_valuation(self, asof_day: date):
         """이 시장의 밸류에이션 수준 1건. 대응물이 없는 시장은 None.
 
@@ -335,6 +344,7 @@ class MarketAdapter(ABC):
         news = await self.get_news(symbols, asof_day)
         financials = await self.get_financials(symbols, asof_day)
         index_valuation = await self.get_index_valuation(asof_day)
+        etf_nav = await self.get_etf_nav(symbols, asof_day)
         return Observation(
             market=self.market,
             asof_day=asof_day,
@@ -343,6 +353,7 @@ class MarketAdapter(ABC):
             news=news,
             financials=financials,
             index_valuation=index_valuation,
+            etf_nav=etf_nav,
         )
 
 

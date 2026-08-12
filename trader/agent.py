@@ -19,6 +19,7 @@ from adapters.allocation import CASH
 from adapters.base import DISCLOSURE_SOURCES, Bar, Observation, Position
 from adapters.universe import universe_meta
 from llm import LLMRouter
+from trader.etf_premium import observed_etf_premium
 from trader.events import upcoming_events
 from trader.features import InsufficientHistoryError, compute_features
 from trader.fundamentals import observed_fundamentals
@@ -141,6 +142,16 @@ def build_user_prompt(
             "pe": iv.pe,
             "pb": iv.pb,
             "dividend_yield": iv.dividend_yield,
+        }
+    etf_premium = observed_etf_premium(obs)
+    if etf_premium:
+        payload["etf_premium"] = {
+            "note": "ETF 의 시장가와 순자산가치(nav)의 차이. premium 은 비율이며 "
+            "양수는 순자산가치보다 비싸게 사는 것, 음수는 싸게 사는 것이다. 이것은 "
+            "지수에 대한 판단 재료가 아니라 **집행 비용**이다 — 지수 전망이 같다면 "
+            "괴리가 불리한 쪽으로 큰 날은 그만큼 손해로 시작한다. 값은 t-1 종가와 "
+            "전일 순자산가치로 계산했다.",
+            **etf_premium,
         }
     if fundamentals:
         payload["fundamentals"] = {
@@ -353,6 +364,7 @@ class LLMTrader:
         self.last_decision = {
             "features": features,  # 감사·pattern_key 계산용
             "fundamentals": observed_fundamentals(obs),  # 프롬프트 주입분 감사
+            "etf_premium": observed_etf_premium(obs),  # 빈 dict = 원천 없음 또는 범위 밖 폐기
             # None 이 곧 채널이 죽었다는 신호다 — 조회 실패를 예외로 올리지 않으므로
             # 이 필드가 유일한 생사 기록이다.
             "index_valuation": asdict(obs.index_valuation) if obs.index_valuation else None,

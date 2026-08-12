@@ -32,6 +32,7 @@ from adapters.allocation import (
 )
 from adapters.base import Bar, MarketAdapter, NewsItem, OrderResult, Position, observation_window
 from adapters.retry import with_retry
+from adapters.universe import ETF, asset_class
 
 if TYPE_CHECKING:  # 런타임 임포트는 순환(risk → adapters.allocation)을 만든다
     from risk.live import LiveGuard
@@ -352,6 +353,33 @@ class KISDomesticAdapter(MarketAdapter):
 
         _, end = observation_window(asof_day)
         return await fetch_dart_financials(self._dart_key, symbols, end)
+
+    async def get_etf_nav(self, symbols: list[str], asof_day: date) -> dict[str, float]:
+        """ETF 의 **전일 최종** 순자산가치(주당). 지수 ETF 만 조회, 실패는 무시.
+
+        같은 응답의 `nav`·`dprt` 는 **당일** 값이라 쓰지 않는다 — 장중에 그 값을 받으면
+        관측이 당일 가격을 아는 셈이 된다. 전일값만 관측 상한 안에 있다.
+
+        주의: KIS 는 이 값이 **어느 날짜의 것인지 함께 주지 않는다**. 직전 거래일이라는
+        전제로 쓰며, 어긋나면 t-1 종가와의 괴리가 비정상적으로 벌어진다 — 그 검사는
+        비율을 계산하는 쪽에 둔다(여기서는 원값만 싣는다).
+        """
+        out: dict[str, float] = {}
+        for symbol in symbols:
+            if asset_class(symbol) != ETF:
+                continue  # 개별주에는 순자산가치 개념이 없다
+            try:
+                data = await self.session.get(
+                    "/uapi/etfetn/v1/quotations/inquire-price",
+                    tr_id="FHPST02400000",
+                    params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
+                )
+                nav = float((data.get("output") or {}).get("prdy_last_nav") or 0)
+            except (httpx.HTTPError, RuntimeError, ValueError):
+                continue  # 관측 보조 — 한 종목 실패로 결정 경로를 막지 않는다
+            if nav > 0:
+                out[symbol] = nav
+        return out
 
     # ── 계좌 ──
 
