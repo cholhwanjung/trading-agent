@@ -2,7 +2,8 @@
 
 - 인증·스로틀은 국내 어댑터와 KISSession 공유. 같은 앱 키면 토큰 캐시 파일도 공유할 것.
 - 시세: dailyprice(실전/모의 공통 TR) — 수정주가 기준. 시세계 거래소 코드(NAS)와
-  주문계 코드(NASD)가 달라 내부에서 매핑한다.
+  주문계 코드(NASD)가 달라 내부에서 매핑하고, 상장 거래소가 종목마다 다르므로
+  SYMBOL_EXCHANGE 로 심볼별 해석한다(코드가 틀리면 예외가 아니라 빈 응답이 온다).
 - 주문: 미국 정규장에 순수 시장가가 없다(모의는 지정가만) → 현재가에 버퍼를 더한
   '체결형 지정가'(marketable limit)로 시장가를 대용한다. 정수 주 단위만 가능.
 - 지정가 미체결 잔량이 남을 수 있어 주문 전 미체결 심볼은 제외(중복 주문 방지).
@@ -10,8 +11,8 @@
   주문 여력이라, USD 예수금이 없어도 원화만으로 매수 가능(수동 환전 단계 불필요).
 - 평가액(MDD 입력): **원화 총자산(tot_asst_amt)** — 원화 담보로 산 미국 자산은 환율
   손익에 노출되므로, USD 가 아닌 KRW 로 계상해 서킷이 FX 낙폭까지 포착하게 한다.
-  (주의: 향후 KR 국내도 같은 실계좌로 오면 원화 담보를 KR/US 가 나눠 써야 함 — 지금은
-  계좌 분리라 무관.)
+  (KR 국내가 같은 실계좌를 쓰면 원화 담보를 나눠 써야 한다 — 매수여력은 bucket_share
+  로 나누지만 이 평가액은 아직 나누지 않았다.)
 - 뉴스: KIS 무료 원천 미정 — 빈 리스트(관측 배선 시 채널 별도 결정).
 """
 
@@ -41,9 +42,14 @@ from adapters.kis import PAPER_BASE, REAL_BASE, KISSession, paginate_daily
 if TYPE_CHECKING:
     from risk.live import LiveGuard
 
-# 주문계(NASD) → 시세계(NAS) 거래소 코드. 현 유니버스는 나스닥 단일 — NYSE/AMEX 종목
-# 편입 시 심볼별 거래소 매핑으로 확장해야 한다.
+# 주문계(NASD) → 시세계(NAS) 거래소 코드.
 QUOTE_EXCD = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
+
+# 종목별 상장 거래소. 시세 조회는 거래소 코드가 맞아야 하고, 틀리면 예외가 아니라
+# **빈 응답**이 온다 — 봉 0개·현재가 빈 문자열로 조용히 통과하므로 어댑터 기본 거래소
+# 하나로 유니버스를 덮으면 그 종목만 관측에서 사라진다. 광범위 지수 ETF 는 대부분
+# NYSE Arca(KIS 코드 AMEX) 상장이라 나스닥 종목과 섞이면 반드시 걸린다.
+SYMBOL_EXCHANGE: dict[str, str] = {"SCHX": "AMEX"}
 
 # 미국 주문 tr_id. 모의는 지정가(00)만 지원 — ORD_DVSN 은 항상 "00".
 ORDER_TR = {
@@ -90,7 +96,7 @@ class KISOverseasAdapter(MarketAdapter):
         self.universe = universe
         self.mode = mode
         self.exchange = exchange
-        self.excd = QUOTE_EXCD[exchange]
+        self.excd = QUOTE_EXCD[exchange]  # 미매핑 종목의 기본값
         self.min_notional = min_notional
         self.limit_buffer = limit_buffer
         self.live_guard = live_guard
@@ -101,6 +107,14 @@ class KISOverseasAdapter(MarketAdapter):
 
     async def close(self) -> None:
         await self.session.close()
+
+    def exchange_for(self, symbol: str) -> str:
+        """주문용 거래소 코드. 매핑 없으면 어댑터 기본값."""
+        return SYMBOL_EXCHANGE.get(symbol, self.exchange)
+
+    def excd_for(self, symbol: str) -> str:
+        """시세용 거래소 코드."""
+        return QUOTE_EXCD[self.exchange_for(symbol)]
 
     # ── 시세 ──
 
@@ -138,7 +152,7 @@ class KISOverseasAdapter(MarketAdapter):
             tr_id="HHDFS76240000",  # 실전/모의 공통
             params={
                 "AUTH": "",
-                "EXCD": self.excd,
+                "EXCD": self.excd_for(symbol),
                 "SYMB": symbol,
                 "GUBN": "0",  # 일봉
                 "BYMD": bymd,
@@ -198,7 +212,7 @@ class KISOverseasAdapter(MarketAdapter):
             data = await self.session.get(
                 "/uapi/overseas-price/v1/quotations/price",
                 tr_id="HHDFS00000300",  # 실전/모의 공통
-                params={"AUTH": "", "EXCD": self.excd, "SYMB": symbol},
+                params={"AUTH": "", "EXCD": self.excd_for(symbol), "SYMB": symbol},
             )
             out[symbol] = float(data["output"]["last"])
         return out
@@ -247,7 +261,7 @@ class KISOverseasAdapter(MarketAdapter):
             params={
                 "CANO": self.cano,
                 "ACNT_PRDT_CD": self.prdt,
-                "OVRS_EXCG_CD": self.exchange,
+                "OVRS_EXCG_CD": self.exchange_for(ref_symbol),
                 "OVRS_ORD_UNPR": f"{ref_price:.2f}",
                 "ITEM_CD": ref_symbol,
             },
@@ -326,7 +340,7 @@ class KISOverseasAdapter(MarketAdapter):
         body = {
             "CANO": self.cano,
             "ACNT_PRDT_CD": self.prdt,
-            "OVRS_EXCG_CD": self.exchange,
+            "OVRS_EXCG_CD": self.exchange_for(symbol),
             "PDNO": symbol,
             "ORD_QTY": str(qty),
             "OVRS_ORD_UNPR": f"{price:.2f}",
