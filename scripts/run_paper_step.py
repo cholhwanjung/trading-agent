@@ -98,6 +98,9 @@ LIMITS = {
         max_daily_turnover=0.50,
         mdd_circuit=0.20 if market == "CRYPTO" else 0.15,
         asset_caps=resolve_asset_caps(symbols, _EQUITY_CAP[market], _MIN_CASH),
+        # 정의역을 엔진에도 알린다 — 결정 단계 검증만으로는 직전 배분에 남은
+        # 옛 종목이 turnover blend 를 타고 되살아난다.
+        tradable=frozenset(symbols),
     )
     for market, symbols in TRADABLE.items()
 }
