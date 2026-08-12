@@ -35,11 +35,20 @@ async def compute_alpha_signals(
     trading_universe: list[str],
     asof_day: date | None = None,
     panel_fn=fetch_crypto_panel,
+    panel_symbols: list[str] | None = None,
+    unvalidated: frozenset[str] = frozenset(),
 ) -> dict:
     """{"asof": day, "signals": {"alpha:<name>": {"oos_ic":…, "scores": {sym: z}}}}.
 
     panel_fn 은 시장별 연구 패널 소스(CRYPTO=fetch_crypto_panel · US=make_us_panel_fn).
     라이브러리 없음/팩터 없음/계산 실패 → 빈 signals (비치명, 관측 보조일 뿐).
+
+    panel_symbols 로 **스코어링 횡단면만** 넓힐 수 있다. 집행 수단이 지수 ETF 뿐인
+    시장에서는 배분 대상이 연구 유니버스에 없어 스코어가 한 건도 닿지 않기 때문이다.
+    발견·admission·감쇠는 연구 패널 그대로 쓴다(`run_alpha_lab` 경로) — 팩터가 무엇을
+    근거로 승격됐는지는 바뀌지 않아야 한다. 대신 검증된 횡단면 밖에서 계산된 종목은
+    `unvalidated` 로 표시한다. 같은 수식으로 값은 나오지만 그 종목에 대한 예측력은
+    측정된 적이 없다 — 표시 없이 같은 자리에 실으면 검증된 값처럼 읽힌다.
     """
     library_path = Path(library_path)
     if not library_path.exists():
@@ -50,7 +59,7 @@ async def compute_alpha_signals(
         return {"asof": None, "signals": {}}
 
     panel, symbols, dates = await panel_fn(
-        lookback_days=SIGNAL_LOOKBACK_DAYS, asof_day=asof_day
+        symbols=panel_symbols, lookback_days=SIGNAL_LOOKBACK_DAYS, asof_day=asof_day
     )
     idx = {s: j for j, s in enumerate(symbols)}
     signals: dict[str, dict] = {}
@@ -64,14 +73,24 @@ async def compute_alpha_signals(
         if not np.isfinite(std) or std == 0:
             continue
         z = (row - mean) / std
-        signals[f"alpha:{factor.name}"] = {
+        scored = {
+            s: round(float(z[idx[s]]) * factor.sign, 3)
+            for s in trading_universe
+            if s in idx and np.isfinite(z[idx[s]])
+        }
+        block = {
             "oos_ic": factor.oos_ic,
             "live_ic": factor.live_ic,  # None = 아직 라이브 표본 부족 (감쇠 미평가)
             "hypothesis": factor.hypothesis,
-            "scores": {
-                s: round(float(z[idx[s]]) * factor.sign, 3)
-                for s in trading_universe
-                if s in idx and np.isfinite(z[idx[s]])
-            },
+            "scores": scored,
         }
+        outside = sorted(unvalidated & set(scored))
+        if outside:
+            block["unvalidated"] = outside
+            block["unvalidated_note"] = (
+                "이 종목들은 팩터가 검증된 횡단면 밖이다. 같은 수식으로 계산한 값이지만 "
+                "oos_ic·live_ic 는 이 종목에 대해 측정된 적이 없다 — 방향 참고로만 쓰고 "
+                "검증된 종목의 스코어와 같은 무게로 인용하지 말 것."
+            )
+        signals[f"alpha:{factor.name}"] = block
     return {"asof": dates[-1].isoformat(), "signals": signals}

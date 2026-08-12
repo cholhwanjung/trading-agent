@@ -353,7 +353,7 @@ def make_forbidden_fn(memory: MemoryStore, market: str):
 
 def make_signals_fn(env: dict[str, str], market: str, symbols: list[str]):
     """OOS 검증 팩터 스코어 클로저. 연구 패널 소스가 없는 시장은 None (신호 생략)."""
-    from alpha_lab.data import fetch_crypto_panel, make_us_panel_fn
+    from alpha_lab.data import RESEARCH_UNIVERSE, fetch_crypto_panel, make_us_panel_fn
 
     # 시장별 연구 패널로 active 팩터 top-3 z-score 주입 (US 는 Alpaca 키 필요)
     panel_fn = {"CRYPTO": fetch_crypto_panel, "US": make_us_panel_fn(env)}.get(market)
@@ -362,9 +362,17 @@ def make_signals_fn(env: dict[str, str], market: str, symbols: list[str]):
     from alpha_lab.signals import compute_alpha_signals
 
     library_path = STATE_DIR / f"alpha_library_{market}.json"
+    # 배분할 수 있는데 연구 유니버스에 없는 종목(지수 ETF)을 스코어링 횡단면에만 더한다.
+    # 이게 없으면 팩터가 승격돼도 정작 주문을 낼 수 있는 종목은 스코어를 못 받는다.
+    research = RESEARCH_UNIVERSE[market]
+    extra = [s for s in TRADABLE[market] if s not in research]
+    panel_symbols = research + extra if extra else None
 
     async def signals_fn(obs) -> dict:
-        return await compute_alpha_signals(library_path, symbols, obs.asof_day, panel_fn=panel_fn)
+        return await compute_alpha_signals(
+            library_path, symbols, obs.asof_day, panel_fn=panel_fn,
+            panel_symbols=panel_symbols, unvalidated=frozenset(extra),
+        )
 
     return signals_fn
 

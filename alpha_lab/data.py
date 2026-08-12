@@ -169,6 +169,14 @@ async def fetch_us_panel(
     return _assemble_panel(per_symbol, symbols)
 
 
+#: 시장 → 연구 유니버스. 팩터가 **무엇을 근거로 승격됐는지**를 정의하는 집합이라,
+#: 스코어링 횡단면을 넓히더라도 이 값은 그대로 둔다(승격 근거와 주입 값의 출처 구분).
+RESEARCH_UNIVERSE: dict[str, list[str]] = {
+    "CRYPTO": CRYPTO_RESEARCH_UNIVERSE,
+    "US": US_RESEARCH_UNIVERSE,
+}
+
+
 def make_us_panel_fn(env: dict[str, str]):
     """env 의 Alpaca 키로 US 패널 fetch 클로저 생성. 키 없으면 None(US alpha 스킵)."""
     key, secret = env.get("ALPACA_PAPER_API_KEY"), env.get("ALPACA_PAPER_SECRET")
