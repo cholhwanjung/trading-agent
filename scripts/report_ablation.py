@@ -20,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 STATE = ROOT / "data" / "state" / "virtual"
+LOGS = ROOT / "data" / "logs"
 
 from eval.meta import load_arm_history, max_drawdown  # noqa: E402
 
@@ -114,6 +115,28 @@ def main() -> int:
                 f" mean={r['mean_delta_pct']:+.3f}% latest={r['latest_delta_pct']:+.3f}%"
                 f" sign_p={p}  # dynamic−equal 비중첩 {r['n_chunks']}청크 양성 {r['chunks_positive']}"
             )
+    # 국면 신호 비교 — 룰 기반 FSM vs jump model. 판정 기준은 사전 확정(사후 지표 추가 금지).
+    from eval.regime_eval import MARKET_ARM, MIN_DAYS, compare_regimes
+
+    print(f"\n=== REGIME (국면 신호 채점, 대상={MARKET_ARM} arm 익일 수익률) ===")
+    for market in markets:
+        r = compare_regimes(LOGS, STATE, market)
+        parts = []
+        for model in ("fsm", "jm"):
+            s = r[model]
+            parts.append(
+                f"{model}=none"
+                if s is None
+                else (
+                    f"{model} n={s['n_days']} on/off={s['n_risk_on']}/{s['n_risk_off']}"
+                    f" spread={s['spread_pct']:+.4f}% switch/yr={s['switches_per_year']}"
+                )
+            )
+        print(f"market={market} verdict={r['verdict']}  " + "  ".join(parts))
+        for reason in r["reasons"]:
+            print(f"    - {reason}")
+    print(f"note=국면 판정 최소 표본 {MIN_DAYS}일 · spread 우위 + 전환 횟수 FSM 이하 둘 다 필요")
+
     print(
         "\nnote=단기 표본은 통계력 없음 — 보조 지표(메모리 승격/퇴출률·인용 기여)와 함께 볼 것"
     )

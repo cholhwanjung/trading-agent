@@ -10,10 +10,13 @@ from eval.meta import (
 )
 from eval.paper_portfolio import VirtualPortfolio
 from eval.perf import daily_returns, drawdown_series, perf_stats
+from eval.regime_eval import RegimeScore, compare_regimes
 from eval.rolling import meta_shadow_delta, rolling_delta, rolling_report
 
 __all__ = [
+    "RegimeScore",
     "VirtualPortfolio",
+    "compare_regimes",
     "combined_index",
     "combined_index_dynamic",
     "daily_returns",
