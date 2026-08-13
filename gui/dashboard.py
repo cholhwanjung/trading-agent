@@ -561,6 +561,15 @@ with tab_chat:
         st.session_state.chat_history = []  # [{"role", "content", "cited_ids"?}]
         st.session_state.chat_session_id = None
 
+    # 토론 결론은 시장 네임스페이스로 기록된다 — 고르지 않으면 KR 토론이 다른 시장의
+    # 저널에 앉는다. 세션 시작 시점의 값만 쓰이므로 진행 중에는 바꿀 수 없다.
+    chat_market = st.selectbox(
+        "시장 (토론 결론이 기록될 네임스페이스)",
+        MARKETS,
+        key="chat_market",
+        disabled=bool(st.session_state.chat_session_id),
+    )
+
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -573,7 +582,11 @@ with tab_chat:
         try:
             resp = httpx.post(
                 f"{gateway}/chat",
-                json={"question": question, "session_id": st.session_state.chat_session_id},
+                json={
+                    "question": question,
+                    "session_id": st.session_state.chat_session_id,
+                    "market": chat_market,
+                },
                 headers=headers,
                 timeout=120,
             )
@@ -592,6 +605,34 @@ with tab_chat:
                 {"role": "assistant", "content": f"⚠️ 게이트웨이 연결 실패: {e} — 게이트웨이가 떠 있는지 확인"}
             )
         st.rerun()
+
+    # 토론 마감 — 결론 요약을 episodic 저널에 남긴다. 결정에 개입하지 않는다:
+    # 승격 통계는 outcome·pattern_key 가 있는 엔트리만 세고, 결정 프롬프트로 회수되는
+    # 것은 승격을 통과한 semantic·procedural 뿐이다. 저널은 사후 감사용 기록이다.
+    if st.session_state.chat_session_id:
+        st.divider()
+        if st.button("토론 마감 — 결론을 기록", type="primary"):
+            try:
+                resp = httpx.post(
+                    f"{gateway}/discuss/conclude",
+                    json={"session_id": st.session_state.chat_session_id},
+                    headers={"Authorization": f"Bearer {token}"} if token else {},
+                    timeout=120,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    st.success(f"기록됨 — `{data['memory_id']}` ({chat_market})")
+                    st.caption(data.get("note", ""))
+                    # 게이트웨이가 세션을 지웠다 — 남겨두면 다음 질문이 죽은 id 를 보낸다.
+                    st.session_state.chat_session_id = None
+                else:
+                    st.error(f"게이트웨이 오류 {resp.status_code}: {resp.text[:200]}")
+            except httpx.HTTPError as e:
+                st.error(f"게이트웨이 연결 실패: {e}")
+        st.caption(
+            "마감하면 결론 요약이 이 시장의 episodic 저널에 남는다. 검증 교훈이 아니며 "
+            "결정에는 개입하지 않는다 — 승격은 admission 게이트를 따로 통과해야 한다."
+        )
 
 
 # ── 운영 (읽기 전용) ──
