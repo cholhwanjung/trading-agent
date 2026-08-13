@@ -11,8 +11,17 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from adapters.base import Observation, Position
+from adapters.retry import with_retry
 from harness.policy import Policy
 from risk.engine import RiskEngine
+
+# 평가액 조회 재시도 예산. 어댑터가 자기 호출에 두는 예산보다 길게 잡는다 — 이 한 번의
+# 실패는 값 하나가 비는 데서 끝나지 않고 **그날 집행 전체를 스킵**시키기 때문이다
+# (아래 equity_error 경로). 장 개시 직후 브로커가 수십 초 막히는 일이 실제로 있었고
+# (2026-08-13 10:01 KIS 잔고 조회 HTTP 500, 어댑터의 3초 예산으로는 부족했다), 이
+# 시점에는 관측·결정이 이미 끝나 있어 기다리는 비용이 낮다. 대기 5+10+20 = 35초.
+EQUITY_ATTEMPTS = 4
+EQUITY_BASE_DELAY = 5.0
 
 
 def account_fingerprint(adapter: object) -> str:
@@ -109,7 +118,11 @@ class RiskGuardedPolicy:
         equity, equity_error = None, None
         if self.equity_fn:
             try:
-                equity = await self.equity_fn()
+                equity = await with_retry(
+                    self.equity_fn,
+                    attempts=EQUITY_ATTEMPTS,
+                    base_delay=EQUITY_BASE_DELAY,
+                )
             except Exception as e:
                 equity_error = f"{type(e).__name__}: {str(e)[:200]}"
         peak = state.get("peak_equity")
