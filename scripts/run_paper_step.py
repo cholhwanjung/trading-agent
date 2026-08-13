@@ -3,8 +3,12 @@
 사용법:
     uv run python scripts/run_paper_step.py            # 실주문 + 가상 A/B (키 있는 전 시장)
     uv run python scripts/run_paper_step.py --dry-run  # 관측·포지션 조회까지만
-    uv run python scripts/run_paper_step.py --markets CRYPTO,US   # 시장 선택 (KR 은 10:00 KST 별도 잡)
+    uv run python scripts/run_paper_step.py --markets CRYPTO      # 시장 선택
     uv run python scripts/run_paper_step.py --debate              # debate 강제 소집 (사용자 요청)
+
+시장별로 잡이 나뉘어 있다 — 장중에만 주문이 체결되고 장 시간이 서로 다르기 때문이다:
+CRYPTO 23:00 KST(24/7) · KR 10:00 KST · US 00:30 KST(양 시간대 모두 미국 정규장 안).
+정규장 밖에서 실행되면 어댑터가 주문을 막고 실패로 올린다(조용한 미집행 방지).
 
 구성 (시장별):
 - 실계좌: RiskGuardedPolicy(LLMTrader) — 라이브 페이퍼가 진실 verifier.

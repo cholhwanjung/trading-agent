@@ -33,9 +33,13 @@ class Job:
 
 
 JOBS = [
-    # KR 은 장중(10:00 KST) 시장가 주문이 필요해 별도 잡 — 23:00 잡은 KR 제외
+    # 장중에만 주문이 나가는 시장은 각자의 장 시간에 맞춘 별도 잡이다.
+    # KR 10:00 KST = 장중. US 00:30 KST 는 서머타임 적용기(11:30 ET)와 표준시기
+    # (10:30 ET) 양쪽에서 정규장 안 — KST 에는 서머타임이 없어 고정 시각이 ET 기준으로
+    # 1년에 두 번 밀리므로, 양쪽 모두를 만족하는 시각이어야 한다.
     Job("paper_step_kr", "scripts/run_paper_step.py", hour=10, args=("--markets", "KR")),
-    Job("paper_step", "scripts/run_paper_step.py", hour=23, args=("--markets", "CRYPTO,US")),
+    Job("paper_step_us", "scripts/run_paper_step.py", hour=0, minute=30, args=("--markets", "US")),
+    Job("paper_step", "scripts/run_paper_step.py", hour=23, args=("--markets", "CRYPTO")),
     Job("alpha_lab", "scripts/run_alpha_lab.py", hour=22, weekday=6),  # 일요일
     # 능력 갭 요구 — 매월 1일 20:30, 제안서(21:00) 직전 생성. 신호 없으면 스크립트가 skip.
     Job("capability_requests", "scripts/request_capabilities.py", hour=20, minute=30, monthday=1),

@@ -23,6 +23,7 @@ from adapters.base import (
     OrderResult,
     Position,
     observation_window,
+    off_session_weekday,
 )
 from adapters.financials import Financials
 from adapters.retry import with_retry
@@ -141,6 +142,14 @@ class AlpacaPaperAdapter(MarketAdapter):
 
     async def submit_allocation(self, weights: dict[str, float]) -> OrderResult:
         now = datetime.now(timezone.utc)
+        # 평일 정규장 밖이면 주문하지 않는다. 이 브로커는 장외 주문을 거부하는 대신
+        # 다음 개장까지 대기열에 넣는데, 그러면 오늘의 결정이 내일 시가에 체결되어
+        # 결정 시점과 체결 시점이 어긋난 채로 기록이 남는다.
+        off_session = off_session_weekday(self.market, now)
+        if off_session:
+            return OrderResult(
+                market=self.market, submitted_at=now, accepted=False, error=off_session
+            )
         try:
             account = await self._get(f"{TRADE_BASE}/v2/account")
             cash = float(account["cash"])

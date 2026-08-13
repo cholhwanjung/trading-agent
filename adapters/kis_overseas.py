@@ -36,6 +36,7 @@ from adapters.base import (
     OrderResult,
     Position,
     observation_window,
+    off_session_weekday,
 )
 from adapters.kis import PAPER_BASE, REAL_BASE, KISSession, paginate_daily
 
@@ -372,6 +373,13 @@ class KISOverseasAdapter(MarketAdapter):
         if self.live_guard and self.live_guard.kill_switch_active():
             return OrderResult(
                 market=self.market, submitted_at=now, accepted=False, error="kill_switch_active"
+            )
+        # 평일 정규장 밖이면 주문하지 않는다 — 현재가가 직전 종가로 굳어 있어 체결형
+        # 지정가가 엉뚱한 값으로 나가고, 브로커 거부는 주말 휴장과 구분되지 않는다.
+        off_session = off_session_weekday(self.market, now)
+        if off_session:
+            return OrderResult(
+                market=self.market, submitted_at=now, accepted=False, error=off_session
             )
         try:
             positions = self._parse_positions(await self._balance_rows())

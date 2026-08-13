@@ -15,6 +15,7 @@ from adapters.base import (
     configure_observation,
     is_market_closed_error,
     observation_window,
+    off_session_weekday,
 )
 from adapters.financials import Financials
 
@@ -34,4 +35,5 @@ __all__ = [
     "configure_observation",
     "is_market_closed_error",
     "observation_window",
+    "off_session_weekday",
 ]

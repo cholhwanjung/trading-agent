@@ -15,8 +15,9 @@ from __future__ import annotations
 import itertools
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
 
 from adapters.financials import Financials
 from adapters.index_valuation import IndexValuation
@@ -148,6 +149,40 @@ def is_market_closed_error(error: str | None) -> bool:
     주말마다 종료코드·통지·대시보드 경고가 켜져서 진짜 장애 신호가 그 잡음에 묻힌다.
     """
     return bool(error) and any(hint in error for hint in _MARKET_CLOSED_HINTS)
+
+
+# 시장별 정규장 (IANA tz, 개장, 폐장). 크립토는 24/7 이라 항목이 없다.
+REGULAR_SESSIONS: dict[str, tuple[str, time, time]] = {
+    "US": ("America/New_York", time(9, 30), time(16, 0)),
+    "KR": ("Asia/Seoul", time(9, 0), time(15, 30)),
+}
+
+
+def off_session_weekday(market: str, now: datetime) -> str | None:
+    """평일인데 정규장 밖이면 사유 문자열, 아니면 None. 정규장이 없는 시장은 항상 None.
+
+    **주말은 None 이다** — 주말 주문 거부는 장 마감(is_market_closed_error)으로 이미
+    조용히 처리되고 그게 맞다. 평일 장외는 뜻이 완전히 다르다: 실행 시각이 시장 시간과
+    어긋났다는 신호다. 그런데 브로커는 이것도 똑같이 '장 마감'으로 거부하므로, 갈라내지
+    않으면 주문 0건인 상태가 주말·휴장과 섞여 정상처럼 보인다. 미국장은 서머타임이
+    있고 실행 스케줄은 KST 벽시계라 이 어긋남이 1년에 두 번 자동으로 발생한다.
+
+    휴장일 캘린더는 두지 않는다 — 정규장 시간 안의 휴장은 브로커 거부로 남고, 그건
+    스케줄 문제가 아니라 진짜 휴장이라 조용해도 된다.
+    """
+    session = REGULAR_SESSIONS.get(market)
+    if session is None:
+        return None
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    tz, open_t, close_t = session
+    local = now.astimezone(ZoneInfo(tz))
+    if local.weekday() >= 5 or open_t <= local.time() <= close_t:
+        return None
+    return (
+        f"off_session_weekday market={market}"
+        f" local={local:%Y-%m-%d %H:%M %Z} session={open_t:%H:%M}-{close_t:%H:%M}"
+    )
 
 
 def observation_window(asof_day: date, lookback: int | None = None) -> tuple[date, date]:
