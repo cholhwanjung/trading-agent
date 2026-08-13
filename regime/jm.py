@@ -32,6 +32,7 @@ from dataclasses import dataclass
 DD_HALFLIFE = 10  # 하방편차 반감기 (거래일)
 SORTINO_HALFLIVES = (20, 60)  # Sortino 반감기 2종 (노이즈 완화용 장·단)
 MIN_BARS = 70  # 최소 수익률 표본 — 짧은 반감기 2종이 안정되는 하한
+WARMUP_BARS = 120  # 학습용 시계열에서 버릴 앞부분 (반감기 60 이 안정되기 전 구간)
 _ANNUALIZE = 252**0.5
 
 
@@ -43,21 +44,36 @@ class JumpFeatures:
     n_bars: int  # 실제 사용한 수익률 표본 수 (창 충분성 감사용)
 
 
-def _ewm_weights(n: int, halflife: float) -> list[float]:
-    """지수 감쇠 가중치(합=1). 리스트 끝(최신값)이 가장 큰 가중치를 받는다."""
+def _ewm_series(values: list[float], halflife: float) -> list[float]:
+    """각 시점까지의 지수가중평균 시계열 (재귀식, O(n)).
+
+    t 시점 값은 t 까지의 데이터만 쓴다 — 학습용 시계열을 뽑아도 미래가 새지 않는다.
+    """
     decay = 0.5 ** (1.0 / halflife)
-    raw = [decay ** (n - 1 - i) for i in range(n)]
-    total = sum(raw)
-    return [w / total for w in raw]
+    out, num, den = [], 0.0, 0.0
+    for v in values:
+        num = v + decay * num
+        den = 1.0 + decay * den
+        out.append(num / den)
+    return out
 
 
 def _ewm_mean(values: list[float], halflife: float) -> float:
-    return sum(v * w for v, w in zip(values, _ewm_weights(len(values), halflife)))
+    return _ewm_series(values, halflife)[-1]
+
+
+def _downside_series(rets: list[float], halflife: float) -> list[float]:
+    """√(EWM[r²·1{r<0}]) 시계열 — 음수 수익률만 제곱해 가중평균 후 제곱근. 상방은 벌하지 않는다."""
+    squared = [r * r if r < 0 else 0.0 for r in rets]
+    return [v**0.5 for v in _ewm_series(squared, halflife)]
 
 
 def _downside_dev(rets: list[float], halflife: float) -> float:
-    """√(EWM[r²·1{r<0}]) — 음수 수익률만 제곱해 가중평균 후 제곱근. 상방은 벌하지 않는다."""
-    return _ewm_mean([r * r if r < 0 else 0.0 for r in rets], halflife) ** 0.5
+    return _downside_series(rets, halflife)[-1]
+
+
+def _returns(closes: list[float]) -> list[float]:
+    return [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes)) if closes[i - 1] > 0]
 
 
 def compute_jump_features(closes: list[float]) -> JumpFeatures | None:
@@ -67,9 +83,7 @@ def compute_jump_features(closes: list[float]) -> JumpFeatures | None:
     이때도 None 을 돌려준다 — 0 으로 채우면 '중립'으로 읽혀 실제(=하방 없음)와
     정반대 신호가 된다.
     """
-    rets = [
-        closes[i] / closes[i - 1] - 1 for i in range(1, len(closes)) if closes[i - 1] > 0
-    ]
+    rets = _returns(closes)
     if len(rets) < MIN_BARS:
         return None
 
@@ -86,3 +100,33 @@ def compute_jump_features(closes: list[float]) -> JumpFeatures | None:
         sortino_60=round(sortinos[1], 3),
         n_bars=len(rets),
     )
+
+
+def feature_matrix(closes: list[float]) -> tuple[list[list[float]], list[float]]:
+    """종가 시퀀스 → (피처 행렬, 같은 길이의 수익률). 적합·추론이 공유하는 입력.
+
+    행 t 는 t 까지의 데이터만으로 계산된다(재귀 EWM). 앞 WARMUP_BARS 행은 반감기 60
+    피처가 안정되기 전이라 버린다. 하락일이 아직 없어 하방편차가 0 인 행도 버린다 —
+    Sortino 가 정의되지 않는데 0 으로 채우면 '중립'으로 잘못 읽힌다.
+
+    반환되는 수익률은 각 행과 같은 날의 것이다. 상태별 누적수익으로 bull/bear 라벨을
+    정할 때 쓰인다 — 라벨이 없으면 군집 번호가 재적합마다 뒤집힌다.
+    """
+    rets = _returns(closes)
+    if len(rets) <= WARMUP_BARS:
+        return [], []
+
+    dd10 = _downside_series(rets, DD_HALFLIFE)
+    means = {hl: _ewm_series(rets, hl) for hl in SORTINO_HALFLIVES}
+    devs = {hl: _downside_series(rets, hl) for hl in SORTINO_HALFLIVES}
+
+    rows, aligned = [], []
+    for t in range(WARMUP_BARS, len(rets)):
+        if dd10[t] <= 0 or any(devs[hl][t] <= 0 for hl in SORTINO_HALFLIVES):
+            continue
+        rows.append(
+            [dd10[t] * _ANNUALIZE]
+            + [means[hl][t] / devs[hl][t] * _ANNUALIZE for hl in SORTINO_HALFLIVES]
+        )
+        aligned.append(rets[t])
+    return rows, aligned

@@ -56,6 +56,7 @@ from regime import (  # noqa: E402
     compute_market_vol,
     INDEX_PROXY,
     compute_jm_features,
+    compute_jm_regime,
     compute_macro_regime,
     compute_regime,
     load_market_signals,
@@ -687,6 +688,16 @@ async def main() -> int:
                 })
                 print(f"market={market} dd10={jm.downside_dev} sortino20={jm.sortino_20}"
                       f" sortino60={jm.sortino_60} n_bars={jm.n_bars}")
+
+            # jump model 국면 (shadow) — FSM 과 같은 프록시로 이산 상태를 내 나란히 채점된다.
+            # 계산·로깅만, 결정/리스크 미개입. 판정은 report_ablation 의 REGIME 섹션에서.
+            jm_state = await compute_jm_regime(
+                adapter, market, today, STATE_DIR / f"jm_{market}.json"
+            )
+            if jm_state is not None:
+                logger.log(market, "jm_regime", jm_state)
+                print(f"market={market} jm_state={jm_state['state']}"
+                      f" n_train={jm_state['n_train']} refit={int(jm_state['refit'])}")
 
             # 배분 집중도·실효 분산 (shadow) — 종목당 상한이 못 보는 동조 리스크.
             # 계산·로깅만, Risk Engine 미개입 — 검증 후 집중도 상한 게이트 승격 대상.
