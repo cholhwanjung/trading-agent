@@ -63,6 +63,10 @@ def diff_applies(diff: str, original: str) -> tuple[bool, str | None]:
     것보다 초안에 미리 표시한다.
     """
     lines = original.splitlines()
+    # 빈 diff 는 실패가 아니라 설계된 결과다 — 토론이 변경으로 이어지지 않으면 억지로
+    # 만들지 않는다. 형식이 깨진 초안과 같은 사유로 묶으면 둘을 구분할 수 없다.
+    if not diff.strip():
+        return False, "변경 없음 — 토론이 플레이북 수정으로 이어지지 않았다"
     hunks = _hunks(diff)
     if not hunks:
         return False, "hunk 없음 (@@ 헤더가 없다)"
