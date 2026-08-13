@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import itertools
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -54,6 +55,26 @@ class NewsItem:
 # 통과하지만(둘 다 published_at 기준 윈도우 판정) 소비 시점에는 갈라내야 한다 —
 # 어댑터가 뉴스 뒤에 이어붙이고 소비자가 앞에서 잘라 쓰면 공시가 통째로 잘려나간다.
 DISCLOSURE_SOURCES: frozenset[str] = frozenset({"DART", "SEC"})
+
+
+def round_robin_news(groups: list[list[NewsItem]], limit: int) -> list[NewsItem]:
+    """질의별 리스트에서 번갈아 한 건씩 뽑는다 — 기사 많은 채널의 창 독식 차단.
+
+    같은 이유로 존재한다: 소비자는 뉴스 리스트를 앞에서 잘라 쓰므로, 채널을 이어붙이면
+    뒤에 붙은 채널이 한 건도 남지 않는다. 각 그룹은 최신순이라 채널마다 '가장 최근
+    것부터' 들어가고, 소진된 그룹은 건너뛰어 슬롯을 남기지 않는다. 그룹 간 엄밀한
+    시각순은 포기한다 — 며칠 창 안에서 헤드라인 사이의 분 단위 선후보다 채널 커버리지가
+    결정에 쓸모 있다.
+    """
+
+    out: list[NewsItem] = []
+    for row in itertools.zip_longest(*groups):
+        for item in row:
+            if item is not None:
+                out.append(item)
+                if len(out) >= limit:
+                    return out
+    return out
 
 
 @dataclass(frozen=True)

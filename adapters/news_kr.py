@@ -24,13 +24,12 @@ RSS 2.0 파싱은 크립토 뉴스와 동일 파서(parse_rss)를 재사용한�
 
 from __future__ import annotations
 
-import itertools
 import urllib.parse
 from datetime import date
 
 import httpx
 
-from adapters.base import NewsItem
+from adapters.base import NewsItem, round_robin_news
 from adapters.news_rss import parse_rss
 
 # 종목코드 → 질의용 회사명(현 KR 유니버스). 유니버스 확장 시 여기 추가.
@@ -109,23 +108,6 @@ def _is_rewrite(bigrams: frozenset[str], accepted: list[frozenset[str]]) -> bool
     )
 
 
-def _round_robin(groups: list[list[NewsItem]], limit: int) -> list[NewsItem]:
-    """질의별 리스트에서 번갈아 한 건씩 뽑는다 — 기사 많은 종목의 창 독식 차단.
-
-    각 그룹은 최신순이므로 종목마다 '가장 최근 것부터' 들어간다. 소진된 그룹은 건너뛰어
-    슬롯을 남기지 않는다. 그룹 간 엄밀한 시각순은 포기한다 — 며칠 창 안에서 헤드라인
-    사이의 분 단위 선후보다 종목 커버리지가 결정에 쓸모 있다.
-    """
-    out: list[NewsItem] = []
-    for row in itertools.zip_longest(*groups):
-        for item in row:
-            if item is not None:
-                out.append(item)
-                if len(out) >= limit:
-                    return out
-    return out
-
-
 def _feed_url(query: str) -> str:
     """회사명 → ko/KR 로케일 Google News RSS 검색 URL."""
     params = urllib.parse.urlencode({"q": query, "hl": "ko", "gl": "KR", "ceid": "KR:ko"})
@@ -182,4 +164,4 @@ async def fetch_kr_news(
         seen.add(key)
         accepted.append(bigrams)
         groups[n.source].append(n)
-    return _round_robin(list(groups.values()), max_items)
+    return round_robin_news(list(groups.values()), max_items)
