@@ -68,6 +68,21 @@ def create_app(engine: ChatEngine | None = None, token: str | None = None, root:
             raise HTTPException(404, str(e)) from e
         return {"memory_id": entry_id, "note": "user_session 태그 기록 — 승격은 admission 게이트 필요"}
 
+    @app.post("/discuss/propose", dependencies=[Depends(auth)])
+    async def propose(req: ConcludeRequest):
+        """토론 → 플레이북 제안초안(파일). 적용하지 않는다 — 사람이 파일을 고칠 때만."""
+        try:
+            proposal = await engine.propose(req.session_id)
+        except KeyError as e:
+            raise HTTPException(404, str(e)) from e
+        return {
+            "path": str(proposal.path.relative_to(app.state.root)),
+            "diff": proposal.diff,
+            "applies": proposal.applies,
+            "reason": proposal.reason,
+            "note": "초안 파일만 썼다 — 적용은 사람이 대상 파일을 고칠 때만 일어난다",
+        }
+
     @app.get("/briefing", dependencies=[Depends(auth)])
     async def briefing():
         return {"markdown": build_briefing(app.state.root)}
