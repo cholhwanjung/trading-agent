@@ -195,6 +195,75 @@ def load_latest_requests(requests_dir: Path) -> dict | None:
     return json.loads(files[0].read_text(encoding="utf-8"))
 
 
+# ── 제안서 (월간 자동 / 세션발 초안) ──
+
+_MONTHLY = re.compile(r"\d{4}-\d{2}\.md")
+
+
+def monthly_proposals(proposal_dir: Path) -> list[str]:
+    """월간 self-improve 제안서 파일명({YYYY-MM}.md) — 최신순."""
+
+    if not proposal_dir.exists():
+        return []
+    return sorted((p.name for p in proposal_dir.glob("*.md") if _MONTHLY.fullmatch(p.name)),
+                  reverse=True)
+
+
+def _frontmatter(text: str) -> dict[str, str]:
+    """`---` 사이의 `key: value` 만 뽑는다. 없으면 빈 dict."""
+
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    out: dict[str, str] = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, value = line.partition(":")
+        if sep:
+            out[key.strip()] = value.strip()
+    return out
+
+
+def session_proposals(proposal_dir: Path) -> list[dict]:
+    """토론 세션에서 나온 플레이북 초안 — 최신순.
+
+    월간 자동 제안서와 **섞어 보여주지 않는다**. 둘은 출처가 다르다 — 하나는 승격
+    통계·성과에서 나온 것이고 하나는 사람과의 대화에서 나온 것이라, 한 목록에 두면
+    나중에 어느 쪽이 무엇이었는지 가릴 수 없다.
+    """
+
+    if not proposal_dir.exists():
+        return []
+    rows = []
+    for path in sorted(proposal_dir.glob("session-*.md"), reverse=True):
+        meta = _frontmatter(path.read_text(encoding="utf-8"))
+        cited = meta.get("cited_ids", "").strip("[]")
+        rows.append({
+            "name": path.name,
+            "created": meta.get("created", ""),
+            "market": meta.get("market", ""),
+            "session_id": meta.get("session_id", ""),
+            "target": meta.get("target", ""),
+            # 근거 없이 나온 초안을 목록에서 바로 가릴 수 있어야 한다
+            "grounding": meta.get("grounding", "none"),
+            "n_cited": len([c for c in cited.split(",") if c.strip()]),
+            "applies": meta.get("applies") == "true",
+            "applies_reason": meta.get("applies_reason", ""),
+            "applied": meta.get("applied") == "true",
+        })
+    return rows
+
+
+def session_draft_diff(path: Path) -> str:
+    """초안 파일에서 diff 본문만 꺼낸다 — frontmatter 를 markdown 으로 렌더하면
+    `---` 가 제목 문법으로 읽혀 헤더가 거대한 제목처럼 보인다."""
+
+    body = path.read_text(encoding="utf-8")
+    _, fence, rest = body.partition("```diff\n")
+    return rest.rpartition("```")[0].rstrip() if fence else ""
+
+
 # ── 자본 배분 (파이 데이터) ──
 
 

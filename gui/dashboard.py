@@ -43,10 +43,13 @@ from gui.panels import (  # noqa: E402
     load_observation,
     load_regime,
     market_health,
+    monthly_proposals,
     promoted_memories,
     read_recent_decisions,
     running_jobs,
     scenario_outcomes,
+    session_draft_diff,
+    session_proposals,
     treasury_dryrun_report,
     usage_report,
     veto_rows,
@@ -560,6 +563,7 @@ with tab_chat:
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []  # [{"role", "content", "cited_ids"?}]
         st.session_state.chat_session_id = None
+        st.session_state.chat_draft = None  # 마지막 제안초안 응답 (세션 종료 시 비운다)
 
     # 토론 결론은 시장 네임스페이스로 기록된다 — 고르지 않으면 KR 토론이 다른 시장의
     # 저널에 앉는다. 세션 시작 시점의 값만 쓰이므로 진행 중에는 바꿀 수 없다.
@@ -611,12 +615,31 @@ with tab_chat:
     # 것은 승격을 통과한 semantic·procedural 뿐이다. 저널은 사후 감사용 기록이다.
     if st.session_state.chat_session_id:
         st.divider()
-        if st.button("토론 마감 — 결론을 기록", type="primary"):
+        col_draft, col_close = st.columns(2)
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+        # 제안초안 — 마감과 달리 세션을 유지한다(초안을 보고 토론을 이어갈 수 있어야 한다).
+        if col_draft.button("제안초안 요청 — 플레이북 diff"):
+            try:
+                resp = httpx.post(
+                    f"{gateway}/discuss/propose",
+                    json={"session_id": st.session_state.chat_session_id},
+                    headers=headers,
+                    timeout=240,
+                )
+                st.session_state.chat_draft = (
+                    resp.json() if resp.status_code == 200
+                    else {"error": f"게이트웨이 오류 {resp.status_code}: {resp.text[:200]}"}
+                )
+            except httpx.HTTPError as e:
+                st.session_state.chat_draft = {"error": f"게이트웨이 연결 실패: {e}"}
+
+        if col_close.button("토론 마감 — 결론을 기록", type="primary"):
             try:
                 resp = httpx.post(
                     f"{gateway}/discuss/conclude",
                     json={"session_id": st.session_state.chat_session_id},
-                    headers={"Authorization": f"Bearer {token}"} if token else {},
+                    headers=headers,
                     timeout=120,
                 )
                 if resp.status_code == 200:
@@ -625,13 +648,32 @@ with tab_chat:
                     st.caption(data.get("note", ""))
                     # 게이트웨이가 세션을 지웠다 — 남겨두면 다음 질문이 죽은 id 를 보낸다.
                     st.session_state.chat_session_id = None
+                    st.session_state.chat_draft = None  # 다음 세션에 남의 초안이 뜨지 않게
                 else:
                     st.error(f"게이트웨이 오류 {resp.status_code}: {resp.text[:200]}")
             except httpx.HTTPError as e:
                 st.error(f"게이트웨이 연결 실패: {e}")
+
+        draft = st.session_state.get("chat_draft")
+        if draft:
+            if draft.get("error"):
+                st.error(draft["error"])
+            elif not (draft.get("diff") or "").strip():
+                # 설계된 결과다 — 억지로 diff 를 만들지 않는다. 실패와 구분해 보여준다.
+                st.info(f"변경 없음 — 이 토론은 플레이북 수정으로 이어지지 않았다. ({draft['path']})")
+            else:
+                if draft["applies"]:
+                    st.success(f"초안 생성 — `{draft['path']}`")
+                else:
+                    st.warning(f"초안 생성 — `{draft['path']}` · ⚠️ 현재 원문에 붙지 않는다: {draft['reason']}")
+                st.caption(draft.get("note", ""))
+                st.code(draft["diff"], language="diff")
+
         st.caption(
-            "마감하면 결론 요약이 이 시장의 episodic 저널에 남는다. 검증 교훈이 아니며 "
-            "결정에는 개입하지 않는다 — 승격은 admission 게이트를 따로 통과해야 한다."
+            "**초안**은 플레이북 변경안을 파일로 쓸 뿐 적용하지 않는다 — 대상 파일을 직접 "
+            "고칠 때만 반영된다. **마감**하면 결론 요약이 이 시장의 episodic 저널에 남는다. "
+            "둘 다 검증 교훈이 아니며 결정에는 개입하지 않는다 — 승격은 admission 게이트를 "
+            "따로 통과해야 한다."
         )
 
 
@@ -770,13 +812,46 @@ with tab_ops:
         factors = json.loads(lib_path.read_text(encoding="utf-8"))["factors"]
         st.dataframe(pd.DataFrame(factors), hide_index=True)
 
+    PROPOSALS = ROOT / "data" / "proposals"
+
     st.subheader("월간 self-improve 제안서 (승인은 코드/문서 경로로만)")
-    proposals = sorted((ROOT / "data" / "proposals").glob("*.md")) if (ROOT / "data" / "proposals").exists() else []
-    if proposals:
-        pick = st.selectbox("제안서", [p.name for p in proposals])
-        st.markdown((ROOT / "data" / "proposals" / pick).read_text(encoding="utf-8"))
+    monthly = monthly_proposals(PROPOSALS)
+    if monthly:
+        pick = st.selectbox("제안서", monthly)
+        st.markdown((PROPOSALS / pick).read_text(encoding="utf-8"))
     else:
         st.caption("아직 없음 — 매월 1일 21:00 자동 생성.")
+
+    st.subheader("세션 제안초안 (토론에서 나온 플레이북 diff)")
+    st.caption(
+        "챗 토론에서 뽑은 초안이다. 승격 통계가 아니라 **사람과의 대화**에서 나왔으므로 "
+        "위 월간 제안서와 출처가 다르다. 적용 경로는 없다 — 대상 파일을 직접 고칠 때만 "
+        "반영된다. grounding=none 은 대화가 인용한 근거 없이 나온 초안이라는 뜻이고, "
+        "applies=false 는 diff 가 현재 원문에 붙지 않는다는 뜻이다."
+    )
+    drafts = session_proposals(PROPOSALS)
+    if not drafts:
+        st.caption("아직 없음 — 챗 탭에서 토론 후 초안을 요청하면 생성된다.")
+    else:
+        st.dataframe(
+            pd.DataFrame([
+                {"파일": d["name"], "생성": d["created"][:16], "시장": d["market"],
+                 "근거": f"{d['grounding']}({d['n_cited']})",
+                 "적용가능": "✅" if d["applies"] else f"❌ {d['applies_reason'][:60]}",
+                 "적용됨": "✅" if d["applied"] else "—"}
+                for d in drafts
+            ]),
+            hide_index=True,
+            width="stretch",
+        )
+        draft = st.selectbox("초안", [d["name"] for d in drafts], key="session_draft")
+        row = next(d for d in drafts if d["name"] == draft)
+        st.caption(
+            f"대상 `{row['target']}` · 시장 {row['market'] or '-'} · 세션 `{row['session_id']}` · "
+            f"근거 {row['grounding']}({row['n_cited']}건)"
+            + ("" if row["applies"] else f" · ⚠️ 붙지 않음: {row['applies_reason']}")
+        )
+        st.code(session_draft_diff(PROPOSALS / draft) or "(diff 없음)", language="diff")
 
     st.subheader("에이전트 능력 갭 요구 (조달·배선은 사용자 경로로만)")
     st.caption(
