@@ -1,7 +1,8 @@
 """미국 주식 어댑터 — Alpaca Paper Trading.
 
 주문은 notional(달러 금액) 방식 — 가격 조회 없이 Δ평가액을 그대로 제출할 수 있어
-분할 주식(fractional) 포함 배분 정밀도가 높다. 데이터는 무료 IEX 피드 고정.
+분할 주식(fractional) 포함 배분 정밀도가 높다. 봉은 통합 피드(sip) 분할조정분 —
+관측 상한이 t-1 이라 무료 플랜의 15분 지연 제약 안에 들어간다.
 """
 
 from __future__ import annotations
@@ -73,7 +74,15 @@ class AlpacaPaperAdapter(MarketAdapter):
                 "timeframe": "1Day",
                 "start": f"{start.isoformat()}T00:00:00Z",
                 "end": f"{end.isoformat()}T23:59:59Z",
-                "feed": "iex",  # 무료 피드 (유료 데이터 미사용)
+                # 단일 거래소(iex)는 통합 거래량의 3% 남짓이고 그 점유율이 날마다
+                # 1~9% 로 흔들려, 거래량 파생 feature 가 표본 잡음에 덮인다. 통합
+                # 피드는 end 가 15분 이상 과거면 무료 플랜에서도 조회된다.
+                "feed": "sip",
+                # 기본값(raw)은 분할을 반영하지 않아, 분할일이 창에 들어오면 -90% 짜리
+                # 가짜 급락이 만들어진다. split 은 가격과 거래량을 함께 조정한다.
+                # 배당까지 조정하면(all) 종가가 실제 체결가와 어긋나는데, 이 종가는
+                # 예산 제약의 단가로 쓰이므로 분할까지만 조정한다.
+                "adjustment": "split",
                 "limit": 1000,
             },
         )

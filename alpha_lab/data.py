@@ -124,7 +124,7 @@ async def fetch_us_panel(
     asof_day: date | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> tuple[dict[str, np.ndarray], list[str], list[date]]:
-    """Alpaca 무료 IEX 일봉 → (panel, symbols, dates). 상한 t-1(진행 중 당일 봉 제외).
+    """Alpaca 통합 피드 일봉(분할조정) → (panel, symbols, dates). 상한 t-1(당일 봉 제외).
 
     봉 스키마 t/o/h/l/c/v/n/vw 중 vw(VWAP)·n(체결수)까지 캡처 — 유동성 신호용.
     2년 일봉은 종목당 ~500봉(< limit)이라 페이지네이션 불필요 — 종목별 1회 조회.
@@ -148,7 +148,13 @@ async def fetch_us_panel(
                     "timeframe": "1Day",
                     "start": f"{start.isoformat()}T00:00:00Z",
                     "end": f"{end.isoformat()}T23:59:59Z",
-                    "feed": "iex",  # 무료 피드 (유료 데이터 미사용)
+                    # 단일 거래소(iex) 거래량은 통합의 3% 남짓이라 유동성 신호가
+                    # 표본 잡음 위에 올라간다. 통합 피드도 end 가 15분 이상 과거면
+                    # 무료 플랜 권한 안이고, 이 창은 상한이 t-1 이라 항상 해당한다.
+                    "feed": "sip",
+                    # 2년 창에는 분할이 들어올 수 있다. 기본값(raw)이면 그 자리에
+                    # -90% 짜리 가짜 수익률이 생겨 IC 가 통째로 오염된다.
+                    "adjustment": "split",
                     "limit": 10000,
                 },
             )
