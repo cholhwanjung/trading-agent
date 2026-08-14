@@ -3,8 +3,8 @@
 두 채널을 별개로 둔다.
   1. **공시 이벤트** — 유니버스 종목의 접수 공시를 '구조화 이벤트'(보고서명 + 접수일)로
      NewsItem 에 매핑한다. 관측 리스트는 뉴스와 공유하지만(윈도우 판정이 같다) 프롬프트
-     에서는 별도 채널로 나뉜다. rich 리포트 본문은 주입하지 않는다. 상시 접수되는 잡음
-     보고서는 여기서 걸러 상한을 재료성 공시가 쓰게 한다.
+     에서는 별도 채널로 나뉜다. rich 리포트 본문은 주입하지 않는다. 상시 접수되는 배경
+     보고서는 버리지 않고 **뒤로 미뤄** 상한을 재료성 공시가 먼저 쓰게 한다.
   2. **재무** — 단일회사 전체 재무제표에서 손익 누적 구간과 재무상태표 시점값을 뽑는다.
      TTM 산식·비율 계산은 여기서 하지 않는다(순수 모듈이 맡는다).
 
@@ -38,16 +38,31 @@ STOCK_TO_CORP: dict[str, str] = {
 }
 
 
-# 상시 배경 잡음 보고서 — 보고서명 부분일치로 거른다([기재정정] 접두어도 함께 걸린다).
-# 임원·주요주주 개인의 지분 변동 보고는 대형주에서 거의 매일 접수되는데(실측: 한 주 38건
-# 중 25건), 접수일 정렬이라 실적·투자·배당 같은 재료성 공시를 상한 밖으로 밀어낸다.
-# 5% 룰의 대량보유상황보고서는 지배구조 재료라 남긴다 — 이름이 달라 여기 걸리지 않는다.
-_NOISE_REPORTS: tuple[str, ...] = ("특정증권등소유상황보고서",)
+# 상시 배경 보고서 — 보고서명 부분일치로 판정한다([기재정정] 접두어도 함께 걸린다).
+# 두 계열이다. ① 지분 변동 신고 — 임원·주요주주 개인 보고는 대형주에서 거의 매일 접수된다
+# (실측: 30일 창 165건 중 107건). ② 공정거래·하도급법상 정기 의무공시 — 내부거래·대금
+# 지급조건·자율준수 운영현황처럼 접수 주기가 사업 실적과 무관하다(실측: 같은 창 15건).
+# 둘 다 접수일 정렬에서 실적·투자·배당을 상한 밖으로 밀어낸다.
+#
+# 버리지 않고 뒤로 미루는 이유: 문제는 배경 공시의 존재가 아니라 그것이 상한 슬롯을
+# 먼저 차지하는 것이다. 제거는 판정이 틀렸을 때 되돌릴 수 없고(관측 스냅샷에도 안 남아
+# 사후 감사가 불가능하다) 재료성 판단이 애매한 종류마다 넣을지 말지를 정해야 한다.
+# 강등이면 재료성 공시가 상한을 채우는 날에는 자연히 밀려나고, 조용한 날에는 그대로 들어온다.
+# 5% 룰의 대량보유상황보고서는 지배구조 재료라 배경이 아니다 — 이름이 달라 걸리지 않는다.
+_BACKGROUND_REPORTS: tuple[str, ...] = (
+    "특정증권등소유상황보고서",
+    "최대주주등소유주식변동신고서",
+    "특수관계인",
+    "동일인등출자계열회사",
+    "지급수단별",
+    "공정거래자율준수프로그램",
+    "약관에의한금융거래",
+)
 
 
-def _is_material(report_nm: str) -> bool:
-    """잡음 보고서명이 아니면 True — 확실한 잡음만 제거하고 미등록 종류는 통과시킨다."""
-    return not any(noise in report_nm for noise in _NOISE_REPORTS)
+def _is_background(report_nm: str) -> bool:
+    """상시 배경 보고서면 True — 등록된 종류만 강등하고 미등록은 재료성으로 남긴다."""
+    return any(name in report_nm for name in _BACKGROUND_REPORTS)
 
 
 def _to_news(row: dict) -> NewsItem | None:
@@ -75,10 +90,14 @@ async def fetch_dart_disclosures(
     client: httpx.AsyncClient | None = None,
     max_items: int = 30,
 ) -> list[NewsItem]:
-    """유니버스 종목의 [start, end] 접수 공시를 NewsItem 으로. corp_code 미매핑 종목은 스킵."""
+    """유니버스 종목의 [start, end] 접수 공시를 NewsItem 으로. corp_code 미매핑 종목은 스킵.
+
+    정렬은 (재료성 우선 → 접수일 최신순) 2단이다. 소비자가 앞에서 잘라 쓰므로 상시
+    배경 보고서를 뒤로 미뤄야 상한이 재료성 공시로 채워진다.
+    """
     own = client is None
     client = client or httpx.AsyncClient(timeout=TIMEOUT)
-    out: list[NewsItem] = []
+    ranked: list[tuple[int, NewsItem]] = []
     try:
         for symbol in symbols:
             corp = STOCK_TO_CORP.get(symbol)
@@ -102,16 +121,15 @@ async def fetch_dart_disclosures(
             if data.get("status") not in ("000", "013"):  # 013 = 데이터 없음(정상)
                 continue
             for row in data.get("list") or []:
-                if not _is_material(row.get("report_nm") or ""):
-                    continue
                 item = _to_news(row)
                 if item and start <= item.published_at.date() <= end:
-                    out.append(item)
+                    tier = 1 if _is_background(row.get("report_nm") or "") else 0
+                    ranked.append((tier, item))
     finally:
         if own:
             await client.aclose()
-    out.sort(key=lambda n: n.published_at, reverse=True)
-    return out[:max_items]
+    ranked.sort(key=lambda t: (t[0], -t[1].published_at.timestamp()))
+    return [item for _, item in ranked[:max_items]]
 
 
 # ── 재무 ──
