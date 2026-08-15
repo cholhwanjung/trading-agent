@@ -2,7 +2,12 @@
 
 from memory.admission import promote_candidates, review_probation, sign_test_p
 from memory.influence import blend_allocations, lesson_confidence, lessons_payload
-from memory.journal import fill_pending_outcomes, pattern_key, record_decision
+from memory.journal import (
+    fill_pending_outcomes,
+    pattern_key,
+    record_decision,
+    record_unexecuted,
+)
 from memory.retention import review_retention
 from memory.retrieval import ScoredMemory, build_query_text, retrieve
 from memory.store import MemoryEntry, MemoryStore
@@ -19,6 +24,7 @@ __all__ = [
     "pattern_key",
     "promote_candidates",
     "record_decision",
+    "record_unexecuted",
     "retrieve",
     "review_probation",
     "review_retention",

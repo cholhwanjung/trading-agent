@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from datetime import date
 from pathlib import Path
 
+from adapters.allocation import CASH
 from adapters.base import Observation, Position
 from adapters.retry import with_retry
 from harness.policy import Policy
@@ -22,6 +24,67 @@ from risk.engine import RiskEngine
 # 시점에는 관측·결정이 이미 끝나 있어 기다리는 비용이 낮다. 대기 5+10+20 = 35초.
 EQUITY_ATTEMPTS = 4
 EQUITY_BASE_DELAY = 5.0
+
+# 투자된 부분이 하루에 움직일 수 있는 최대 등락률. 국내 제한폭이 ±30% 라 분산된 보유가
+# 하루에 그보다 크게 움직이기는 어렵다.
+MAX_DAILY_MOVE = 0.35
+# 손익으로 설명되지 않아도 입출금으로 보지 않는 하한(평가액 대비). 수수료·거래세·평가
+# 반올림이 여기 들어간다 — 전액 현금이면 설명 가능한 변동이 0 이 되어, 이 하한이 없으면
+# 몇 백 원짜리 잔돈이 매번 입출금으로 잡힌다.
+MIN_FLOW_RATIO = 0.005
+
+
+def detect_cash_flow(
+    prev_equity: float | None,
+    equity: float | None,
+    invested: float = 1.0,
+    days: int = 1,
+) -> float:
+    """평가액 변화 중 시장 변동으로 설명되지 않는 부분 → 외부 입출금 추정(없으면 0).
+
+    상한을 평가액 전체가 아니라 **투자된 몫**에만 건다. 현금은 시장으로 움직이지 않으므로,
+    평가액 전체에 상한을 걸면(≈35%) 서킷 임계(15%)보다 큰 상한이 되어 정작 서킷을 오발동
+    시킬 크기의 출금이 전부 상한 안에 숨는다. invested 는 직전 목표 배분의 비현금 비중이라
+    통화 단위가 없다 — 시장마다 보유 평가액과 평가액의 통화가 다를 수 있어(해외는 보유가
+    USD, 평가액은 원화 총자산) 금액으로 비교하면 단위가 섞인다.
+
+    목표 배분이라 실제 체결보다 클 수 있는데, 그쪽이 상한을 넓혀 놓치는 방향이라 안전하다.
+    오차의 두 방향은 위험도가 다르다 — 입출금을 손익으로 놓치면 고점이 보정되지 않아 서킷이
+    보수적으로(일찍) 작동할 뿐이지만, 반대로 손익을 입출금으로 읽으면 진짜 낙폭이 고점
+    보정에 지워져 서킷이 침묵한다.
+
+    days 는 직전 스텝과의 간격이다. 주말·휴장으로 며칠 벌어지면 시장이 움직일 여지도 그만큼
+    커지므로, 하루치 상한을 그대로 쓰면 연휴 뒤의 큰 등락이 입출금으로 오인된다.
+    """
+    if prev_equity is None or equity is None:
+        return 0.0
+    delta = equity - prev_equity
+    move = max(invested, 0.0) * MAX_DAILY_MOVE * max(days, 1)
+    explainable = abs(prev_equity) * max(move, MIN_FLOW_RATIO)
+    return delta if abs(delta) > explainable else 0.0
+
+
+def adjust_peak(peak: float | None, prev_equity: float | None, equity: float) -> float:
+    """외부 입출금이 있었던 날의 평가액 고점 재기준. 낙폭 **비율**을 보존한다.
+
+    고점에 입금액을 더하는 방식(가산)은 입금이 기존 낙폭을 치유해버린다 — 1000만이 800만이
+    된 상태(낙폭 20%)에서 1000만을 넣으면 낙폭이 11% 로 줄어 서킷이 침묵한다. 같은 배율로
+    고점을 옮기면 낙폭 비율이 그대로 남아, 외부 자금 이동에 불변인 MDD 의 정의와 맞는다.
+
+    직전 평가액이 0 이면 배율이 정의되지 않는다 — 고점 이력이 없는 첫 입금이므로 입금액을
+    그대로 새 고점으로 삼는다.
+    """
+    if peak and prev_equity and prev_equity > 0:
+        return peak * equity / prev_equity
+    return equity
+
+
+def _elapsed_days(prev_day: str | None, asof_day: date | None) -> int:
+    """직전 스텝과의 간격(일). 기록이 없거나 읽을 수 없으면 1 일로 본다(가장 좁은 상한)."""
+    try:
+        return max((asof_day - date.fromisoformat(prev_day)).days, 1)
+    except (TypeError, ValueError):
+        return 1
 
 
 def account_fingerprint(adapter: object) -> str:
@@ -125,9 +188,23 @@ class RiskGuardedPolicy:
                 )
             except Exception as e:
                 equity_error = f"{type(e).__name__}: {str(e)[:200]}"
+        # 외부 입출금은 손익이 아니다 — 고점을 그대로 두면 출금이 곧 낙폭으로 계상돼
+        # 손실 없이도 서킷이 터지고, 입금은 고점을 부풀려 이후 진짜 하락에 서킷이 일찍
+        # 터진다. 감지되면 고점을 재기준하고 그 사실을 결정 메타에 남긴다(사후 감사).
         peak = state.get("peak_equity")
-        mdd = 0.0
+        prev_equity = state.get("prev_equity")
+        asof_day = getattr(obs, "asof_day", None)
+        prev_cash = (state.get("prev_weights") or {}).get(CASH)
+        mdd, cash_flow = 0.0, 0.0
         if equity is not None:
+            cash_flow = detect_cash_flow(
+                prev_equity,
+                equity,
+                1.0 - prev_cash if prev_cash is not None else 1.0,
+                _elapsed_days(state.get("prev_day"), asof_day),
+            )
+            if cash_flow:
+                peak = adjust_peak(peak, prev_equity, equity)
             peak = max(peak or equity, equity)
             mdd = 1.0 - equity / peak if peak > 0 else 0.0
 
@@ -147,11 +224,16 @@ class RiskGuardedPolicy:
             "equity": equity,
             "equity_error": equity_error,  # None 아니면 브로커 조회 실패 — 실주문 스킵 사유
             "mdd": round(mdd, 4),
+            "cash_flow": round(cash_flow, 2) or None,  # 감지된 외부 입출금(없으면 None)
         }
         self._save_state(
             {
                 "prev_weights": decision.weights,
                 "peak_equity": peak if peak is not None else equity,
+                # 다음 스텝의 입출금 감지 기준. 평가액을 못 읽은 날은 직전 값을 유지해야
+                # 한다 — None 으로 덮으면 브로커 장애 하루가 감지 기준선을 지워버린다.
+                "prev_equity": equity if equity is not None else prev_equity,
+                "prev_day": str(asof_day) if asof_day else state.get("prev_day"),
                 "account_key": self.account_key,
             }
         )

@@ -130,6 +130,49 @@ def _record_counterfactual(
     )
 
 
+def record_unexecuted(
+    store: MemoryStore,
+    market: str,
+    day: date,
+    weights: dict[str, float],
+    prev_weights: dict[str, float] | None,
+    features: dict[str, dict | None],
+    decision_meta: dict,
+    prices: dict[str, float],
+    reason: str,
+) -> str | None:
+    """집행이 불가능했던 날의 원안을 counterfactual 로 남긴다 — episodic 이 아니다.
+
+    계좌에 자금이 없거나 1 건 상한에 막혀 한 주도 담지 못한 날, 체결 배분은 전액 현금으로
+    나온다. 그것을 episodic 으로 남기면 '에이전트가 현금을 선택했다'는 기록이 되어 내리지
+    않은 결정에 성적이 매겨지고, 다음 날 직전 배분까지 그 값으로 오염된다. 배분과 기준가만
+    있으면 '그 배분이었다면'의 초과수익은 정의되므로 신호 자체는 반사실로 보존한다.
+
+    episodic 을 남기지 않으므로 직전 배분 사슬은 마지막으로 **실제 집행된** 날에 머문다.
+    그 사이가 비는 건 맞지만, 없던 결정을 지어내는 것보다 낫다.
+    """
+    if store.query(market, store="counterfactual", day=day):
+        return None
+    key = pattern_key(features, weights, prev_weights)
+    return store.add(
+        market,
+        "counterfactual",
+        day,
+        f"[{market} {day}] {key} — 미집행({reason}) 원안 "
+        f"{ {k: round(v, 2) for k, v in weights.items()} }",
+        data={
+            "weights": weights,
+            "prev_weights": prev_weights,
+            "prices": prices,
+            "features": features,
+            "unexecuted": reason,
+            "cited_signal_ids": decision_meta.get("cited_signal_ids", []),
+            "cited_memory_ids": decision_meta.get("cited_memory_ids", []),
+        },
+        pattern_key=key,
+    )
+
+
 def fill_pending_outcomes(
     store: MemoryStore, market: str, prices_now: dict[str, float], today: date
 ) -> list[tuple[str, float]]:

@@ -52,6 +52,7 @@ from memory import (  # noqa: E402
     lessons_payload,
     promote_candidates,
     record_decision,
+    record_unexecuted,
     retrieve,
     review_probation,
     review_retention,
@@ -120,6 +121,57 @@ def load_prev_weights(state_path: Path) -> dict[str, float] | None:
     if state_path.exists():
         return json.loads(state_path.read_text(encoding="utf-8")).get("prev_weights")
     return None
+
+
+def execution_stall(outcome: object, meta: dict) -> str | None:
+    """집행이 막힌 사유. None 이면 집행됐거나 애초에 낼 주문이 없었다(정상).
+
+    '주문 0건'은 최소 네 상태를 뭉갠다 — 이미 목표 배분이라 낼 게 없었던 정상, 계좌에
+    자금이 없어 못 낸 것, 1 건 명목 상한에 막혀 통째로 보류된 것, 예산·거래단위에 걸린 것.
+    앞의 하나만 정상인데 넷 다 ok 로 보고돼 왔다. 판정 재료(평가액·보류 사유)는 이미 결정
+    메타와 주문 결과에 들어 있었고, 상태로 합쳐지지 않아 소비되지 않고 있었을 뿐이다.
+    """
+    # 상한에 걸려 스킵된 주문도 orders 에 남는다(`skipped` 키). 그것까지 세면 한 건도 못 낸
+    # 날이 정상으로 읽히므로, 실제로 제출된 것만 센다.
+    if any(not o.get("skipped") for o in getattr(outcome, "orders", None) or []):
+        return None  # 한 건이라도 나갔으면 계좌가 참여하고 있다
+    equity = meta.get("equity")
+    if equity is not None and equity <= 0:
+        return "unfunded"  # 자금이 없으면 어떤 배분도 표현할 수 없다
+    reasons = set((getattr(outcome, "dropped", None) or {}).values())
+    if any(r.startswith("over_order_cap") for r in reasons):
+        # 목표 비중은 다음 날도 같으므로 매일 같은 자리에서 보류된다 — 조용한 영구 정지
+        return "order_cap_blocked"
+    if reasons:
+        return "budget_short"
+    return None
+
+
+def track_stall(path: Path, reason: str | None, today: date) -> tuple[bool, int]:
+    """집행 정지 상태를 영속하고 (사유가 바뀌었는가, 며칠째인가) 를 돌려준다.
+
+    바뀔 때만 통지하기 위한 상태다. 미집행은 고쳐질 때까지 매일 재현되므로 매일 밀어내면
+    금세 무시하게 되고, 무시되는 경보는 없는 것과 같다.
+    """
+    prev = {}
+    if path.exists():
+        try:
+            prev = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            prev = {}
+    changed = prev.get("reason") != reason
+    since = today
+    if not changed:
+        try:
+            since = date.fromisoformat(prev.get("since", ""))
+        except (TypeError, ValueError):
+            since = today
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"reason": reason, "since": str(since)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return changed, (today - since).days + 1
 
 
 def last_recorded_weights(memory: MemoryStore, market: str) -> dict[str, float] | None:
@@ -425,8 +477,13 @@ async def run_memory_pipeline(
     prices: dict,
     router: LLMRouter,
     logger: JsonlLogger,
+    unexecuted: str | None = None,
 ) -> None:
-    """결과 소급 기입 → 오늘 결정 기록 → admission → probation → retention → 주간 reflection."""
+    """결과 소급 기입 → 오늘 결정 기록 → admission → probation → retention → 주간 reflection.
+
+    unexecuted 가 있으면 그날은 집행이 막힌 날이라, 결정을 episodic 이 아니라 counterfactual
+    로 남긴다 — 승격 통계가 '계좌가 못 산 날'을 '현금을 고른 날'로 세지 않게.
+    """
     for entry_id, outcome in fill_pending_outcomes(memory, market, prices, today):
         logger.log(market, "memory_outcome", {"id": entry_id, "outcome": round(outcome, 5)})
     if llm_weights and decision_meta:
@@ -445,12 +502,20 @@ async def run_memory_pipeline(
             s: f for s, f in (decision_meta.get("features") or {}).items()
             if asset_class(s) != ETF
         }
-        entry_id = record_decision(
-            memory, market, today, llm_weights, prev_weights,
-            key_features, decision_meta, prices, embedding=embedding,
-        )
-        if entry_id:
-            logger.log(market, "memory_record", {"id": entry_id})
+        if unexecuted:
+            entry_id = record_unexecuted(
+                memory, market, today, llm_weights, prev_weights,
+                key_features, decision_meta, prices, unexecuted,
+            )
+            if entry_id:
+                logger.log(market, "memory_unexecuted", {"id": entry_id, "reason": unexecuted})
+        else:
+            entry_id = record_decision(
+                memory, market, today, llm_weights, prev_weights,
+                key_features, decision_meta, prices, embedding=embedding,
+            )
+            if entry_id:
+                logger.log(market, "memory_record", {"id": entry_id})
     for event in promote_candidates(memory, market, today):
         logger.log(market, "memory_admission", event)
     for event in review_probation(memory, market, today):
@@ -568,6 +633,8 @@ async def main() -> int:
         # 관측 스냅샷 영속화(시각화·감사) — 순수 append, 결정/리스크 미개입
         results = await run_all_markets(runs, logger, snapshot_dir=STATE_DIR / "observations")
         exit_code = 0
+        today = datetime.now(timezone.utc).date()
+        stalls: dict[str, str | None] = {}  # 시장별 집행 정지 사유 — 메모리 기록 분기에 재사용
         for market, outcome in results.items():
             # 실자금 시장(mode=real)만 push 대상 — 페이퍼 실패는 로그로 족하다.
             is_live = getattr(adapters[market][0], "mode", None) == "real"
@@ -583,8 +650,13 @@ async def main() -> int:
                 # closed = 장 마감(주말·공휴일)으로 인한 거부. 체결될 주문이 없었을 뿐이라
                 # 실패가 아니다 — 종료코드도 통지도 올리지 않는다.
                 closed = is_market_closed_error(outcome.error)
+                # 주문이 수리(accepted)돼도 한 건도 못 낸 날이 있다 — 자금 없음·상한 초과·
+                # 예산 부족. 종전엔 전부 ok 였고, 그래서 실계좌가 며칠씩 놀아도 성공으로
+                # 보고됐다. 집행 여부는 아래 메모리 기록 분기에서도 다시 쓰인다.
+                stall = execution_stall(outcome, meta) if outcome.accepted else None
+                stalls[market] = stall
                 if outcome.accepted:
-                    status = "ok"
+                    status = "ok" if stall is None else f"stalled:{stall}"
                 elif closed:
                     status = "closed"
                 elif degraded:
@@ -598,6 +670,30 @@ async def main() -> int:
                     f" mdd={meta.get('mdd')}"
                     + (f" error={outcome.error}" if outcome.error else "")
                 )
+                if meta.get("cash_flow"):
+                    # 외부 입출금 감지 — 평가액 고점이 재기준됐다. 손익이 아니라 자금 이동이
+                    # 원인이라는 근거를 남겨야 나중에 MDD 이력을 감사할 수 있다.
+                    logger.log(market, "cash_flow", {
+                        "amount": meta["cash_flow"], "equity": meta.get("equity"),
+                    })
+                    print(f"market={market} cash_flow={meta['cash_flow']:+,.0f}"
+                          f" equity={meta.get('equity'):,.0f}")
+                if outcome.accepted:
+                    changed, days = track_stall(
+                        STATE_DIR / f"stall_{market}.json", stall, today
+                    )
+                    if stall:
+                        exit_code = 1
+                        logger.log(market, "execution_stall", {
+                            "reason": stall, "days": days, "dropped": outcome.dropped,
+                        })
+                        print(f"market={market} execution_stall={stall} days={days}")
+                        # 사유가 바뀔 때만 통지 — 매일 밀어내면 무시하게 된다.
+                        if is_live and changed:
+                            await notify(
+                                env, f"{market} 집행 정지",
+                                f"{stall} — 주문 0건, dropped={outcome.dropped}",
+                            )
                 if not outcome.accepted and not closed:
                     exit_code = 1
                     if is_live:
@@ -607,7 +703,6 @@ async def main() -> int:
                     await notify(env, f"{market} 실계좌 MDD 서킷", f"mdd={meta.get('mdd')}")
 
         # 가상 병행 운용 + 메모리 파이프라인 (실스텝 성공 여부와 무관하게 baseline 은 쌓인다)
-        today = datetime.now(timezone.utc).date()
         for market, (adapter, symbols) in adapters.items():
             guard = guards[market]
             llm_weights = None
@@ -764,11 +859,18 @@ async def main() -> int:
             # 최소 주문·명목 상한에 막혀 한 주도 못 산 종목의 등락이 그 결정의 공으로
             # 잡힌다 — 보유한 적 없는 포트폴리오에서 교훈을 승격시키는 셈이다.
             # 어댑터가 체결 배분을 못 주면(구현 전·주문 스킵) 의도로 물러선다.
+            #
+            # 단, 집행이 **막힌** 날은 체결 배분(전액 현금)이 결정이 아니다 — 계좌가 참여하지
+            # 못했을 뿐인데 그걸 기록하면 에이전트가 현금을 골랐다는 기록이 된다. 그런 날은
+            # 원안을 반사실로만 남긴다(아래 unexecuted).
+            stall = stalls.get(market)
             try:
                 await run_memory_pipeline(
-                    memory, market, today, executed_weights or llm_weights,
+                    memory, market, today,
+                    llm_weights if stall else (executed_weights or llm_weights),
                     prev_weights_by_market[market],
                     guard.last_decision, prices, router, logger,
+                    unexecuted=stall,
                 )
             except Exception as e:
                 logger.log(market, "memory_error", {"error_type": type(e).__name__, "error": str(e)[:200]})
