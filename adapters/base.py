@@ -131,6 +131,32 @@ class OrderResult:
     #: 닿으면 주문이 나가도 체결되지 않는데, 그 사실이 결과에 남지 않으면 나중에 미체결의
     #: 원인을 거래단위·예산 문제와 구분할 수 없다. 상태를 제공하지 않는 시장은 빈 dict.
     quote_status: dict[str, dict] = field(default_factory=dict)
+    #: 집행가와 관측 마지막 종가의 괴리(symbol -> 비율). 결정은 t-1 관측으로 내리고
+    #: 집행은 당일 가격으로 하므로 그 사이의 이동은 결정이 보지 못한 변화다. 지금은
+    #: 계측만 한다 — 얼마나 자주 얼마나 크게 벌어지는지 모른 채 임계를 정하면 그 임계가
+    #: 근거 없는 값이 된다. 현재가를 쓰지 않는 시장(금액 주문)은 빈 dict.
+    price_gap: dict[str, float] = field(default_factory=dict)
+
+
+#: 집행가 타당성 상한. 이만큼 벗어난 값은 시세가 아니라 오류로 본다 — 잘못된 틱,
+#: 심볼 뒤바뀜, 단위 착오. 하루에 이만큼 실제로 움직이는 일보다 그쪽이 흔하고, 틀린
+#: 가격으로 수량을 계산하면 의도한 금액의 몇 배가 주문된다. 갭의 크기를 판정하려는
+#: 값이 아니라 명백한 오류만 걸러내는 하한선이라 느슨하게 잡는다.
+MAX_EXECUTION_GAP = 0.5
+
+
+def execution_gaps(ref_closes: dict[str, float], prices: dict[str, float]) -> dict[str, float]:
+    """집행가 / 관측 마지막 종가 − 1. 기준 종가가 없는 종목은 뺀다(모르면 판정하지 않는다)."""
+    return {
+        symbol: round(price / ref - 1.0, 6)
+        for symbol, price in prices.items()
+        if price and (ref := ref_closes.get(symbol))
+    }
+
+
+def price_outliers(gaps: dict[str, float]) -> dict[str, float]:
+    """타당 범위를 벗어난 집행가. 비어 있지 않으면 그 가격 묶음 전체를 쓰지 않는다."""
+    return {s: g for s, g in gaps.items() if abs(g) > MAX_EXECUTION_GAP}
 
 
 # 브로커가 "장이 닫혀 있다"는 뜻으로 돌려주는 거부 문구. 브로커마다 표현이 달라
@@ -389,6 +415,11 @@ class MarketAdapter(ABC):
         assert_no_leakage(obs)
         return obs
 
+    #: 관측 마지막 종가(t-1). 집행가 타당성 판정의 기준값이며 observe 가 채운다.
+    #: 관측 없이 주문하는 경로에서는 비어 있고, 그때는 판정을 건너뛴다 — 기준이 없는데
+    #: 정상이라고 단정하지도, 이상하다고 막지도 않는다.
+    _ref_closes: dict[str, float] = {}
+
     async def observe(self, symbols: list[str], asof_day: date | None = None) -> Observation:
         """get_ohlcv + get_news 를 묶어 감사 가능한 Observation 으로 반환.
 
@@ -401,6 +432,7 @@ class MarketAdapter(ABC):
         financials = await self.get_financials(symbols, asof_day)
         index_valuation = await self.get_index_valuation(asof_day)
         etf_nav = await self.get_etf_nav(symbols, asof_day)
+        self._ref_closes = {s: b[-1].close for s, b in bars.items() if b}
         return Observation(
             market=self.market,
             asof_day=asof_day,

@@ -30,7 +30,16 @@ from adapters.allocation import (
     project_to_executable,
     weights_from_quantities,
 )
-from adapters.base import Bar, MarketAdapter, NewsItem, OrderResult, Position, observation_window
+from adapters.base import (
+    Bar,
+    MarketAdapter,
+    NewsItem,
+    OrderResult,
+    Position,
+    execution_gaps,
+    observation_window,
+    price_outliers,
+)
 from adapters.retry import with_retry
 from adapters.universe import ETF, asset_class
 
@@ -575,6 +584,15 @@ class KISDomesticAdapter(MarketAdapter):
             held_qty = {p.symbol: p.quantity for p in self._parse_positions(data)}
             quotes = {s: await self._quote(s) for s in self.universe}
             prices = {s: q.price for s, q in quotes.items()}
+            # 집행가 타당성 — 오류값 하나가 평가액 합계를 통해 다른 종목의 목표 수량까지
+            # 흔들기 때문에, 그 종목만 빼는 것이 아니라 주문 전체를 접는다.
+            gaps = execution_gaps(self._ref_closes, prices)
+            outliers = price_outliers(gaps)
+            if outliers:
+                return OrderResult(
+                    market=self.market, submitted_at=now, accepted=False,
+                    error=f"price_outlier {outliers}", price_gap=gaps,
+                )
             # 주문 시점의 종목 상태를 감사 로그로 넘긴다. **아직 주문을 막지는 않는다** —
             # 판정이 실거래를 자르기 전에 라이브에서 무엇이 얼마나 잡히는지 먼저 본다.
             # 코드값은 정상일 때도 남긴다(값 표가 없어 분포부터 모아야 한다).
@@ -627,6 +645,7 @@ class KISDomesticAdapter(MarketAdapter):
                 executed_weights=weights_from_quantities(final_qty, prices, equity),
                 dropped=plan.dropped,
                 quote_status=quote_status,
+                price_gap=gaps,
             )
         except Exception as e:  # 주문 실패는 예외가 아니라 결과로 — 러너가 로그로 남긴다
             return OrderResult(

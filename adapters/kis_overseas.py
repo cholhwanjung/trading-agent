@@ -35,8 +35,10 @@ from adapters.base import (
     NewsItem,
     OrderResult,
     Position,
+    execution_gaps,
     observation_window,
     off_session_weekday,
+    price_outliers,
 )
 from adapters.kis import PAPER_BASE, REAL_BASE, KISSession, paginate_daily
 
@@ -386,6 +388,16 @@ class KISOverseasAdapter(MarketAdapter):
             holdings = {p.symbol: p.market_value for p in positions}
             qty_held = {p.symbol: p.quantity for p in positions}
             prices = await self.get_current_prices(self.universe)
+            # 집행가 타당성 — 한 종목이라도 오류값이면 그 종목만이 아니라 주문 전체를
+            # 접는다. 가격은 평가액 합계에도 들어가 다른 종목의 목표 수량까지 흔들기
+            # 때문에, 틀린 값 하나가 그 묶음 전체를 못 믿을 것으로 만든다.
+            gaps = execution_gaps(self._ref_closes, prices)
+            outliers = price_outliers(gaps)
+            if outliers:
+                return OrderResult(
+                    market=self.market, submitted_at=now, accepted=False,
+                    error=f"price_outlier {outliers}", price_gap=gaps,
+                )
             # 통합증거금 매수여력(USD) — 유니버스 대표 1종 기준(금액은 계좌 단위)
             cash = await self._buying_power(self.universe[0], prices[self.universe[0]])
             pending = await self._pending_symbols()
@@ -451,6 +463,7 @@ class KISOverseasAdapter(MarketAdapter):
                 orders=orders,
                 executed_weights=weights_from_quantities(final_qty, prices, total),
                 dropped=plan.dropped,
+                price_gap=gaps,
             )
         except Exception as e:  # 주문 실패는 예외가 아니라 결과로 — 러너가 로그로 남긴다
             return OrderResult(

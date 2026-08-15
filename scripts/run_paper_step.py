@@ -644,6 +644,19 @@ async def main() -> int:
                     if notable:
                         print(f"market={market} quote_status={notable}")
 
+                # 결정가와 집행가의 거리 (shadow) — 계산·로깅만, 주문 차단 없음. 결정은
+                # t-1 관측으로 내리고 집행은 당일 가격으로 하므로 그 사이의 이동은 결정이
+                # 보지 못한 변화다. 얼마나 자주 얼마나 크게 벌어지는지 먼저 센다 —
+                # 분포를 모르고 임계를 정하면 그 임계가 근거 없는 값이 된다.
+                price_gap = getattr(outcome, "price_gap", None) or {}
+                if price_gap:
+                    worst = max(price_gap.items(), key=lambda kv: abs(kv[1]))
+                    logger.log(market, "execution_gap", {
+                        "gaps": price_gap,
+                        "worst_symbol": worst[0], "worst_gap": worst[1],
+                    })
+                    print(f"market={market} exec_gap_worst={worst[0]}:{worst[1]:+.4f}")
+
             prices, day = await fetch_prices(adapter, symbols)
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)
 

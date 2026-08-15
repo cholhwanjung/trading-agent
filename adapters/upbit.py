@@ -130,6 +130,9 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
             )
         try:
             cash, _, qty, prices = await self._snapshot()
+            # 집행가 타당성 검사는 여기에 두지 않는다 — 관측은 USDT, 체결가는 KRW 라
+            # 두 값의 비는 환율이지 괴리가 아니다. 통화가 갈린 채로 비교하면 정상 주문이
+            # 전부 오류로 걸린다. 검사하려면 먼저 환율로 같은 단위에 올려야 한다.
             # 분수 거래라 lot 제약이 없다 — 잘려나가는 건 최소 주문(5,000원)과 1회 상한뿐.
             plan = project_to_executable(
                 weights, qty, cash, prices,
