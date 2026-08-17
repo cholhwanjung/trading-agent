@@ -55,11 +55,16 @@ HISTORY_MAX_PAGES = 12  # 장기 조회 페이지 상한(1회 ~100행 → ~1200�
 # 현재가 응답에서 '지금 이 종목에 주문이 닿는가'를 말해주는 필드들. 시세 조회 한 번에
 # 같이 실려오므로 추가 호출이 없다 — 종전엔 체결가만 꺼내고 전부 버렸다.
 #
-# 판정하는 것과 기록만 하는 것을 나눈다. `_yn` 접미사 필드는 Y/N 이 자명하고 제한폭은
-# 산수라 판정할 수 있지만, 구분코드들은 값 표를 확보하지 못했다 — 정상 거래 중인 유니버스
-# 4종을 실제로 조회해 보니 iscd_stat_cls_code 가 "55", vi_cls_code 가 "N" 으로 왔다.
+# 판정하는 것과 기록만 하는 것을 나눈다. 구분코드들은 값 표를 확보하지 못했다 — 정상 거래
+# 중인 유니버스 4종을 조회하니 iscd_stat_cls_code 가 "55", vi_cls_code 가 "N" 으로 왔고,
 # "00이 정상"이라는 첫 가정대로였다면 멀쩡한 종목을 전부 비정상으로 몰 뻔했다.
-# 그래서 코드값은 판정에 쓰지 않고 원값 그대로 쌓아 분포를 먼저 본다.
+#
+# 그 뒤 관리종목·투자주의·투자경고 45종을 뽑아 정상 5종과 같은 조회로 대조해 보니(50종
+# 단면) 코드값은 51/53/54/55/58 로 갈렸지만 **정지 판정에는 쓸 수 없었다**: 58 이 붙은 3종
+# 중 1종은 217만주 거래 중이었고, 종일 무거래인 종목의 temp_stop_yn 은 "N" 이었다. 즉
+# 임시정지 플래그는 거래정지를 못 잡는다. 대신 그날 **누적 체결량**이 무거래 종목을 정확히
+# 갈라냈다(무거래 2종만 0, 나머지 48종 전부 >0). 그래서 판정은 체결 실적으로 하고 코드값은
+# 원값 그대로 쌓아 분포만 본다 — 이름을 모르는 코드로 주문을 막지 않는다.
 
 
 @dataclass(frozen=True)
@@ -72,10 +77,17 @@ class Quote:
     """
 
     price: float
-    halted: bool  # 임시 정지(temp_stop_yn) — Y/N
-    liquidation: bool  # 정리매매(sltr_yn) — Y/N
-    upper_limit: float | None  # 상한가
-    lower_limit: float | None  # 하한가
+    #: 그날 누적 체결량. **거래 가능 여부의 1차 판정 재료**다 — 상태 코드값은 의미표가
+    #: 없어 해석할 수 없지만, 체결이 0 이라는 사실은 해석이 필요 없다. 비정상 45종 + 정상
+    #: 5종을 대조한 실측에서, 종일 무거래 종목은 상태 코드가 아니라 이 값으로만 갈렸다.
+    #: None = 미상(응답에 없거나 빈 값) — 판정하지 않는다. 0 과 반드시 구분해야 한다.
+    volume: int | None = None
+    #: 브로커가 직접 알려주는 주문 가능 여부. 제공하지 않는 시장은 None.
+    orderable: bool | None = None
+    halted: bool = False  # 임시 정지(temp_stop_yn) — Y/N
+    liquidation: bool = False  # 정리매매(sltr_yn) — Y/N
+    upper_limit: float | None = None  # 상한가 (고정 제한폭이 없는 시장은 None)
+    lower_limit: float | None = None  # 하한가
     codes: dict[str, str] = field(default_factory=dict)  # 구분코드 원값(판정 안 함)
 
     @property
@@ -86,18 +98,39 @@ class Quote:
     def at_lower(self) -> bool:
         return self.lower_limit is not None and self.price <= self.lower_limit
 
-    @property
-    def tradable(self) -> bool:
-        """주문이 체결될 수 있는 상태인가. 의미가 자명한 Y/N 플래그만 본다.
+    def order_block(self, side: str) -> str | None:
+        """이 **방향**의 주문을 지금 내면 안 되는 사유. None 이면 내도 된다.
 
-        상/하한가는 방향 의존이라 여기 넣지 않는다 — 하한가에서도 매수는 가능하다.
-        방향을 아는 호출부가 at_upper·at_lower 로 따로 판단해야 한다.
+        방향을 나누는 이유가 상/하한가만은 아니다. 정리매매 종목은 체결이 **된다**(실측:
+        4,516만주). 그것을 막는 근거는 '체결 불가'가 아니라 '상장폐지 예정이라 사지 않는다'는
+        정책이므로, 보유분 매도까지 막으면 폐지될 종목에 갇힌다. 매수만 막는다.
+
+        결측은 판정하지 않는다 — `volume is None`(응답에 없거나 빈 문자열)과 `volume == 0`
+        은 전혀 다르다. 해외 시세는 거래소 코드가 틀리면 예외가 아니라 **빈 값**을 돌려주므로,
+        둘을 뭉개면 조회 실수 하나가 그 시장의 유일한 집행 종목을 영구 차단한다.
         """
-        return not (self.halted or self.liquidation)
+        if self.orderable is False:
+            return "not_orderable"
+        if self.volume == 0:
+            return "no_trading"  # 체결이 0 이면 주문을 내도 마주칠 호가가 없다
+        if self.halted:
+            return "halted"
+        if side == "buy":
+            if self.liquidation:
+                return "liquidation"
+            if self.at_upper:
+                return "at_upper_limit"
+        elif self.at_lower:
+            return "at_lower_limit"
+        return None
 
     def flags(self) -> dict[str, object]:
         """주의가 필요한 상태만 뽑는다. 정상이면 빈 dict — 코드값은 여기 넣지 않는다."""
         out: dict[str, object] = {}
+        if self.orderable is False:
+            out["not_orderable"] = True
+        if self.volume == 0:
+            out["no_trading"] = True
         if self.halted:
             out["halted"] = True
         if self.liquidation:
@@ -506,8 +539,16 @@ class KISDomesticAdapter(MarketAdapter):
                 return None
             return value or None  # 0 = 미제공(상/하한가 없는 종목)
 
+        def _volume(key: str) -> int | None:
+            """거래량은 0 이 유효한 값이다 — 빈 값(미상)과 뭉개면 안 된다."""
+            try:
+                return int((output.get(key) or "").strip())
+            except ValueError:
+                return None
+
         return Quote(
             price=float(output["stck_prpr"]),
+            volume=_volume("acml_vol"),
             halted=(output.get("temp_stop_yn") or "N").strip() == "Y",
             liquidation=(output.get("sltr_yn") or "N").strip() == "Y",
             upper_limit=_price("stck_mxpr"),
@@ -593,8 +634,9 @@ class KISDomesticAdapter(MarketAdapter):
                     market=self.market, submitted_at=now, accepted=False,
                     error=f"price_outlier {outliers}", price_gap=gaps,
                 )
-            # 주문 시점의 종목 상태를 감사 로그로 넘긴다. **아직 주문을 막지는 않는다** —
-            # 판정이 실거래를 자르기 전에 라이브에서 무엇이 얼마나 잡히는지 먼저 본다.
+            # 주문 시점의 종목 상태를 감사 로그로 넘긴다. 차단은 아래 주문 루프에서 방향별로
+            # 판단하고(order_block), 여기서는 차단 여부와 무관하게 상태를 남긴다 — 막지 않은
+            # 날의 값이 있어야 나중에 임계를 재조정할 근거가 된다.
             # 코드값은 정상일 때도 남긴다(값 표가 없어 분포부터 모아야 한다).
             quote_status = {
                 s: (q.flags() | ({"codes": q.codes} if q.codes else {}))
@@ -616,6 +658,11 @@ class KISDomesticAdapter(MarketAdapter):
             orders = []
             for it in plan.intents:
                 qty = int(it.qty)
+                blocked = quotes[it.symbol].order_block(it.side)
+                if blocked:
+                    orders.append({"symbol": it.symbol, "side": it.side, "skipped": blocked})
+                    plan.dropped[it.symbol] = blocked
+                    continue
                 if self.live_guard:
                     reason = self.live_guard.check(it.notional, today)
                     if reason:

@@ -40,7 +40,7 @@ from adapters.base import (
     off_session_weekday,
     price_outliers,
 )
-from adapters.kis import PAPER_BASE, REAL_BASE, KISSession, paginate_daily
+from adapters.kis import PAPER_BASE, REAL_BASE, KISSession, Quote, paginate_daily
 
 if TYPE_CHECKING:
     from risk.live import LiveGuard
@@ -208,17 +208,37 @@ class KISOverseasAdapter(MarketAdapter):
         _, end = observation_window(asof_day)
         return await fetch_edgar_financials(symbols, end, user_agent=self._sec_user_agent)
 
-    async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
-        """현재 체결가(same-day, 지연 가능) — 행동(지정가 산정) 전용."""
-        out: dict[str, float] = {}
+    @staticmethod
+    def _parse_quote(output: dict) -> Quote:
+        """현재가 응답 → 체결가 + 거래 가능 상태.
+
+        미국에는 고정 제한폭이 없어(가격 밴드로 관리) 상/하한가는 항상 None 이다. 그래서
+        판정 재료는 그날 누적 체결량 하나다. 브로커가 거래가능여부를 평문으로 주는 별도
+        상세 TR 이 있으나, 그 필드의 **부정 값을 아직 관측하지 못했다** — 표기를 추측해
+        차단하면 그 시장의 유일한 집행 종목이 조용히 멈추므로 쓰지 않는다.
+        """
+        try:
+            volume = int((output.get("tvol") or "").strip())
+        except ValueError:
+            # 거래소 코드가 틀리면 예외가 아니라 빈 값이 온다. 이것을 0 으로 읽으면
+            # 조회 실수 하나가 곧 영구 차단이 된다 — 미상은 미상으로 남긴다.
+            volume = None
+        return Quote(price=float(output["last"]), volume=volume)
+
+    async def _quotes(self, symbols: list[str]) -> dict[str, Quote]:
+        out: dict[str, Quote] = {}
         for symbol in symbols:
             data = await self.session.get(
                 "/uapi/overseas-price/v1/quotations/price",
                 tr_id="HHDFS00000300",  # 실전/모의 공통
                 params={"AUTH": "", "EXCD": self.excd_for(symbol), "SYMB": symbol},
             )
-            out[symbol] = float(data["output"]["last"])
+            out[symbol] = self._parse_quote(data["output"])
         return out
+
+    async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
+        """현재 체결가(same-day, 지연 가능) — 행동(지정가 산정) 전용."""
+        return {s: q.price for s, q in (await self._quotes(symbols)).items()}
 
     # ── 계좌 ──
 
@@ -387,7 +407,10 @@ class KISOverseasAdapter(MarketAdapter):
             positions = self._parse_positions(await self._balance_rows())
             holdings = {p.symbol: p.market_value for p in positions}
             qty_held = {p.symbol: p.quantity for p in positions}
-            prices = await self.get_current_prices(self.universe)
+            quotes = await self._quotes(self.universe)
+            prices = {s: q.price for s, q in quotes.items()}
+            # 주문 시점의 종목 상태 — 차단 여부와 무관하게 남긴다(임계 재조정 근거).
+            quote_status = {s: q.flags() for s, q in quotes.items() if q.flags()}
             # 집행가 타당성 — 한 종목이라도 오류값이면 그 종목만이 아니라 주문 전체를
             # 접는다. 가격은 평가액 합계에도 들어가 다른 종목의 목표 수량까지 흔들기
             # 때문에, 틀린 값 하나가 그 묶음 전체를 못 믿을 것으로 만든다.
@@ -418,6 +441,11 @@ class KISOverseasAdapter(MarketAdapter):
             final_qty = dict(qty_held)
             orders = []
             for it in plan.intents:
+                blocked = quotes[it.symbol].order_block(it.side)
+                if blocked:
+                    orders.append({"symbol": it.symbol, "side": it.side, "skipped": blocked})
+                    plan.dropped[it.symbol] = blocked
+                    continue
                 if it.symbol in pending:
                     orders.append({"symbol": it.symbol, "side": it.side, "skipped": "open_order"})
                     plan.dropped[it.symbol] = "open_order"
@@ -463,6 +491,7 @@ class KISOverseasAdapter(MarketAdapter):
                 orders=orders,
                 executed_weights=weights_from_quantities(final_qty, prices, total),
                 dropped=plan.dropped,
+                quote_status=quote_status,
                 price_gap=gaps,
             )
         except Exception as e:  # 주문 실패는 예외가 아니라 결과로 — 러너가 로그로 남긴다
