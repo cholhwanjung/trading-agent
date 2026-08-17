@@ -128,7 +128,7 @@ def project_to_executable(
     *,
     lot: float = 0.0,  # 최소 거래단위. 0 = 분수 거래 가능
     min_notional: float = 0.0,
-    max_order_notional: float | None = None,  # 1회 주문 명목 상한(있으면)
+    max_order_notional: float | None = None,  # 1회 **매수** 명목 상한(있으면)
 ) -> Projection:
     """목표 배분 → (실제 표현되는 배분, 낼 수 있는 주문, 못 낸 사유).
 
@@ -162,7 +162,8 @@ def project_to_executable(
         reason: str | None = None
         if delta != 0 and notional < min_notional:
             qty, reason = held, "below_min_notional"
-        elif max_order_notional is not None and notional > max_order_notional:
+        elif delta > 0 and max_order_notional is not None and notional > max_order_notional:
+            # 매수에만 건다 — 매도를 막으면 위험을 줄이려는 순간에 그것을 못 하게 된다.
             qty, reason = held, "over_order_cap"
         elif delta < 0:
             proceeds += notional

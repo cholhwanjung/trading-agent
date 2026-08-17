@@ -116,6 +116,19 @@ REGIME_STATE_PATH = STATE_DIR / "regime_latest.json"
 COST_BPS = {"CRYPTO": 10.0, "US": 1.0, "KR": 3.0}  # 가상 포트폴리오 거래비용
 
 
+def _ratio(raw: str | None) -> float | None:
+    """평가액 대비 1회 매수 상한(비중) 설정값. 미설정·해석 불가·범위 밖이면 None.
+
+    None 이면 절대 천장만 적용되어 종전 동작 그대로다. 잘못 적힌 값으로 상한이 **넓어지는**
+    일은 없어야 하므로, 파싱 실패도 0 이하도 1 초과도 전부 미설정으로 떨어뜨린다.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if 0.0 < value <= 1.0 else None
+
+
 def load_prev_weights(state_path: Path) -> dict[str, float] | None:
     """리스크 상태 파일에서 직전 목표 배분을 읽는다. 파일 없으면 None."""
     if state_path.exists():
@@ -226,6 +239,7 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
                     LiveCaps(
                         max_order_notional=float(env.get("LIVE_MAX_ORDER_KRW") or 300_000),
                         max_daily_notional=float(env.get("LIVE_MAX_DAILY_KRW") or 700_000),
+                        max_order_ratio=_ratio(env.get("LIVE_MAX_ORDER_PCT_CRYPTO")),
                         kill_switch_path=STATE_DIR / "KILL_SWITCH",
                         state_path=STATE_DIR / "live_notional_CRYPTO.json",
                     )
@@ -253,6 +267,7 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
             LiveCaps(
                 max_order_notional=float(env.get("LIVE_MAX_ORDER_USD") or 200),
                 max_daily_notional=float(env.get("LIVE_MAX_DAILY_USD") or 500),
+                max_order_ratio=_ratio(env.get("LIVE_MAX_ORDER_PCT_US")),
                 kill_switch_path=STATE_DIR / "KILL_SWITCH",
                 state_path=STATE_DIR / "live_notional_US.json",
             )
@@ -307,6 +322,7 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
                     LiveCaps(
                         max_order_notional=float(env.get("LIVE_MAX_ORDER_KR_KRW") or 500_000),
                         max_daily_notional=float(env.get("LIVE_MAX_DAILY_KR_KRW") or 1_000_000),
+                        max_order_ratio=_ratio(env.get("LIVE_MAX_ORDER_PCT_KR")),
                         kill_switch_path=STATE_DIR / "KILL_SWITCH",
                         state_path=STATE_DIR / "live_notional_KR.json",
                     )

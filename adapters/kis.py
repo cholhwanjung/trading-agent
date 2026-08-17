@@ -608,7 +608,7 @@ class KISDomesticAdapter(MarketAdapter):
             unit_prices,
             lot=1,
             min_order=self.min_notional,
-            max_order=self.live_guard.caps.max_order_notional if self.live_guard else None,
+            max_order=self.live_guard.buy_cap(equity) if self.live_guard else None,
         )
 
     async def submit_allocation(self, weights: dict[str, float]) -> OrderResult:
@@ -651,7 +651,7 @@ class KISDomesticAdapter(MarketAdapter):
                 prices,
                 lot=1,
                 min_notional=self.min_notional,
-                max_order_notional=self.live_guard.caps.max_order_notional
+                max_order_notional=self.live_guard.buy_cap(equity)
                 if self.live_guard else None,
             )
             final_qty = dict(held_qty)
@@ -664,14 +664,14 @@ class KISDomesticAdapter(MarketAdapter):
                     plan.dropped[it.symbol] = blocked
                     continue
                 if self.live_guard:
-                    reason = self.live_guard.check(it.notional, today)
+                    reason = self.live_guard.check(it.notional, today, it.side, equity)
                     if reason:
                         orders.append({"symbol": it.symbol, "side": it.side, "skipped": reason})
                         plan.dropped[it.symbol] = reason
                         continue
                 placed = await self._post_order(it.side, it.symbol, qty)
                 if self.live_guard:
-                    self.live_guard.charge(it.notional, today)  # 제출 성공분만 당일 누적
+                    self.live_guard.charge(it.notional, today, it.side)  # 제출 성공분만
                 final_qty[it.symbol] = final_qty.get(it.symbol, 0.0) + (
                     qty if it.side == "buy" else -qty
                 )

@@ -103,7 +103,7 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
             free_krw,
             {},
             min_order=self.min_notional,
-            max_order=self.live_guard.caps.max_order_notional if self.live_guard else None,
+            max_order=self.live_guard.buy_cap(equity) if self.live_guard else None,
         )
 
     async def get_equity(self) -> float:
@@ -129,7 +129,9 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
                 market=self.market, submitted_at=now, accepted=False, error="kill_switch_active"
             )
         try:
-            cash, _, qty, prices = await self._snapshot()
+            cash, total_krw, qty, prices = await self._snapshot()
+            # 1회 매수 상한이 평가액에 비례하므로 여기서도 평가액이 필요하다(get_budget 과 동일 산식)
+            equity = total_krw + sum(q * prices[s] for s, q in qty.items() if s in prices)
             # 집행가 타당성 검사는 여기에 두지 않는다 — 관측은 USDT, 체결가는 KRW 라
             # 두 값의 비는 환율이지 괴리가 아니다. 통화가 갈린 채로 비교하면 정상 주문이
             # 전부 오류로 걸린다. 검사하려면 먼저 환율로 같은 단위에 올려야 한다.
@@ -137,7 +139,7 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
             plan = project_to_executable(
                 weights, qty, cash, prices,
                 min_notional=self.min_notional,
-                max_order_notional=self.live_guard.caps.max_order_notional
+                max_order_notional=self.live_guard.buy_cap(equity)
                 if self.live_guard else None,
             )
             final_qty = dict(qty)
@@ -147,7 +149,7 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
                 # 절대 금액 가드 — 1회/일일 명목 상한(KRW). 초과 주문은 그 건만 스킵.
                 if self.live_guard:
                     # 투영은 1회 상한만 알고 일일 누적은 모른다 — 그 판정은 여기서.
-                    reason = self.live_guard.check(notional, today)
+                    reason = self.live_guard.check(notional, today, it.side, equity)
                     if reason:
                         orders.append({"symbol": it.symbol, "side": it.side, "skipped": reason})
                         plan.dropped[it.symbol] = reason
@@ -166,7 +168,7 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
                     filled_qty = float(self.ex.amount_to_precision(krw_symbol, amount))
                     placed = await self.ex.create_order(krw_symbol, "market", "sell", filled_qty)
                 if self.live_guard:
-                    self.live_guard.charge(notional, today)  # 제출 성공분만 당일 누적
+                    self.live_guard.charge(notional, today, it.side)  # 제출 성공분만
                 delta = it.qty if it.side == "buy" else -(filled_qty or 0.0)
                 final_qty[it.symbol] = final_qty.get(it.symbol, 0.0) + delta
                 orders.append(
