@@ -24,6 +24,7 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from adapters.universe import ETF, universe_meta  # noqa: E402
 from eval.meta import combined_index, load_arm_history, load_meta_shadow  # noqa: E402
 from eval.perf import drawdown_series, perf_stats  # noqa: E402
 from eval.rolling import ROLLING_K, meta_shadow_delta, rolling_report  # noqa: E402
@@ -34,6 +35,7 @@ from gui.panels import (  # noqa: E402
     episodic_ledger,
     exposure_turnover,
     kill_switch_active,
+    latest_budget,
     latest_meta_event,
     list_observation_days,
     load_intramarket_weights,
@@ -51,12 +53,20 @@ from gui.panels import (  # noqa: E402
     session_draft_diff,
     session_proposals,
     treasury_dryrun_report,
+    universe_rows,
     usage_report,
     veto_rows,
     weekly_reflections,
 )
 from harness.env import load_env  # noqa: E402
 from risk.engine import RiskLimits  # noqa: E402
+from scripts.run_paper_step import (  # noqa: E402
+    CRYPTO_UNIVERSE,
+    KR_UNIVERSE,
+    LIMITS,
+    TRADABLE,
+    US_UNIVERSE,
+)
 from interaction.briefing import build_briefing  # noqa: E402
 from interaction.context import build_context  # noqa: E402
 
@@ -66,6 +76,8 @@ OBS_DIR = STATE / "observations"
 LOG_DIR = ROOT / "data" / "logs"
 REQUESTS_DIR = ROOT / "data" / "requests"
 MARKETS = ("CRYPTO", "US", "KR")
+# 관측 유니버스 — 일일 루프가 실제로 쓰는 정의를 그대로 읽는다(대시보드에 사본을 두지 않는다).
+OBSERVED_UNIVERSE = {"CRYPTO": CRYPTO_UNIVERSE, "US": US_UNIVERSE, "KR": KR_UNIVERSE}
 ARMS = ("llm", "llm_base", "bh", "random")
 PERIODS_PER_YEAR = {"CRYPTO": 365.0, "US": 252.0, "KR": 252.0}  # 연율화 계수 (연 거래일 수)
 REGIME_BADGE = {"UPTREND": "🟢", "UNDER_PRESSURE": "🟡", "CORRECTION": "🔴"}
@@ -89,6 +101,21 @@ def load_equity_frame(market: str) -> pd.DataFrame | None:
 @st.cache_data(ttl=60)
 def load_context() -> dict:
     return build_context(ROOT)
+
+
+def latest_closes(market: str) -> dict[str, float]:
+    """가장 최근 관측 스냅샷의 마지막 종가 — 트레이더가 예산을 비중으로 환산할 때 쓴 값과 같다."""
+    days = list_observation_days(OBS_DIR, market)
+    if not days:
+        return {}
+    snap = load_observation(OBS_DIR, market, days[0]) or {}
+    return {s: bars[-1]["close"] for s, bars in (snap.get("bars") or {}).items() if bars}
+
+
+def cell(value: float | None, spec: str) -> str:
+    """표 셀 문자열. 값을 미리 굳혀 넣는다 — 열마다 결측이 다른 뜻이라(미기록 vs 해당 없음)
+    포매터의 결측 처리에 맡기면 그 구분이 빈칸 하나로 뭉개진다."""
+    return format(value, spec) if value is not None else "—"
 
 
 def pie(data: dict[str, float], title: str) -> None:
@@ -217,6 +244,56 @@ with tab_dash:
     for col, market in zip(st.columns(len(MARKETS)), MARKETS):
         with col:
             pie(load_intramarket_weights(STATE, market), market)
+
+    st.subheader("유니버스 — 관측 vs 집행")
+    st.caption(
+        "에이전트는 개별 종목까지 **관측**하지만(재무·뉴스·공시), 배분 벡터를 채울 수 있는 "
+        "**집행** 대상은 그보다 좁을 수 있다. 위 파이에 종목이 몇 개 없다면 전략 판단이 아니라 "
+        "계좌 크기 때문이다 — 1주 비중이 종목당 상한을 넘는 종목에는 어떤 비중도 표현할 수 "
+        "없어서, 배정해도 주문 투영이 매일 통째로 현금으로 되돌린다. 그래서 낼 수 있는 주문만 "
+        "정의역에 두고 나머지는 판단 근거로만 읽는다. 금액 열은 그 시장의 관측 통화 그대로다."
+    )
+    for market in MARKETS:
+        limits = LIMITS[market]
+        budget_rec = latest_budget(read_recent_decisions(LOG_DIR, market))
+        rows = universe_rows(
+            universe_meta(OBSERVED_UNIVERSE[market], TRADABLE[market]),
+            limits.max_weight_per_asset,
+            limits.asset_caps,
+            budget_rec[1] if budget_rec else None,
+            latest_closes(market),
+        )
+        n_tradable = sum(1 for r in rows if r["tradable"])
+        head = f"**{market}** · 집행 {n_tradable}종 / 관측 {len(rows)}종"
+        if budget_rec:
+            day, budget = budget_rec
+            head += f" · 예산 기준 `{day}` (순자산 {budget['equity']:,.2f} {budget['currency']})"
+        st.markdown(head)
+        if not budget_rec:
+            # 판정 열이 통째로 비는 이유를 여기서 밝힌다 — 빈 칸만 보면 채널이 죽은 것으로 읽힌다.
+            st.caption(
+                "예산 스냅샷 없음 — 순자산이 0 이거나(입금 전) 계좌 조회가 실패한 날은 예산이 "
+                "기록되지 않는다. 집행 유니버스는 설정값 그대로 표시되며, 1주 비중 판정은 "
+                "입금 후 첫 결정부터 채워진다."
+            )
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "심볼": r["symbol"],
+                    "자산군": "ETF" if r["asset_class"] == ETF else "개별",
+                    "추종 지수": r["index"] or "—",
+                    "역할": "집행" if r["tradable"] else "관측 전용",
+                    "종목당 상한": cell(r["cap"], ".0%"),
+                    "1주 비중": cell(r["min_step_weight"], ".1%"),
+                    "t−1 종가": cell(r["last_close"], ",.2f"),
+                    "편입 최소 순자산": cell(r["min_equity_for_entry"], ",.0f"),
+                    "판정": r["verdict"],
+                }
+                for r in rows
+            ]),
+            hide_index=True,
+            width="stretch",
+        )
 
     for market in MARKETS:
         frame = load_equity_frame(market)

@@ -62,8 +62,88 @@ def read_recent_decisions(log_dir: Path, market: str, limit: int = 30) -> list[d
             "cited_memory_ids": d.get("cited_memory_ids") or [],
             "scenario_expected": d.get("scenario_expected"),
             "scenario_invalidation": d.get("scenario_invalidation"),
+            "budget": d.get("budget"),  # None = 그날 예산 조회 실패 또는 순자산 0
         }
     return [rows[k] for k in sorted(rows)][-limit:]
+
+
+def latest_budget(decisions: list[dict]) -> tuple[str, dict] | None:
+    """가장 최근에 **실제로 기록된** 예산 스냅샷을 (기록일, 스냅샷) 으로. 없으면 None.
+
+    순자산이 0 이거나(미입금) 계좌 조회가 실패한 날은 예산이 null 로 남는다. 최신 행만
+    집으면 그런 날 하루에 근거가 통째로 사라지므로 거슬러 찾되, **언제 것인지 함께**
+    돌려준다 — 날짜 없이 보여주면 오래된 잔고를 현재 잔고로 읽는다.
+    """
+
+    for row in reversed(decisions):
+        budget = row.get("budget")
+        if budget:
+            return row["day"], budget
+    return None
+
+
+# 1주 비중이 종목당 상한의 이 배수보다 크면 살 수 있는 수량이 사실상 0·1·2주뿐이라
+# 비중을 조절할 수 없다. 유니버스를 고를 때 쓴 등급 기준을 그대로 표시에도 쓴다.
+_COARSE_STEP_RATIO = 3.0
+
+
+def universe_rows(
+    meta: dict[str, dict],
+    equity_cap: float,
+    asset_caps: dict[str, float],
+    budget: dict | None,
+    closes: dict[str, float],
+) -> list[dict]:
+    """관측·집행 유니버스를 종목별 한 행으로. 집행 가능 종목이 먼저 온다.
+
+    meta 는 트레이더 프롬프트에 실제로 주입되는 종목 메타(`adapters.universe.universe_meta`)
+    를 그대로 받는다 — 화면과 프롬프트가 같은 값을 보게 하기 위해서다.
+
+    판정은 예산 스냅샷의 1주 비중(min_step_weight)과 종목당 상한을 비교한 것이다.
+    1주 비중이 상한보다 크면 그 종목에는 어떤 비중도 표현할 수 없어 집행 유니버스에서
+    빠진다 — 집행이 좁은 이유가 전략이 아니라 계좌 크기임을 이 열이 보여준다.
+    """
+
+    steps = (budget or {}).get("min_step_weight") or {}
+    # 분수 거래 계좌는 거래단위가 없어 종목별 1주 비중을 **애초에 기록하지 않는다**.
+    # 그 빈칸을 "기록 없음"으로 읽으면 정상 동작하는 계좌가 고장난 것처럼 보이므로,
+    # 종목별 유무가 아니라 계좌 단위 사실인 lot 으로 가른다.
+    fractional = budget is not None and not (budget.get("lot") or 0)
+    rows: list[dict] = []
+    for symbol, block in meta.items():
+        cap = asset_caps.get(symbol, equity_cap)
+        step = steps.get(symbol)
+        close = closes.get(symbol)
+        # 1주가 / 순자산 ≤ 상한 을 순자산에 대해 푼 값. 담을 수 없는(또는 알 수 없는)
+        # 종목에만 채운다 — 이미 담기는 종목에는 답이 아니라 잡음이다.
+        need_equity = None
+        if close and cap > 0 and not fractional and (step is None or step > cap):
+            need_equity = round(close / cap, 2)
+        if fractional:
+            verdict = "분수 거래 (단위 제약 없음)"
+        elif budget is None:
+            verdict = "예산 기록 없음"
+        elif step is None:
+            verdict = "1주 비중 미기록"
+        elif step > cap:
+            verdict = "편입 불가 (1주가 상한 초과)"
+        elif step > cap / _COARSE_STEP_RATIO:
+            verdict = "거칠게만 (0·1·2주)"
+        else:
+            verdict = "조절 가능"
+        rows.append({
+            "symbol": symbol,
+            "asset_class": block.get("asset_class"),
+            "index": block.get("index"),  # ETF 만 채워진다
+            "tradable": bool(block.get("tradable")),
+            "cap": cap,
+            "min_step_weight": step,
+            "last_close": close,
+            "min_equity_for_entry": need_equity,
+            "verdict": verdict,
+        })
+    rows.sort(key=lambda r: not r["tradable"])  # 집행 가능 먼저 (그 안에서는 유니버스 순서)
+    return rows
 
 
 def exposure_turnover(decisions: list[dict]) -> list[dict]:
