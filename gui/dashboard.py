@@ -24,7 +24,8 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from adapters.universe import ETF, universe_meta  # noqa: E402
+from adapters.news_kr import KR_STOCK_NAMES  # noqa: E402
+from adapters.universe import ETF, ETF_REF, universe_meta  # noqa: E402
 from eval.meta import combined_index, load_arm_history, load_meta_shadow  # noqa: E402
 from eval.perf import drawdown_series, perf_stats  # noqa: E402
 from eval.rolling import ROLLING_K, meta_shadow_delta, rolling_report  # noqa: E402
@@ -112,14 +113,32 @@ def latest_closes(market: str) -> dict[str, float]:
     return {s: bars[-1]["close"] for s, bars in (snap.get("bars") or {}).items() if bars}
 
 
+def display_name(symbol: str) -> str:
+    """화면 표기용 이름. 숫자 종목코드는 사람이 못 읽으므로 이름으로 바꾼다.
+
+    바꾸는 것은 **숫자 코드뿐**이다 — `SCHX`·`BTC/USDT` 같은 티커는 그 자체가 통용되는
+    이름이라 정식 상품명으로 늘리면 오히려 알아보기 어려워진다. 표시 계층 전용이며,
+    관측·주문·로그가 쓰는 심볼은 브로커가 아는 코드 그대로 둔다.
+    """
+    if not symbol.isdigit():
+        return symbol
+    ref = ETF_REF.get(symbol)
+    return ref.name if ref is not None else KR_STOCK_NAMES.get(symbol, symbol)
+
+
 def cell(value: float | None, spec: str) -> str:
     """표 셀 문자열. 값을 미리 굳혀 넣는다 — 열마다 결측이 다른 뜻이라(미기록 vs 해당 없음)
     포매터의 결측 처리에 맡기면 그 구분이 빈칸 하나로 뭉개진다."""
     return format(value, spec) if value is not None else "—"
 
 
-def pie(data: dict[str, float], title: str) -> None:
-    """비중 dict → 도넛 파이. 0/음수 비중은 제외. 데이터 없으면 캡션."""
+def pie(data: dict[str, float], title: str, domain: list[str] | None = None) -> None:
+    """비중 dict → 도넛 파이. 0/음수 비중은 제외. 데이터 없으면 캡션.
+
+    domain 을 주면 색을 그 순서로 고정한다 — 나란히 둔 두 도넛의 조각 수가 다르면
+    같은 종목이 서로 다른 색을 받아 비교가 어긋난다. 범례는 색 고정과 무관하게 **실제
+    조각만** 싣는다 — 없는 종목이 범례에 뜨면 그것도 담긴 것처럼 읽힌다.
+    """
     rows = [{"label": k, "value": v} for k, v in data.items() if v and v > 0]
     if not rows:
         st.caption(f"{title}: 데이터 없음")
@@ -129,7 +148,15 @@ def pie(data: dict[str, float], title: str) -> None:
         .mark_arc(innerRadius=45)
         .encode(
             theta=alt.Theta("value:Q", stack=True),
-            color=alt.Color("label:N", legend=alt.Legend(title=None, orient="bottom")),
+            color=alt.Color(
+                "label:N",
+                legend=alt.Legend(
+                    title=None,
+                    orient="bottom",
+                    values=[r["label"] for r in rows] if domain else alt.Undefined,
+                ),
+                scale=alt.Scale(domain=domain) if domain else alt.Undefined,
+            ),
             tooltip=["label:N", alt.Tooltip("value:Q", format=".1%")],
         )
         .properties(title=title, height=240)
@@ -269,6 +296,21 @@ with tab_dash:
             day, budget = budget_rec
             head += f" · 예산 기준 `{day}` (순자산 {budget['equity']:,.2f} {budget['currency']})"
         st.markdown(head)
+
+        # 유니버스는 집합이라 조각 크기로 쓸 값이 없다 — 종목마다 같은 크기를 주고
+        # 두 도넛의 조각 수 차이로 '관측 ⊋ 집행' 을 보인다. 색은 관측 쪽 순서로 고정해
+        # 같은 종목이 두 도넛에서 같은 색을 받게 한다.
+        labels = [display_name(r["symbol"]) for r in rows]
+        col_obs, col_exec = st.columns(2)
+        with col_obs:
+            pie({name: 1.0 for name in labels}, "관측 유니버스", domain=labels)
+        with col_exec:
+            pie(
+                {display_name(r["symbol"]): 1.0 for r in rows if r["tradable"]},
+                "집행 유니버스 (배분 벡터의 정의역)",
+                domain=labels,
+            )
+
         if not budget_rec:
             # 판정 열이 통째로 비는 이유를 여기서 밝힌다 — 빈 칸만 보면 채널이 죽은 것으로 읽힌다.
             st.caption(
@@ -279,7 +321,7 @@ with tab_dash:
         st.dataframe(
             pd.DataFrame([
                 {
-                    "심볼": r["symbol"],
+                    "종목": display_name(r["symbol"]),
                     "자산군": "ETF" if r["asset_class"] == ETF else "개별",
                     "추종 지수": r["index"] or "—",
                     "역할": "집행" if r["tradable"] else "관측 전용",

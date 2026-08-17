@@ -23,8 +23,12 @@ class EtfRef:
 
     top_weight 는 최대 구성종목 비중의 **보수적 상한**이다 — 상한 도출의 입력이라
     실제보다 높게 잡는 쪽이 안전하다(실제가 더 낮으면 검사는 여전히 통과한다).
+
+    name 은 상품명이고 index 는 추종 지수다 — 둘은 다르다(같은 지수를 여러 운용사가
+    낸다). 표시 계층 전용이라 관측·결정 경로에는 넘기지 않는다.
     """
 
+    name: str
     index: str
     replication: str  # physical(실물 복제) | synthetic(선물·스왑)
     expense_ratio: float  # 연 총보수
@@ -35,8 +39,9 @@ class EtfRef:
 # 편입 ETF — 광범위 시장지수만. 섹터·테마는 분산 효과가 없어 개별주 집중과 같아지고,
 # 레버리지·인버스는 일간 리밸런싱 감쇠로 장기 보유 전제와 충돌해 넣지 않는다.
 ETF_REF: dict[str, EtfRef] = {
-    "278530": EtfRef("KOSPI 200", "physical", 0.0012, 200, 0.35),  # KODEX 200TR
-    "SCHX": EtfRef("Dow Jones U.S. Large-Cap", "physical", 0.0003, 750, 0.10),
+    "278530": EtfRef("KODEX 200TR", "KOSPI 200", "physical", 0.0012, 200, 0.35),
+    "SCHX": EtfRef("Schwab U.S. Large-Cap ETF", "Dow Jones U.S. Large-Cap",
+                   "physical", 0.0003, 750, 0.10),
 }
 
 
