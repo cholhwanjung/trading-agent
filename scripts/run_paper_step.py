@@ -175,14 +175,24 @@ def track_stall(path: Path, reason: str | None, today: date) -> tuple[bool, int]
 
 
 def last_recorded_weights(memory: MemoryStore, market: str) -> dict[str, float] | None:
-    """직전에 기록된 배분(체결 기준). 없으면 None.
+    """직전에 **결정으로** 기록된 배분(체결 기준). 없으면 None.
 
     pattern_key 의 행동 성분은 '직전 대비 얼마나 바꿨나'다. 오늘은 체결 배분으로
     기록하면서 직전은 목표 배분을 쓰면 두 기준이 섞인 차이가 키에 들어가, 같은 행동이
     서로 다른 키로 흩어져 admission 의 반복 관측이 성립하지 않는다.
+
+    episodic 에는 결정만 있는 게 아니다 — 주간 회고와 사용자 세션이 배분 없이 같은 스토어로
+    들어가고, 회고는 결정 기록 **뒤에** 쓰이므로 회고가 도는 날엔 그것이 마지막 항목이 된다.
+    마지막 항목을 그냥 집으면 그런 날마다 None 이 되고, 호출부가 조용히 목표 배분으로
+    되돌아간다 — 이 함수가 막으려던 바로 그 혼합이다. 그래서 배분이 실린 항목만 거슬러
+    찾는다. 종류를 열거하지 않고 배분 유무로 거르는 이유는 새 종류가 늘어도 안전하기
+    위해서다.
     """
-    entries = memory.query(market, store="episodic")
-    return (entries[-1].data or {}).get("weights") if entries else None
+    for entry in reversed(memory.query(market, store="episodic")):
+        weights = (entry.data or {}).get("weights")
+        if weights:
+            return weights
+    return None
 
 
 def kis_real_ready(env: dict[str, str]) -> bool:
@@ -623,6 +633,9 @@ async def main() -> int:
         guards: dict[str, RiskGuardedPolicy] = {}
         prev_weights_by_market: dict[str, dict | None] = {}
         for market, (adapter, symbols) in adapters.items():
+            # 폴백은 기준이 다르다(목표 배분). 위 함수가 배분 있는 항목만 거슬러 찾으므로
+            # 여기 None 이 오는 건 **결정이 한 번도 기록된 적 없을 때**뿐이다 — 그때는 아직
+            # 이어붙일 사슬 자체가 없어 기준이 섞일 여지도 없다.
             prev_weights_by_market[market] = last_recorded_weights(memory, market) or (
                 load_prev_weights(STATE_DIR / f"risk_{market}.json")
             )
