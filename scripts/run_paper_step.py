@@ -781,6 +781,24 @@ async def main() -> int:
                     })
                     print(f"market={market} exec_gap_worst={worst[0]}:{worst[1]:+.4f}")
 
+                # 매수여력 필드·환산 평가액 (shadow) — 계산·로깅만, 여력 산정과 서킷 입력은
+                # 그대로다. 원화만 입금된 계좌에서 지금 읽는 여력 필드가 0 으로 오는데, 같은
+                # 응답의 다른 필드에는 원화 담보가 환산돼 실린다. 어느 쪽이 실제 주문 여력인지는
+                # 장중/장외와 증거금 신청 반영 시점을 걸쳐야 갈리므로 두 값을 나란히 남긴다.
+                # 평가액도 같이 찍는다 — 지금 값은 계좌 전체라 이 시장의 낙폭이 다른 시장
+                # 자산에 희석되는데, 교체 후보와 나란히 봐야 그 차이가 얼마인지 센다.
+                ps = getattr(adapter, "last_psamount", None)
+                if ps:
+                    equity_now = guard.last_decision.get("equity")
+                    logger.log(market, "psamount_shadow", {**ps, "equity_now": equity_now})
+                    print(f"market={market} psamount_shadow"
+                          f" echm={ps['echm_af_ord_psbl_amt']:.2f}"
+                          f" frcr1={ps['frcr_ord_psbl_amt1']:.2f}"
+                          f" max_qty={ps['ovrs_max_ord_psbl_qty']:.0f}"
+                          f" exrt={ps['exrt']:.2f}"
+                          f" equity_alt={ps.get('equity_alt_krw')}"
+                          f" equity_now={equity_now}")
+
             prices, day = await fetch_prices(adapter, symbols)
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)
 

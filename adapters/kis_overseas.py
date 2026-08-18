@@ -107,6 +107,9 @@ class KISOverseasAdapter(MarketAdapter):
         self._alpaca_secret = alpaca_secret
         self._sec_user_agent = sec_user_agent
         self.bucket_share = bucket_share
+        # 매수여력 조회 관측치 — 로깅 전용(결정·주문 미개입). _buying_power/get_budget 참조.
+        self._psamount_raw: dict | None = None  # 매 조회 갱신
+        self.last_psamount: dict | None = None  # 스텝당 1회, 파생값 포함
 
     async def close(self) -> None:
         await self.session.close()
@@ -289,8 +292,22 @@ class KISOverseasAdapter(MarketAdapter):
                 "ITEM_CD": ref_symbol,
             },
         )
+        out = data.get("output") or {}
         # 통합증거금 여력은 계좌 하나의 값이라 국내와 공유된다 — 지분만 자기 몫으로 본다
-        total = float((data.get("output") or {}).get("echm_af_ord_psbl_amt") or 0)
+        total = float(out.get("echm_af_ord_psbl_amt") or 0)
+        # 같은 응답의 다른 여력 필드를 나란히 보관한다(판단하지 않는다 — 여력 산정은 위 한 줄
+        # 그대로다). 원화만 입금된 계좌에서 '환전이후주문가능금액'은 0 으로 오는데 같은 응답의
+        # '외화주문가능금액1'에는 원화 담보가 환산돼 실린다. 어느 쪽이 실제 주문 여력인지는
+        # 장중/장외와 증거금 신청 반영 시점을 걸쳐 봐야 갈리므로, 먼저 두 값을 며칠 남긴다.
+        # 이 메서드는 한 스텝에 두 번(예산 조회·주문) 불리므로 원값은 여기 두고, 로깅용
+        # 관측치는 get_budget 이 조립한다 — 뒤늦은 주문 쪽 호출이 그것을 덮지 않게 한다.
+        self._psamount_raw = {
+            "echm_af_ord_psbl_amt": total,
+            "frcr_ord_psbl_amt1": float(out.get("frcr_ord_psbl_amt1") or 0),
+            "ovrs_max_ord_psbl_qty": float(out.get("ovrs_max_ord_psbl_qty") or 0),
+            "exrt": float(out.get("exrt") or 0),
+            "bucket_share": self.bucket_share,
+        }
         return bucket_cash(total, self.bucket_share)
 
     async def get_budget(self, unit_prices: dict[str, float]):
@@ -304,6 +321,18 @@ class KISOverseasAdapter(MarketAdapter):
             return None  # 기준가가 없으면 매수여력 조회 자체가 불가
         cash = await self._buying_power(ref, unit_prices[ref])
         holdings = sum(p.market_value for p in self._parse_positions(await self._balance_rows()))
+        # 이 시장 몫만 담은 평가액을 원화로 환산해 함께 남긴다(로깅 전용 — 아래 예산에는
+        # 쓰지 않는다). get_equity 가 쓰는 원화 총자산은 계좌 전체값이라 국내 손익까지
+        # 섞여 들어오는데, 낙폭 서킷은 시장마다 따로 돌므로 그 값으로는 이 시장의 낙폭이
+        # 다른 시장 자산에 희석된다. 교체 판단에 쓸 후보값을 먼저 며칠 관측한다.
+        if self._psamount_raw:
+            raw = self._psamount_raw
+            candidate = bucket_cash(raw["frcr_ord_psbl_amt1"], self.bucket_share) + holdings
+            self.last_psamount = {
+                **raw,
+                "holdings_usd": round(holdings, 2),
+                "equity_alt_krw": round(candidate * raw["exrt"], 2),
+            }
         return build_budget(
             "USD",
             cash + holdings,
