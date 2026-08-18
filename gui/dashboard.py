@@ -39,7 +39,7 @@ from gui.panels import (  # noqa: E402
     latest_budget,
     latest_meta_event,
     list_observation_days,
-    load_intramarket_weights,
+    load_holding_weights,
     load_latest_requests,
     load_launchd_jobs,
     load_market_allocation,
@@ -267,10 +267,14 @@ with tab_dash:
         else:
             st.caption("마켓별 메타 목표: shadow 제안 없음 (paper_step 이 쌓으면 표시)")
 
-    st.caption("마켓 내 포트폴리오 구성 — 목표 배분 벡터 (CASH 포함)")
+    # 목표가 아니라 **체결**을 그린다 — 목표는 계좌가 그것을 표현하지 못한 날에도 갱신되므로
+    # 자금 없는 시장이 담고 있는 것처럼 보인다. 목표 배분은 아래 시장별 절에 따로 있다.
+    st.caption("마켓 내 포트폴리오 구성 — **실보유** (마지막 체결 배분, CASH 포함)")
     for col, market in zip(st.columns(len(MARKETS)), MARKETS):
         with col:
-            pie(load_intramarket_weights(STATE, market), market)
+            held = load_holding_weights(LOG_DIR, market)
+            day, weights = held if held else (None, {})
+            pie(weights, f"{market} · 체결 {day}" if day else market)
 
     st.subheader("유니버스 — 관측 vs 집행")
     st.caption(
@@ -291,7 +295,9 @@ with tab_dash:
             latest_closes(market),
         )
         n_tradable = sum(1 for r in rows if r["tradable"])
-        head = f"**{market}** · 집행 {n_tradable}종 / 관측 {len(rows)}종"
+        n_exec = sum(1 for r in rows if r["executable"])
+        head = (f"**{market}** · 집행 {n_exec}종(실계좌 기준)"
+                f" / 설정 {n_tradable}종 / 관측 {len(rows)}종")
         if budget_rec:
             day, budget = budget_rec
             head += f" · 예산 기준 `{day}` (순자산 {budget['equity']:,.2f} {budget['currency']})"
@@ -306,8 +312,8 @@ with tab_dash:
             pie({name: 1.0 for name in labels}, "관측 유니버스", domain=labels)
         with col_exec:
             pie(
-                {display_name(r["symbol"]): 1.0 for r in rows if r["tradable"]},
-                "집행 유니버스 (배분 벡터의 정의역)",
+                {display_name(r["symbol"]): 1.0 for r in rows if r["executable"]},
+                "집행 유니버스 (실계좌가 담을 수 있는 것)",
                 domain=labels,
             )
 
@@ -315,8 +321,9 @@ with tab_dash:
             # 판정 열이 통째로 비는 이유를 여기서 밝힌다 — 빈 칸만 보면 채널이 죽은 것으로 읽힌다.
             st.caption(
                 "예산 스냅샷 없음 — 순자산이 0 이거나(입금 전) 계좌 조회가 실패한 날은 예산이 "
-                "기록되지 않는다. 집행 유니버스는 설정값 그대로 표시되며, 1주 비중 판정은 "
-                "입금 후 첫 결정부터 채워진다."
+                "기록되지 않는다. 계좌가 무엇을 담을 수 있는지 판정할 근거가 없어 **집행 "
+                "유니버스는 비어 있게 표시**된다. 설정상의 집행 종목은 아래 표의 '역할' 열에 "
+                "남아 있고, 1주 비중 판정은 입금 후 첫 결정부터 채워진다."
             )
         st.dataframe(
             pd.DataFrame([

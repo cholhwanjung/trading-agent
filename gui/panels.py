@@ -102,6 +102,10 @@ def universe_rows(
     판정은 예산 스냅샷의 1주 비중(min_step_weight)과 종목당 상한을 비교한 것이다.
     1주 비중이 상한보다 크면 그 종목에는 어떤 비중도 표현할 수 없어 집행 유니버스에서
     빠진다 — 집행이 좁은 이유가 전략이 아니라 계좌 크기임을 이 열이 보여준다.
+
+    `tradable` 은 설정상 역할, `executable` 은 **실계좌가 지금 담을 수 있는가**다. 둘을
+    가르는 이유는 예산이 없는 날(미입금·조회 실패) 설정값만으로 집행 유니버스를 그리면
+    한 주도 못 사는 계좌가 정상 집행 중인 것처럼 보이기 때문이다.
     """
 
     steps = (budget or {}).get("min_step_weight") or {}
@@ -131,11 +135,21 @@ def universe_rows(
             verdict = "거칠게만 (0·1·2주)"
         else:
             verdict = "조절 가능"
+        # 설정상 집행 종목이라도 계좌가 그 비중을 표현하지 못하면 실제로 담을 수 없다.
+        # 화면의 '집행'을 설정값으로만 그리면 미입금·소액 계좌에서 담기지 않을 종목이
+        # 집행 유니버스로 보인다 — 계좌 크기 때문에 좁아진 정의역이 넓어 보이는 셈이다.
+        # 판정 근거는 아래 verdict 와 같다(예산 없음·1주 비중 초과는 표현 불가).
+        executable = bool(
+            block.get("tradable")
+            and budget is not None
+            and (fractional or (step is not None and step <= cap))
+        )
         rows.append({
             "symbol": symbol,
             "asset_class": block.get("asset_class"),
             "index": block.get("index"),  # ETF 만 채워진다
             "tradable": bool(block.get("tradable")),
+            "executable": executable,  # 실계좌가 지금 실제로 담을 수 있는가
             "cap": cap,
             "min_step_weight": step,
             "last_close": close,
@@ -373,12 +387,24 @@ def load_market_allocation(virtual_dir: Path, meta_ledger: Path, arm: str = "llm
     return {"current": current, "target": target, "arm": arm}
 
 
-def load_intramarket_weights(state_dir: Path, market: str) -> dict[str, float]:
-    """마켓 내 목표 배분 벡터(CASH 포함) — risk_{market}.json 의 prev_weights. 없으면 {}."""
-    path = state_dir / f"risk_{market}.json"
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8")).get("prev_weights") or {}
+def load_holding_weights(log_dir: Path, market: str) -> tuple[str, dict[str, float]] | None:
+    """마켓 내 **실보유** 배분(CASH 포함) — 마지막으로 체결된 배분과 그 기록일. 없으면 None.
+
+    직전 목표(`risk_{market}.json` 의 prev_weights)를 쓰면 안 된다. 목표는 계좌가 그것을
+    표현하지 못한 날에도 갱신되므로, 자금이 없어 한 주도 못 산 시장이 목표대로 담고 있는
+    것처럼 그려진다 — 실측으로 KR 은 사흘 연속 체결이 `{CASH: 1.0}` 인 동안 목표가
+    `278530` 25% 였다. 체결 배분은 주문 시점의 실제 보유 수량에서 계산되므로 그 혼동이 없다.
+
+    체결이 없던 날에는 이 기록이 남지 않는다 — 그런 날 보유는 바뀌지 않았으므로 마지막
+    기록이 곧 현재 보유다. 날짜를 함께 돌려주는 이유는 예산 스냅샷과 같다: 언제 것인지
+    없이 보여주면 오래된 보유를 현재 보유로 읽는다.
+    """
+    last = None
+    for rec in iter_events(log_dir, market, "execution_fidelity"):
+        executed = rec.get("executed")
+        if executed:
+            last = (str(rec.get("ts", ""))[:10], executed)
+    return last
 
 
 # ── 스케줄 잡 상태 (launchd 로그 기반) ──
