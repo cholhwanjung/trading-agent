@@ -9,10 +9,10 @@
 - 지정가 미체결 잔량이 남을 수 있어 주문 전 미체결 심볼은 제외(중복 주문 방지).
 - 매수여력: **통합증거금 반영 '환전이후주문가능금액'(USD)** — 원화 담보를 자동환전한
   주문 여력이라, USD 예수금이 없어도 원화만으로 매수 가능(수동 환전 단계 불필요).
-- 평가액(MDD 입력): **원화 총자산(tot_asst_amt)** — 원화 담보로 산 미국 자산은 환율
-  손익에 노출되므로, USD 가 아닌 KRW 로 계상해 서킷이 FX 낙폭까지 포착하게 한다.
-  (KR 국내가 같은 실계좌를 쓰면 원화 담보를 나눠 써야 한다 — 매수여력은 bucket_share
-  로 나누지만 이 평가액은 아직 나누지 않았다.)
+- 평가액(MDD 입력): **원화 기준 시가평가** = 계좌 예수금 × bucket_share + 해외 보유
+  평가액. 원화 담보로 산 미국 자산은 환율 손익에 노출되므로 USD 가 아닌 KRW 로 계상해
+  서킷이 FX 낙폭까지 포착하게 한다. 보유는 취득원가가 아니라 평가금액으로 잡는다 —
+  원가로 재면 미실현 손실이 낙폭 서킷에 아예 보이지 않는다.
 - 뉴스: KIS 무료 원천 미정 — 빈 리스트(관측 배선 시 채널 별도 결정).
 """
 
@@ -79,6 +79,7 @@ class KISOverseasAdapter(MarketAdapter):
         account: str,  # "12345678-01" (계좌 8자리-상품코드 2자리)
         universe: list[str],  # 예: ["AAPL", "MSFT"] — 나스닥 종목
         token_cache: Path,
+        tradable: list[str] | None = None,  # 주문 가능 종목. None = 관측과 동일
         mode: str = "demo",  # "demo"(모의) | "real"(실전 — 실자금)
         exchange: str = "NASD",
         min_notional: float = 10.0,  # USD
@@ -97,6 +98,8 @@ class KISOverseasAdapter(MarketAdapter):
         )
         self.cano, _, self.prdt = account.partition("-")
         self.universe = universe
+        # 관측과 주문 대상이 다르다 — 매수여력 조회·주문 기준은 주문 가능한 쪽이어야 한다.
+        self.tradable = list(tradable) if tradable else list(universe)
         self.mode = mode
         self.exchange = exchange
         self.excd = QUOTE_EXCD[exchange]  # 미매핑 종목의 기본값
@@ -110,9 +113,15 @@ class KISOverseasAdapter(MarketAdapter):
         # 매수여력 조회 관측치 — 로깅 전용(결정·주문 미개입). _buying_power/get_budget 참조.
         self._psamount_raw: dict | None = None  # 매 조회 갱신
         self.last_psamount: dict | None = None  # 스텝당 1회, 파생값 포함
+        # 평가액 구성요소 관측치 — 로깅 전용. get_equity 가 매 호출 갱신한다.
+        self.last_equity_parts: dict | None = None
 
     async def close(self) -> None:
         await self.session.close()
+
+    def tradable_ref(self) -> str:
+        """매수여력 조회의 기준 심볼 — 실제로 주문을 낼 종목. 없으면 유니버스 첫 종목."""
+        return self.tradable[0] if self.tradable else self.universe[0]
 
     def exchange_for(self, symbol: str) -> str:
         """주문용 거래소 코드. 매핑 없으면 어댑터 기본값."""
@@ -293,8 +302,12 @@ class KISOverseasAdapter(MarketAdapter):
             },
         )
         out = data.get("output") or {}
+        # '외화주문가능금액1' 을 읽는다. 이름과 달리 보유 외화가 아니라 **원화 담보까지 환산한
+        # 주문 여력**이다 — USD 예수금이 0 인 계좌에서 이 값이 664.29 로 잡히는 것으로 확인했다.
+        # 종전에 읽던 '환전이후주문가능금액' 은 환전이 실제로 실행된 뒤를 가리켜, 사전 환전
+        # 없이 사는 통합증거금 경로에서는 장중·장외·익영업일 4회 관측 모두 0 이었다.
         # 통합증거금 여력은 계좌 하나의 값이라 국내와 공유된다 — 지분만 자기 몫으로 본다
-        total = float(out.get("echm_af_ord_psbl_amt") or 0)
+        total = float(out.get("frcr_ord_psbl_amt1") or 0)
         # 같은 응답의 다른 여력 필드를 나란히 보관한다(판단하지 않는다 — 여력 산정은 위 한 줄
         # 그대로다). 원화만 입금된 계좌에서 '환전이후주문가능금액'은 0 으로 오는데 같은 응답의
         # '외화주문가능금액1'에는 원화 담보가 환산돼 실린다. 어느 쪽이 실제 주문 여력인지는
@@ -302,7 +315,9 @@ class KISOverseasAdapter(MarketAdapter):
         # 이 메서드는 한 스텝에 두 번(예산 조회·주문) 불리므로 원값은 여기 두고, 로깅용
         # 관측치는 get_budget 이 조립한다 — 뒤늦은 주문 쪽 호출이 그것을 덮지 않게 한다.
         self._psamount_raw = {
-            "echm_af_ord_psbl_amt": total,
+            # 두 값 모두 응답에서 직접 읽는다 — 위에서 고른 필드를 그대로 쓰면 관측 채널이
+            # 선택을 따라가 버려, 지금 안 쓰는 쪽이 언제 살아나는지 볼 수 없게 된다.
+            "echm_af_ord_psbl_amt": float(out.get("echm_af_ord_psbl_amt") or 0),
             "frcr_ord_psbl_amt1": float(out.get("frcr_ord_psbl_amt1") or 0),
             "ovrs_max_ord_psbl_qty": float(out.get("ovrs_max_ord_psbl_qty") or 0),
             "exrt": float(out.get("exrt") or 0),
@@ -316,7 +331,11 @@ class KISOverseasAdapter(MarketAdapter):
         기준 통화는 **USD**다. get_equity 는 환율 손익까지 담으려고 원화 총자산을 쓰지만,
         여기서는 주문 통화와 1주 값이 같은 단위여야 비중 환산이 성립한다.
         """
-        ref = self.universe[0]
+        # 관측 유니버스의 첫 종목이 아니라 **주문할 종목**을 기준으로 조회한다. 금액 자체는
+        # 계좌 단위라 심볼과 무관하지만(AAPL·SCHX 조회에서 같은 값 확인), 관측 전용 종목에
+        # 기대면 살 수도 없는 종목의 시세가 빠지는 날 예산이 통째로 None 이 되고 응답의
+        # 주문가능수량도 그 종목 기준이라 읽을 수 없는 값이 된다.
+        ref = self.tradable_ref()
         if not unit_prices.get(ref):
             return None  # 기준가가 없으면 매수여력 조회 자체가 불가
         cash = await self._buying_power(ref, unit_prices[ref])
@@ -344,15 +363,27 @@ class KISOverseasAdapter(MarketAdapter):
         )
 
     async def get_equity(self) -> float:
-        """버킷 평가액 — **원화 총자산**(FX-aware). 원화 담보로 산 미국 자산의 환율 손익까지
-        MDD 서킷이 포착하도록 USD 가 아닌 KRW 로 계상. Risk Engine MDD 입력."""
+        """버킷 평가액 — **원화 기준 시가평가**(FX-aware). Risk Engine MDD 입력.
+
+        예수금은 국내와 한 계좌를 나눠 쓰므로 지분만, 해외 보유는 전부 자기 몫이다.
+        종전에 쓰던 `tot_asst_amt` 는 이름과 달리 총자산이 아니라 **계좌 전체 예수금**
+        이었다 — 국내가 ETF 를 보유한 날 조회해 보니 국내 `dnca_tot_amt` 와 정확히
+        같고 국내 주식 평가액은 빠져 있었다. 그 값을 그대로 쓰면 계좌 현금 전액이 국내와
+        해외 양쪽에서 각자 자기 평가액으로 계상된다.
+        """
+        parts = await self._equity_parts()
+        return bucket_cash(parts["wdrw_psbl_tot_amt"], self.bucket_share) + parts["evlu_amt_smtl_amt"]
+
+    async def _equity_parts(self) -> dict:
+        """평가액 구성요소(원화 기준 조회). 관측성 목적으로 형제 필드도 함께 남긴다 —
+        해외 보유가 0 인 동안은 어느 필드가 보유 평가액인지 값으로 구분되지 않는다."""
         data = await self.session.get(
             "/uapi/overseas-stock/v1/trading/inquire-present-balance",
             tr_id=PRESENT_TR[self.mode],
             params={
                 "CANO": self.cano,
                 "ACNT_PRDT_CD": self.prdt,
-                "WCRC_FRCR_DVSN_CD": "01",  # 원화 기준
+                "WCRC_FRCR_DVSN_CD": "01",  # 원화 기준 — 아래 금액은 모두 KRW
                 "NATN_CD": "840",  # 미국
                 "TR_MKET_CD": "00",
                 "INQR_DVSN_CD": "00",
@@ -361,7 +392,19 @@ class KISOverseasAdapter(MarketAdapter):
         out3 = data.get("output3")
         if isinstance(out3, list):  # 계정 유형별 dict/list 차이 방어
             out3 = out3[0] if out3 else {}
-        return float((out3 or {}).get("tot_asst_amt") or 0)
+        out3 = out3 or {}
+        parts = {k: float(out3.get(k) or 0) for k in (
+            # 현금은 '총예수금'이 아니라 '출금가능총금액'을 쓴다. 예수금은 미결제 매수를 아직
+            # 빼지 않아(결제 D+2), 국내가 산 날 그 대금이 해외 몫에 하루 더 남아 있다 —
+            # 두 시장 평가액의 합이 계좌 순자산을 넘고, 결제일에 국내 매수가 해외의 낙폭으로
+            # 뒤늦게 나타난다. 출금가능액은 이미 반영돼 있어 그날 바로 합이 맞는다.
+            "wdrw_psbl_tot_amt",  # 출금가능총금액 — 계좌 현금(국내와 공유) → 지분만 자기 몫
+            "evlu_amt_smtl_amt",  # 평가금액합계 — 해외 보유 시가평가 → 전부 자기 몫
+            "tot_dncl_amt", "tot_asst_amt", "frcr_evlu_tota", "pchs_amt_smtl_amt",
+        )}
+        parts["bucket_share"] = self.bucket_share
+        self.last_equity_parts = parts
+        return parts
 
     # ── 주문 ──
 
@@ -450,8 +493,9 @@ class KISOverseasAdapter(MarketAdapter):
                     market=self.market, submitted_at=now, accepted=False,
                     error=f"price_outlier {outliers}", price_gap=gaps,
                 )
-            # 통합증거금 매수여력(USD) — 유니버스 대표 1종 기준(금액은 계좌 단위)
-            cash = await self._buying_power(self.universe[0], prices[self.universe[0]])
+            # 통합증거금 매수여력(USD) — 주문 대상 1종 기준(금액은 계좌 단위)
+            ref = self.tradable_ref()
+            cash = await self._buying_power(ref, prices[ref])
             pending = await self._pending_symbols()
 
             # 정수 주만 거래된다 — 소액 계좌에서는 1주 값이 종목당 상한을 넘어 목표가

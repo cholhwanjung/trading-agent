@@ -279,6 +279,7 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
                 env["KIS_REAL_ACCOUNT"],
                 US_UNIVERSE,
                 token_cache=STATE_DIR / "kis_real_token.json",
+                tradable=TRADABLE["US"],
                 mode="real",
                 live_guard=guard,
                 alpaca_key=env.get("ALPACA_PAPER_API_KEY"),  # 뉴스 원천(체결과 분리)
@@ -798,6 +799,15 @@ async def main() -> int:
                           f" exrt={ps['exrt']:.2f}"
                           f" equity_alt={ps.get('equity_alt_krw')}"
                           f" equity_now={equity_now}")
+                # 평가액 구성요소 — 해외 보유가 0 인 동안은 어느 필드가 보유 평가액인지
+                # 값으로 갈리지 않는다. 첫 체결이 쌓인 뒤 이 로그로 확인한다(원화 조회이므로
+                # 보유분이 원화 크기로 나와야 한다 — USD 크기면 필드를 잘못 고른 것).
+                eq = getattr(adapter, "last_equity_parts", None)
+                if eq:
+                    logger.log(market, "equity_parts", eq)
+                    print(f"market={market} equity_parts "
+                          + " ".join(f"{k}={v:,.0f}" for k, v in eq.items() if k != "bucket_share")
+                          + f" share={eq['bucket_share']}")
 
             prices, day = await fetch_prices(adapter, symbols)
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)
