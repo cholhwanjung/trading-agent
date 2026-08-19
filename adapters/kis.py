@@ -27,10 +27,10 @@ import httpx
 
 from adapters.allocation import (
     build_budget,
-    split_account,
     project_to_executable,
     weights_from_quantities,
 )
+from adapters.ledger import AccountLedger, market_funds, split_record
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -320,7 +320,9 @@ class KISDomesticAdapter(MarketAdapter):
         # 필요하다 — 상호 참조라 생성자가 아니라 양쪽을 만든 뒤에 꽂는다. 없으면 0
         # (계좌를 혼자 쓰는 구성).
         self.peer_holdings_fn: Callable[[], Awaitable[float]] | None = None
-        # 예산 산출 내역(총자산·지분·보유·천장) — 로깅 전용. _bucket 이 갱신한다.
+        # 시장별 현금 장부(계좌 공유 시). None 이면 계좌를 혼자 쓰는 구성.
+        self.ledger: AccountLedger | None = None
+        # 예산 산출 내역 — 로깅 전용. _bucket 이 갱신한다.
         self.last_split: dict | None = None
 
     async def close(self) -> None:
@@ -477,18 +479,12 @@ class KISDomesticAdapter(MarketAdapter):
         out2 = (data.get("output2") or [{}])[0]
         account_cash = float(out2.get("prvs_rcdl_excc_amt") or 0)
         held = sum(p.market_value for p in self._parse_positions(data))
-        total = account_cash + held + peer_held
-        cash, equity = split_account(total, self.bucket_share, held, account_cash)
-        self.last_split = {
-            "currency": "KRW",
-            "total_assets": round(total, 2),
-            "share": self.bucket_share,
-            "equity": round(equity, 2),
-            "cash": round(cash, 2),
-            "held": round(held, 2),
-            "peer_held": round(peer_held, 2),
-            "broker_ceiling": round(account_cash, 2),
-        }
+        cash, equity = market_funds(
+            self.ledger, self.market, account_cash, held, peer_held, self.bucket_share
+        )
+        self.last_split = split_record(
+            "KRW", self.ledger, self.market, account_cash, held, peer_held, cash, equity
+        )
         return cash, equity
 
     async def holdings_value(self) -> float:
@@ -712,6 +708,7 @@ class KISDomesticAdapter(MarketAdapter):
                         "order_id": (placed.get("output") or {}).get("ODNO"),
                     }
                 )
+            await self._settle_ledger(orders)
             return OrderResult(
                 market=self.market,
                 submitted_at=now,
@@ -722,7 +719,19 @@ class KISDomesticAdapter(MarketAdapter):
                 quote_status=quote_status,
                 price_gap=gaps,
             )
+
         except Exception as e:  # 주문 실패는 예외가 아니라 결과로 — 러너가 로그로 남긴다
             return OrderResult(
                 market=self.market, submitted_at=now, accepted=False, error=str(e)[:300]
             )
+    async def _settle_ledger(self, orders: list[dict]) -> None:
+        """주문이 나갔으면 이 시장의 현금 장부를 계좌 잔고에 맞춘다.
+
+        체결 금액을 더하고 빼지 않는다 — 부분체결·수수료·호가 차이를 전부 흡수하려면
+        계좌를 다시 읽는 쪽이 정확하다. 주문이 0건이면 부르지 않는다(그 사이의 외부
+        입금까지 이 시장이 삼킨다).
+        """
+        if not self.ledger or not any(not o.get("skipped") for o in orders):
+            return
+        out2 = ((await self._balance()).get("output2") or [{}])[0]
+        self.ledger.settle(self.market, float(out2.get("prvs_rcdl_excc_amt") or 0))

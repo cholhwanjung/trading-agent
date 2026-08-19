@@ -27,10 +27,10 @@ from typing import TYPE_CHECKING
 
 from adapters.allocation import (
     build_budget,
-    split_account,
     project_to_executable,
     weights_from_quantities,
 )
+from adapters.ledger import AccountLedger, market_funds, split_record
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -120,7 +120,9 @@ class KISOverseasAdapter(MarketAdapter):
         self.last_psamount: dict | None = None  # 스텝당 1회, 파생값 포함
         # 평가액 구성요소 관측치 — 로깅 전용. get_equity 가 매 호출 갱신한다.
         self.last_equity_parts: dict | None = None
-        # 시장 예산 산출 내역(총자산·지분·보유·천장) — 로깅 전용. _market_funds 가 갱신.
+        # 시장별 현금 장부(계좌 공유 시). None 이면 계좌를 혼자 쓰는 구성.
+        self.ledger: AccountLedger | None = None
+        # 예산 산출 내역 — 로깅 전용. _market_funds 가 갱신한다.
         self.last_split: dict | None = None
 
     async def close(self) -> None:
@@ -347,16 +349,19 @@ class KISOverseasAdapter(MarketAdapter):
         parts = await self._equity_parts()
         held = sum(p.market_value for p in self._parse_positions(await self._balance_rows()))
         peer = await self.peer_holdings()
-        total = parts["wdrw_psbl_tot_amt"] / exrt + held + peer / exrt
-        cash, equity = split_account(total, self.bucket_share, held, ceiling)
+        # 장부는 계좌 통화(KRW)로 유지된다 — 국내와 같은 원화를 나눠 쓰기 때문이다.
+        # 이 시장의 계산만 USD 로 옮긴다(1주 값과 단위가 같아야 비중이 성립).
+        cash_krw, equity_krw = market_funds(
+            self.ledger, self.market, parts["wdrw_psbl_tot_amt"],
+            held * exrt, peer, self.bucket_share,
+        )
+        cash = min(cash_krw / exrt, ceiling)  # 브로커가 인정하는 외화 여력을 넘지 않는다
+        equity = equity_krw / exrt
         self.last_split = {
-            "currency": "USD",
-            "total_assets": round(total, 2),
-            "share": self.bucket_share,
-            "equity": round(equity, 2),
-            "cash": round(cash, 2),
-            "held": round(held, 2),
-            "peer_held": round(peer / exrt, 2),
+            **split_record(
+                "USD", self.ledger, self.market, parts["wdrw_psbl_tot_amt"] / exrt,
+                held, peer / exrt, cash, equity,
+            ),
             "broker_ceiling": round(ceiling, 2),
             "exrt": exrt,
         }
@@ -400,8 +405,10 @@ class KISOverseasAdapter(MarketAdapter):
         parts = await self._equity_parts()
         held = sum(p.market_value for p in self._parse_positions(await self._balance_rows()))
         peer = await self.peer_holdings()
-        total_krw = parts["wdrw_psbl_tot_amt"] + held * exrt + peer
-        return total_krw * self.bucket_share
+        return market_funds(
+            self.ledger, self.market, parts["wdrw_psbl_tot_amt"],
+            held * exrt, peer, self.bucket_share,
+        )[1]
 
     async def holdings_value(self) -> float:
         """이 시장의 보유 평가액(KRW). 계좌를 공유하는 다른 시장이 총자산을 셀 때 쓴다.
@@ -416,6 +423,18 @@ class KISOverseasAdapter(MarketAdapter):
     async def peer_holdings(self) -> float:
         """계좌를 공유하는 다른 시장의 보유 평가액(KRW). 미연결이면 0(계좌 단독 사용)."""
         return await self.peer_holdings_fn() if self.peer_holdings_fn else 0.0
+
+    async def _settle_ledger(self, orders: list[dict]) -> None:
+        """주문이 나갔으면 이 시장의 현금 장부를 계좌 잔고에 맞춘다.
+
+        체결 금액을 더하고 빼지 않는다 — 부분체결·수수료·환전 차이를 전부 흡수하려면
+        계좌를 다시 읽는 쪽이 정확하다. 주문이 0건이면 부르지 않는다(그 사이의 외부
+        입금까지 이 시장이 삼킨다).
+        """
+        if not self.ledger or not any(not o.get("skipped") for o in orders):
+            return
+        parts = await self._equity_parts()
+        self.ledger.settle(self.market, parts["wdrw_psbl_tot_amt"])
 
     async def _exchange_rate(self) -> float:
         """고시환율(KRW/USD). 매수여력 응답에 실려 오므로 이미 조회했으면 그 값을 쓴다."""
@@ -614,6 +633,7 @@ class KISOverseasAdapter(MarketAdapter):
                     }
                 )
             total = equity
+            await self._settle_ledger(orders)
             return OrderResult(
                 market=self.market,
                 submitted_at=now,

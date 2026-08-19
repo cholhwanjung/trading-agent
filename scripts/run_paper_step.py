@@ -69,6 +69,7 @@ from regime import (  # noqa: E402
     update_regime_signal,
 )
 from adapters import configure_observation, is_market_closed_error  # noqa: E402
+from adapters.ledger import AccountLedger  # noqa: E402
 from adapters.universe import ETF, asset_class, resolve_asset_caps  # noqa: E402
 from risk import (  # noqa: E402
     RiskEngine,
@@ -355,11 +356,15 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
 
 
 def link_shared_account(adapters: dict[str, tuple[object, list[str]]]) -> None:
-    """통합증거금 계좌를 나눠 쓰는 시장끼리 서로의 보유 평가액을 볼 수 있게 연결한다.
+    """한 계좌를 나눠 쓰는 시장끼리 현금 장부를 공유하고 서로의 보유를 볼 수 있게 한다.
 
-    각 시장의 예산은 **계좌 총자산 × 지분**이고, 총자산은 계좌 현금에 양쪽 보유를 더한
-    값이다. 한쪽이 상대 보유를 못 보면 그 시장은 총자산을 자기 몫만큼 작게 보고, 지분의
-    합이 1 이어도 예산의 합이 계좌와 어긋난다. 상호 참조라 생성 뒤에 꽂는다.
+    두 시장을 **서로 다른 거래소처럼** 다룬다 — 각자 현금 장부를 갖고, 자기 매매로만
+    그 현금을 움직인다. 보유 종목은 응답에 시장이 드러나므로 나눌 필요가 없고, 나뉘지
+    않는 것은 현금뿐이라 그것만 장부로 관리한다(adapters.ledger).
+
+    상대 보유가 필요한 이유는 **최초 배정** 하나다 — 이미 보유가 있는 상태에서 장부를
+    처음 만들 때 총자산을 알아야 지분대로 나눌 수 있다. 그 뒤로는 서로의 잔고를 보지
+    않는다. 상호 참조라 생성 뒤에 꽂는다.
 
     잡은 시장별로 나뉘어 있어도 두 어댑터는 한 프로세스에 함께 만들어진다 — 이 조회는
     자기 잔고를 읽는 것이라 상대 시장의 장 시간과 무관하다.
@@ -369,11 +374,17 @@ def link_shared_account(adapters: dict[str, tuple[object, list[str]]]) -> None:
     if not all(hasattr(a, "holdings_value") for a in (kr, us)):
         return  # 한쪽이 없거나 계좌 개념이 다른 어댑터(Alpaca)
     # 같은 계좌일 때만 연결한다 — KR 모의 + US 실계좌처럼 서로 다른 계좌를 이으면
-    # 남의 보유를 자기 총자산에 더하게 된다.
+    # 남의 현금을 자기 것으로 보게 된다.
     if (kr.cano, kr.mode) != (us.cano, us.mode):
         return
     kr.peer_holdings_fn = us.holdings_value
     us.peer_holdings_fn = kr.holdings_value
+    ledger = AccountLedger(
+        STATE_DIR / f"cash_ledger_{kr.cano}_{kr.mode}.json",
+        {"KR": kr.bucket_share, "US": us.bucket_share},
+        account_key=f"{kr.cano}:{kr.mode}",
+    )
+    kr.ledger = us.ledger = ledger
 
 
 def account_peer(adapter: object) -> object | None:
@@ -852,18 +863,21 @@ async def main() -> int:
                     print(f"market={market} equity_parts "
                           + " ".join(f"{k}={v:,.0f}" for k, v in eq.items() if k != "bucket_share")
                           + f" share={eq['bucket_share']}")
-            # 예산 산출 내역 — 지분이 실제로 지켜지는지는 여기서만 보인다. 시장별 예산의
-            # 합이 계좌 총자산과 같은지는 두 시장이 같은 total_assets 를 보고했는지로 갈리고,
-            # 지분이 밀리는지는 equity/total_assets 가 share 에 머무는지로 갈린다.
+            # 예산 산출 내역 — 장부가 어긋나는지는 여기서만 보인다. reconcile.action 이
+            # ok 가 아니면 계좌 현금이 이 시장의 매매로 설명되지 않았다는 뜻이고,
+            # share 는 계좌 전체 대비 이 시장의 실제 몫이다(장부 구조상 매매로 움직인다 —
+            # 지분에서 멀어지는 것 자체는 결함이 아니라 각자 손익을 가진 결과다).
             sp = getattr(adapter, "last_split", None)
             if sp:
-                actual = sp["equity"] / sp["total_assets"] if sp["total_assets"] else 0.0
-                logger.log(market, "account_split", {**sp, "actual_share": round(actual, 4)})
-                print(f"market={market} account_split total={sp['total_assets']:,.2f}"
-                      f" {sp['currency']} share={sp['share']} actual={actual:.4f}"
+                total = sp["account_total"]
+                share = sp["equity"] / total if total else 0.0
+                logger.log(market, "account_split", {**sp, "share_of_account": round(share, 4)})
+                print(f"market={market} account_split {sp['currency']}"
                       f" equity={sp['equity']:,.2f} cash={sp['cash']:,.2f}"
                       f" held={sp['held']:,.2f} peer={sp['peer_held']:,.2f}"
-                      f" ceiling={sp['broker_ceiling']:,.2f}")
+                      f" account_cash={sp['account_cash']:,.2f} share={share:.4f}"
+                      f" reconcile={sp['reconcile'].get('action')}"
+                      f" drift={sp['reconcile'].get('drift')}")
 
             prices, day = await fetch_prices(adapter, symbols)
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)
