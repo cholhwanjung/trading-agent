@@ -350,7 +350,56 @@ def build_adapters(env: dict[str, str]) -> dict[str, tuple[object, list[str]]]:
             ),
             KR_UNIVERSE,
         )
+    link_shared_account(out)
     return out
+
+
+def link_shared_account(adapters: dict[str, tuple[object, list[str]]]) -> None:
+    """통합증거금 계좌를 나눠 쓰는 시장끼리 서로의 보유 평가액을 볼 수 있게 연결한다.
+
+    각 시장의 예산은 **계좌 총자산 × 지분**이고, 총자산은 계좌 현금에 양쪽 보유를 더한
+    값이다. 한쪽이 상대 보유를 못 보면 그 시장은 총자산을 자기 몫만큼 작게 보고, 지분의
+    합이 1 이어도 예산의 합이 계좌와 어긋난다. 상호 참조라 생성 뒤에 꽂는다.
+
+    잡은 시장별로 나뉘어 있어도 두 어댑터는 한 프로세스에 함께 만들어진다 — 이 조회는
+    자기 잔고를 읽는 것이라 상대 시장의 장 시간과 무관하다.
+    """
+    kr = adapters.get("KR", (None,))[0]
+    us = adapters.get("US", (None,))[0]
+    if not all(hasattr(a, "holdings_value") for a in (kr, us)):
+        return  # 한쪽이 없거나 계좌 개념이 다른 어댑터(Alpaca)
+    # 같은 계좌일 때만 연결한다 — KR 모의 + US 실계좌처럼 서로 다른 계좌를 이으면
+    # 남의 보유를 자기 총자산에 더하게 된다.
+    if (kr.cano, kr.mode) != (us.cano, us.mode):
+        return
+    kr.peer_holdings_fn = us.holdings_value
+    us.peer_holdings_fn = kr.holdings_value
+
+
+def account_peer(adapter: object) -> object | None:
+    """총자산을 셀 때 이 어댑터가 잔고를 조회하는 상대 어댑터. 없으면 None."""
+    return getattr(getattr(adapter, "peer_holdings_fn", None), "__self__", None)
+
+
+async def close_unselected(adapters: dict, keep: set[str]) -> list:
+    """선택 밖 어댑터를 닫고, **닫지 않고 남긴 것**을 돌려준다(호출부가 마지막에 닫는다).
+
+    잡은 시장별로 갈려 있지만 계좌를 나눠 쓰는 두 시장은 서로의 보유 평가액을 읽어야
+    총자산이 나온다. 상대를 닫으면 그 조회가 실패한다 — 실패를 0 으로 떨어뜨리면
+    총자산이 상대 보유만큼 작아진 채 예산이 산출되므로(조용한 오차) 살려 둔다.
+    """
+    needed = {id(account_peer(a)) for m, (a, _) in adapters.items() if m in keep}
+    kept = []
+    for market, (adapter, _) in adapters.items():
+        if market in keep:
+            continue
+        if id(adapter) in needed:
+            kept.append(adapter)
+            continue
+        close = getattr(adapter, "close", None)
+        if close:
+            await close()
+    return kept
 
 
 async def fetch_prices(adapter, symbols: list[str]):
@@ -604,14 +653,12 @@ async def main() -> int:
         return 0
 
     adapters = build_adapters(env)
+    peer_adapters: list = []  # 이 잡의 시장이 아니지만 총자산 계산에 필요해 열어 둔 것
     # --markets KR / --markets CRYPTO,US — 장 시간이 다른 시장을 별도 잡으로 분리
     if args.markets:
         wanted = args.markets
         dropped = wanted - set(adapters)
-        for adapter, _ in (v for k, v in adapters.items() if k not in wanted):
-            close = getattr(adapter, "close", None)
-            if close:
-                await close()
+        peer_adapters = await close_unselected(adapters, wanted)
         adapters = {k: v for k, v in adapters.items() if k in wanted}
         if dropped:
             print(f"status=warn detail=요청 시장 키 없음/형식 오류: {sorted(dropped)}")
@@ -782,12 +829,10 @@ async def main() -> int:
                     })
                     print(f"market={market} exec_gap_worst={worst[0]}:{worst[1]:+.4f}")
 
-                # 매수여력 필드·환산 평가액 (shadow) — 계산·로깅만, 여력 산정과 서킷 입력은
-                # 그대로다. 원화만 입금된 계좌에서 지금 읽는 여력 필드가 0 으로 오는데, 같은
-                # 응답의 다른 필드에는 원화 담보가 환산돼 실린다. 어느 쪽이 실제 주문 여력인지는
-                # 장중/장외와 증거금 신청 반영 시점을 걸쳐야 갈리므로 두 값을 나란히 남긴다.
-                # 평가액도 같이 찍는다 — 지금 값은 계좌 전체라 이 시장의 낙폭이 다른 시장
-                # 자산에 희석되는데, 교체 후보와 나란히 봐야 그 차이가 얼마인지 센다.
+                # 매수여력 필드 (shadow) — 계산·로깅만, 여력 산정은 그대로다. 원화만 입금된
+                # 계좌에서 '환전이후주문가능금액'이 0 으로 오는데 같은 응답의 '외화주문가능
+                # 금액1'에는 원화 담보가 환산돼 실린다. 지금 쓰는 쪽만 남기면 안 쓰는 쪽이
+                # 언제 살아나는지 볼 수 없으므로 두 값을 나란히 남긴다.
                 ps = getattr(adapter, "last_psamount", None)
                 if ps:
                     equity_now = guard.last_decision.get("equity")
@@ -797,7 +842,6 @@ async def main() -> int:
                           f" frcr1={ps['frcr_ord_psbl_amt1']:.2f}"
                           f" max_qty={ps['ovrs_max_ord_psbl_qty']:.0f}"
                           f" exrt={ps['exrt']:.2f}"
-                          f" equity_alt={ps.get('equity_alt_krw')}"
                           f" equity_now={equity_now}")
                 # 평가액 구성요소 — 해외 보유가 0 인 동안은 어느 필드가 보유 평가액인지
                 # 값으로 갈리지 않는다. 첫 체결이 쌓인 뒤 이 로그로 확인한다(원화 조회이므로
@@ -808,6 +852,18 @@ async def main() -> int:
                     print(f"market={market} equity_parts "
                           + " ".join(f"{k}={v:,.0f}" for k, v in eq.items() if k != "bucket_share")
                           + f" share={eq['bucket_share']}")
+            # 예산 산출 내역 — 지분이 실제로 지켜지는지는 여기서만 보인다. 시장별 예산의
+            # 합이 계좌 총자산과 같은지는 두 시장이 같은 total_assets 를 보고했는지로 갈리고,
+            # 지분이 밀리는지는 equity/total_assets 가 share 에 머무는지로 갈린다.
+            sp = getattr(adapter, "last_split", None)
+            if sp:
+                actual = sp["equity"] / sp["total_assets"] if sp["total_assets"] else 0.0
+                logger.log(market, "account_split", {**sp, "actual_share": round(actual, 4)})
+                print(f"market={market} account_split total={sp['total_assets']:,.2f}"
+                      f" {sp['currency']} share={sp['share']} actual={actual:.4f}"
+                      f" equity={sp['equity']:,.2f} cash={sp['cash']:,.2f}"
+                      f" held={sp['held']:,.2f} peer={sp['peer_held']:,.2f}"
+                      f" ceiling={sp['broker_ceiling']:,.2f}")
 
             prices, day = await fetch_prices(adapter, symbols)
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)
@@ -967,7 +1023,7 @@ async def main() -> int:
             print(f"briefing_error={type(e).__name__}: {str(e)[:120]}")
         return exit_code
     finally:
-        for adapter, _ in adapters.values():
+        for adapter in [a for a, _ in adapters.values()] + peer_adapters:
             close = getattr(adapter, "close", None)
             if close:
                 await close()

@@ -37,6 +37,7 @@ from scripts.run_paper_step import (  # noqa: E402
     STATE_DIR,
     TRADABLE,
     build_adapters,
+    close_unselected,
     load_prev_weights,
 )
 from trader import LLMTrader  # noqa: E402
@@ -95,9 +96,8 @@ async def main() -> int:
         print(f"status=skip detail={market} 어댑터 키 없음/형식 오류")
         return 0
     adapter, symbols = adapters[market]
-    for m, (a, _) in adapters.items():
-        if m != market:
-            await _close(a)
+    # 계좌를 나눠 쓰는 상대 시장은 닫지 않는다 — 총자산 계산에 그쪽 잔고가 필요하다.
+    peer_adapters = await close_unselected(adapters, {market})
 
     logger = JsonlLogger(ROOT / "data" / "logs")
     watch_path = STATE_DIR / f"watch_{market}.json"
@@ -175,7 +175,8 @@ async def main() -> int:
         _save_watch_state(watch_path, new_state)
         return 0 if result.accepted else 1
     finally:
-        await _close(adapter)
+        for a in [adapter, *peer_adapters]:
+            await _close(a)
         await router.close()
         for lock in locks:  # 락 해제 (프로세스 종료로도 커널이 해제하나 즉시 반납)
             lock.close()

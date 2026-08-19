@@ -6,8 +6,9 @@
 - 잔고·주문 tr_id 는 모의/실전이 다르다(V… / T…) — mode 로 전환.
 - 뉴스: 무료 원천 미정 — 빈 리스트 (DART 공시 연동은 향후 작업).
 - KR 은 정수 주식 수만 주문 가능 — qty < 1주 는 dust 로 스킵.
-- 통합증거금 계좌는 국내와 해외가 같은 원화 현금을 쓴다. 시장마다 배분 벡터가 따로
-  있으므로 현금은 bucket_share 지분만 자기 몫으로 본다.
+- 통합증거금 계좌는 국내와 해외가 같은 원화를 쓴다. 시장마다 배분 벡터가 따로 있으므로
+  **총자산**에 bucket_share 지분을 곱한 만큼만 자기 예산으로 본다. 총자산은 계좌 현금에
+  양쪽 시장의 보유 평가액을 더해 구한다 — 해외분은 peer_holdings_fn 으로 주입받는다.
 """
 
 from __future__ import annotations
@@ -25,8 +26,8 @@ from typing import TYPE_CHECKING
 import httpx
 
 from adapters.allocation import (
-    bucket_cash,
     build_budget,
+    split_account,
     project_to_executable,
     weights_from_quantities,
 )
@@ -302,7 +303,7 @@ class KISDomesticAdapter(MarketAdapter):
         min_notional: float = 10_000.0,  # KRW — 1주 미만 잔주문 방지
         dart_api_key: str | None = None,  # 있으면 공시를 관측 뉴스에 편입
         live_guard: LiveGuard | None = None,  # 실전 절대 금액 가드(모의는 None)
-        bucket_share: float = 1.0,  # 이 계좌의 현금 중 KR 몫 (계좌 단독 사용이면 1.0)
+        bucket_share: float = 1.0,  # 이 계좌 총자산 중 KR 몫 (계좌 단독 사용이면 1.0)
     ) -> None:
         assert mode in ("demo", "real"), f"mode={mode!r} — 'demo' 또는 'real'"
         self.session = KISSession(
@@ -315,6 +316,12 @@ class KISDomesticAdapter(MarketAdapter):
         self._dart_key = dart_api_key
         self.live_guard = live_guard
         self.bucket_share = bucket_share
+        # 계좌를 공유하는 다른 시장의 보유 평가액(KRW)을 돌려주는 함수. 총자산을 셀 때
+        # 필요하다 — 상호 참조라 생성자가 아니라 양쪽을 만든 뒤에 꽂는다. 없으면 0
+        # (계좌를 혼자 쓰는 구성).
+        self.peer_holdings_fn: Callable[[], Awaitable[float]] | None = None
+        # 예산 산출 내역(총자산·지분·보유·천장) — 로깅 전용. _bucket 이 갱신한다.
+        self.last_split: dict | None = None
 
     async def close(self) -> None:
         await self.session.close()
@@ -461,18 +468,39 @@ class KISDomesticAdapter(MarketAdapter):
     async def get_positions(self) -> list[Position]:
         return self._parse_positions(await self._balance())
 
-    def _bucket(self, data: dict) -> tuple[float, float]:
-        """잔고 응답 → (이 시장이 쓸 수 있는 현금, 이 시장의 순자산).
+    def _bucket(self, data: dict, peer_held: float) -> tuple[float, float]:
+        """잔고 응답 → (이 시장이 쓸 수 있는 현금, 이 시장의 예산=평가액).
 
-        예수금(dnca_tot_amt)은 T+2 정산 미반영으로 과대계상 — 총평가에서 역산한다.
+        계좌 현금은 예수금(dnca_tot_amt)이 아니라 가수도정산금액을 쓴다 — 예수금은 결제
+        전 매수대금을 아직 빼지 않아, 산 당일에는 이미 나간 돈이 그대로 남아 있다.
         """
-        total_eval = float((data.get("output2") or [{}])[0].get("tot_evlu_amt") or 0)
+        out2 = (data.get("output2") or [{}])[0]
+        account_cash = float(out2.get("prvs_rcdl_excc_amt") or 0)
         held = sum(p.market_value for p in self._parse_positions(data))
-        cash = bucket_cash(total_eval - held, self.bucket_share)
-        return cash, cash + held
+        total = account_cash + held + peer_held
+        cash, equity = split_account(total, self.bucket_share, held, account_cash)
+        self.last_split = {
+            "currency": "KRW",
+            "total_assets": round(total, 2),
+            "share": self.bucket_share,
+            "equity": round(equity, 2),
+            "cash": round(cash, 2),
+            "held": round(held, 2),
+            "peer_held": round(peer_held, 2),
+            "broker_ceiling": round(account_cash, 2),
+        }
+        return cash, equity
+
+    async def holdings_value(self) -> float:
+        """이 시장의 보유 평가액(KRW). 계좌를 공유하는 다른 시장이 총자산을 셀 때 쓴다."""
+        return sum(p.market_value for p in self._parse_positions(await self._balance()))
+
+    async def peer_holdings(self) -> float:
+        """계좌를 공유하는 다른 시장의 보유 평가액(KRW). 미연결이면 0(계좌 단독 사용)."""
+        return await self.peer_holdings_fn() if self.peer_holdings_fn else 0.0
 
     async def get_equity(self) -> float:
-        return self._bucket(await self._balance())[1]
+        return self._bucket(await self._balance(), await self.peer_holdings())[1]
 
     async def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         """실시간 체결가 — 당일, 행동 전용(실시간 이벤트 트리거 감시·재결정 입력)."""
@@ -600,7 +628,7 @@ class KISDomesticAdapter(MarketAdapter):
 
     async def get_budget(self, unit_prices: dict[str, float]):
         """국내주식은 정수 주만 거래된다 — 1주 값이 곧 배분의 최소 눈금이다."""
-        cash, equity = self._bucket(await self._balance())
+        cash, equity = self._bucket(await self._balance(), await self.peer_holdings())
         return build_budget(
             "KRW",
             equity,
@@ -620,8 +648,8 @@ class KISDomesticAdapter(MarketAdapter):
                 market=self.market, submitted_at=now, accepted=False, error="kill_switch_active"
             )
         try:
-            data = await self._balance()  # 잔고 1회로 총평가·보유 동시 파싱
-            cash, equity = self._bucket(data)
+            data = await self._balance()  # 잔고 1회로 계좌현금·보유 동시 파싱
+            cash, equity = self._bucket(data, await self.peer_holdings())
             held_qty = {p.symbol: p.quantity for p in self._parse_positions(data)}
             quotes = {s: await self._quote(s) for s in self.universe}
             prices = {s: q.price for s, q in quotes.items()}
