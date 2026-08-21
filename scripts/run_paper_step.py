@@ -854,13 +854,18 @@ async def main() -> int:
                           f" max_qty={ps['ovrs_max_ord_psbl_qty']:.0f}"
                           f" exrt={ps['exrt']:.2f}"
                           f" equity_now={equity_now}")
-                # 평가액 구성요소 — 해외 보유가 0 인 동안은 어느 필드가 보유 평가액인지
-                # 값으로 갈리지 않는다. 첫 체결이 쌓인 뒤 이 로그로 확인한다(원화 조회이므로
-                # 보유분이 원화 크기로 나와야 한다 — USD 크기면 필드를 잘못 고른 것).
-                eq = getattr(adapter, "last_equity_parts", None)
-                if eq:
-                    logger.log(market, "equity_parts", eq)
-                    print(f"market={market} equity_parts "
+                # 평가액 구성요소 — 주문 전과 체결 후를 따로 남긴다. 같은 이름으로 덮으면
+                # 예산 산출에 쓰인 값과 체결 뒤 값이 한 스텝 로그에 섞여, 나중에 어느
+                # 시점인지 알 수 없다(첫 체결 날 실제로 그렇게 나왔다).
+                for slot, event in (
+                    ("last_equity_parts", "equity_parts"),
+                    ("last_equity_parts_post", "equity_parts_post"),
+                ):
+                    eq = getattr(adapter, slot, None)
+                    if not eq:
+                        continue
+                    logger.log(market, event, eq)
+                    print(f"market={market} {event} "
                           + " ".join(f"{k}={v:,.0f}" for k, v in eq.items() if k != "bucket_share")
                           + f" share={eq['bucket_share']}")
             # 예산 산출 내역 — 장부가 어긋나는지는 여기서만 보인다. reconcile.action 이

@@ -118,8 +118,9 @@ class KISOverseasAdapter(MarketAdapter):
         # 매수여력 조회 관측치 — 로깅 전용(결정·주문 미개입). _buying_power/get_budget 참조.
         self._psamount_raw: dict | None = None  # 매 조회 갱신
         self.last_psamount: dict | None = None  # 스텝당 1회, 파생값 포함
-        # 평가액 구성요소 관측치 — 로깅 전용. get_equity 가 매 호출 갱신한다.
-        self.last_equity_parts: dict | None = None
+        # 평가액 구성요소 관측치 — 로깅 전용. 결정 시점과 체결 후를 따로 담는다.
+        self.last_equity_parts: dict | None = None  # 주문 전(예산 산출에 쓰인 값)
+        self.last_equity_parts_post: dict | None = None  # 체결 후(장부 화해에 쓰인 값)
         # 시장별 현금 장부(계좌 공유 시). None 이면 계좌를 혼자 쓰는 구성.
         self.ledger: AccountLedger | None = None
         # 예산 산출 내역 — 로깅 전용. _market_funds 가 갱신한다.
@@ -346,7 +347,7 @@ class KISOverseasAdapter(MarketAdapter):
         exrt = (self._psamount_raw or {}).get("exrt") or 0.0
         if not exrt:
             return 0.0, 0.0  # 환율을 못 읽으면 국내 보유분을 합칠 수 없다
-        parts = await self._equity_parts()
+        parts = self.last_equity_parts = await self._equity_parts()
         held = sum(p.market_value for p in self._parse_positions(await self._balance_rows()))
         peer = await self.peer_holdings()
         # 장부는 계좌 통화(KRW)로 유지된다 — 국내와 같은 원화를 나눠 쓰기 때문이다.
@@ -402,7 +403,7 @@ class KISOverseasAdapter(MarketAdapter):
         exrt = await self._exchange_rate()
         if not exrt:
             return 0.0
-        parts = await self._equity_parts()
+        parts = self.last_equity_parts = await self._equity_parts()
         held = sum(p.market_value for p in self._parse_positions(await self._balance_rows()))
         peer = await self.peer_holdings()
         return market_funds(
@@ -433,7 +434,7 @@ class KISOverseasAdapter(MarketAdapter):
         """
         if not self.ledger or not any(not o.get("skipped") for o in orders):
             return
-        parts = await self._equity_parts()
+        parts = self.last_equity_parts_post = await self._equity_parts()
         self.ledger.settle(self.market, parts["wdrw_psbl_tot_amt"])
 
     async def _exchange_rate(self) -> float:
@@ -449,8 +450,12 @@ class KISOverseasAdapter(MarketAdapter):
         return (self._psamount_raw or {}).get("exrt") or 0.0
 
     async def _equity_parts(self) -> dict:
-        """평가액 구성요소(원화 기준 조회). 관측성 목적으로 형제 필드도 함께 남긴다 —
-        해외 보유가 0 인 동안은 어느 필드가 보유 평가액인지 값으로 구분되지 않는다."""
+        """평가액 구성요소(원화 기준 조회). 관측성 목적으로 형제 필드도 함께 담는다 —
+        해외 보유가 0 인 동안은 어느 필드가 보유 평가액인지 값으로 구분되지 않는다.
+
+        **기록은 호출부가 한다.** 이 조회는 결정 전과 체결 후 양쪽에서 불리는데, 한 슬롯에
+        담으면 같은 스텝 로그에 시점이 다른 값이 섞여 나중에 어느 쪽인지 알 수 없다.
+        """
         data = await self.session.get(
             "/uapi/overseas-stock/v1/trading/inquire-present-balance",
             tr_id=PRESENT_TR[self.mode],
@@ -477,7 +482,6 @@ class KISOverseasAdapter(MarketAdapter):
             "tot_dncl_amt", "tot_asst_amt", "frcr_evlu_tota", "pchs_amt_smtl_amt",
         )}
         parts["bucket_share"] = self.bucket_share
-        self.last_equity_parts = parts
         return parts
 
     # ── 주문 ──
