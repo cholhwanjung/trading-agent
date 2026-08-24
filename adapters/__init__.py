@@ -14,6 +14,7 @@ from adapters.base import (
     bar_observation_window,
     configure_observation,
     is_market_closed_error,
+    is_market_weekend,
     observation_window,
     off_session_weekday,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "bar_observation_window",
     "configure_observation",
     "is_market_closed_error",
+    "is_market_weekend",
     "observation_window",
     "off_session_weekday",
 ]

@@ -159,20 +159,27 @@ def price_outliers(gaps: dict[str, float]) -> dict[str, float]:
     return {s: g for s, g in gaps.items() if abs(g) > MAX_EXECUTION_GAP}
 
 
-# 브로커가 "장이 닫혀 있다"는 뜻으로 돌려주는 거부 문구. 브로커마다 표현이 달라
-# 코드가 아니라 메시지로 식별할 수밖에 없다(공통 에러코드 규약이 없다).
+# 브로커가 "장이 닫혀 있다"는 뜻으로 돌려주는 거부 문구. 공통 에러코드 규약이 없어
+# 메시지로 식별할 수밖에 없는데, **이 목록은 신뢰할 수 없다** — 같은 브로커라도 계좌
+# 종류(모의/실전)와 국내/해외에 따라 다른 문장을 쓴다. 실제로 모의투자 문구만 담고
+# 있던 탓에 실계좌 전환 후 주말 거부가 전부 실패로 집계됐다. 그래서 주말 판정은
+# 이 목록이 아니라 달력(is_market_weekend)이 담당하고, 여기 남는 몫은 휴장일뿐이다.
 _MARKET_CLOSED_HINTS = (
     "영업일이 아닙니다",  # KIS 모의투자 — 주말·공휴일
-    "장운영시간이 아닙니다",  # KIS — 장 시작 전/마감 후
+    "장운영시간이 아닙니다",  # KIS 국내 — 장 시작 전/마감 후
+    "장운영일자가 주문일과 상이",  # KIS 국내 실전 — 주말·휴장일
+    "휴장일",  # KIS 해외 실전 — "금일은 해외 휴장일로 주문이 불가합니다"
     "market is closed",
 )
 
 
 def is_market_closed_error(error: str | None) -> bool:
-    """주문 거부 사유가 '장 마감'인지. 운영 장애와 구분하기 위한 판정.
+    """주문 거부 사유가 '장 마감'인지 브로커 문구로 추정. 휴장일 판정에만 쓴다.
 
     장이 닫혀 있으면 체결될 주문 자체가 없으므로 이것은 실패가 아니다. 실패로 세면
     주말마다 종료코드·통지·대시보드 경고가 켜져서 진짜 장애 신호가 그 잡음에 묻힌다.
+    주말은 추정할 필요가 없으니 is_market_weekend 로 확정한다 — 이쪽은 문구가 바뀌면
+    조용히 빗나가므로, 달력으로 알 수 있는 것을 문자열에 맡기지 않는다.
     """
     return bool(error) and any(hint in error for hint in _MARKET_CLOSED_HINTS)
 
@@ -187,7 +194,7 @@ REGULAR_SESSIONS: dict[str, tuple[str, time, time]] = {
 def off_session_weekday(market: str, now: datetime) -> str | None:
     """평일인데 정규장 밖이면 사유 문자열, 아니면 None. 정규장이 없는 시장은 항상 None.
 
-    **주말은 None 이다** — 주말 주문 거부는 장 마감(is_market_closed_error)으로 이미
+    **주말은 None 이다** — 주말 주문 거부는 장 마감(is_market_weekend)으로 이미
     조용히 처리되고 그게 맞다. 평일 장외는 뜻이 완전히 다르다: 실행 시각이 시장 시간과
     어긋났다는 신호다. 그런데 브로커는 이것도 똑같이 '장 마감'으로 거부하므로, 갈라내지
     않으면 주문 0건인 상태가 주말·휴장과 섞여 정상처럼 보인다. 미국장은 서머타임이
@@ -209,6 +216,27 @@ def off_session_weekday(market: str, now: datetime) -> str | None:
         f"off_session_weekday market={market}"
         f" local={local:%Y-%m-%d %H:%M %Z} session={open_t:%H:%M}-{close_t:%H:%M}"
     )
+
+
+def is_market_weekend(market: str, now: datetime) -> bool:
+    """정규장이 있는 시장의 현지 시각이 주말인가. 24/7 시장은 항상 False.
+
+    주말이면 체결될 주문이 애초에 없으므로, 브로커가 어떤 문장으로 거부하든 그것은
+    장 마감이다. is_market_closed_error 가 같은 사실을 문구로 **추정**하는데 문구는
+    계좌 종류·국내/해외마다 달라서, 실계좌 전환만으로 판정이 조용히 빗나갔다(주말
+    거부가 전부 실패로 집계되어 대시보드가 몇 주간 붉었다). 달력으로 알 수 있는 것을
+    문자열 매칭에 맡기지 않는다.
+
+    대가: 주말에 처음 나타나는 진짜 장애도 함께 조용해진다. 다만 인증·계좌 조회 실패는
+    집행 이전 단계라 degraded 로 따로 시끄럽고, 주문 제출만의 실패는 월요일에 다시
+    난다 — 은폐가 아니라 지연이다.
+    """
+    session = REGULAR_SESSIONS.get(market)
+    if session is None:
+        return False
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(ZoneInfo(session[0])).weekday() >= 5
 
 
 def observation_window(asof_day: date, lookback: int | None = None) -> tuple[date, date]:

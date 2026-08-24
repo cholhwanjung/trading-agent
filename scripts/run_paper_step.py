@@ -68,7 +68,11 @@ from regime import (  # noqa: E402
     propose_meta_weights,
     update_regime_signal,
 )
-from adapters import configure_observation, is_market_closed_error  # noqa: E402
+from adapters import (  # noqa: E402
+    configure_observation,
+    is_market_closed_error,
+    is_market_weekend,
+)
 from adapters.ledger import AccountLedger  # noqa: E402
 from adapters.universe import ETF, asset_class, resolve_asset_caps  # noqa: E402
 from risk import (  # noqa: E402
@@ -736,8 +740,12 @@ async def main() -> int:
                 # degraded = 브로커 장애로 실주문만 건너뛴 상태. 결정·가상 arm 은 기록됐다.
                 degraded = bool(outcome.error and outcome.error.startswith("execution_skipped"))
                 # closed = 장 마감(주말·공휴일)으로 인한 거부. 체결될 주문이 없었을 뿐이라
-                # 실패가 아니다 — 종료코드도 통지도 올리지 않는다.
-                closed = is_market_closed_error(outcome.error)
+                # 실패가 아니다 — 종료코드도 통지도 올리지 않는다. 주말은 달력으로 확정하고
+                # (브로커 문구는 계좌·시장마다 달라 조용히 빗나간다), 문구 판정은 휴장일 몫만
+                # 남긴다. degraded 는 집행 이전 단계의 장애라 주말이어도 삼키지 않는다.
+                closed = is_market_closed_error(outcome.error) or (
+                    not degraded and is_market_weekend(market, datetime.now(timezone.utc))
+                )
                 # 주문이 수리(accepted)돼도 한 건도 못 낸 날이 있다 — 자금 없음·상한 초과·
                 # 예산 부족. 종전엔 전부 ok 였고, 그래서 실계좌가 며칠씩 놀아도 성공으로
                 # 보고됐다. 집행 여부는 아래 메모리 기록 분기에서도 다시 쓰인다.
