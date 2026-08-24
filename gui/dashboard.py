@@ -540,6 +540,11 @@ with tab_obs:
                 cites = decision["cited_signal_ids"] + decision["cited_memory_ids"]
                 if cites:
                     st.caption("인용: " + " · ".join(f"`{c}`" for c in cites))
+                rev = decision.get("prompt_rev")
+                st.caption(
+                    f"정책 판본: `{rev}`" if rev
+                    else "정책 판본: 기록 이전 결정 (판본 표기 도입 전)"
+                )
                 if decision["risk_violations"]:
                     st.warning("risk 위반 → 클램프: " + "; ".join(decision["risk_violations"]))
                 if decision["debate"]:

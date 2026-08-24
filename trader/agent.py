@@ -9,7 +9,9 @@ last_decision 에 근거·인용 ID·시나리오가 남아 loop 가 감사 로�
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from datetime import date
@@ -32,7 +34,33 @@ PLAYBOOK_PATH = Path(__file__).parent / "playbook.md"
 
 
 def load_playbook() -> str:
-    return PLAYBOOK_PATH.read_text(encoding="utf-8") if PLAYBOOK_PATH.exists() else ""
+    """플레이북 원칙 텍스트. **변경 로그(HTML 주석)는 제거하고** 원칙만 넘긴다.
+
+    변경 로그는 사람이 읽는 개정 기록이지 결정의 사전 지식이 아니다. 그대로 실으면
+    "직전 판본은 방어적이어서 성과가 나빴다" 같은 **개정의 경위**가 매 결정 프롬프트에
+    들어가는데, 그것은 원칙보다 훨씬 강하고 통제되지 않는 유도다 — 모델이 원칙을 읽는
+    대신 과거 성과 서사에 반응하게 된다. 주석 문법(`<!-- -->`)이 이미 "렌더된 문서에
+    보이지 않는 것"을 뜻하므로, 프롬프트에서도 같게 취급한다.
+    """
+    if not PLAYBOOK_PATH.exists():
+        return ""
+    text = PLAYBOOK_PATH.read_text(encoding="utf-8")
+    return re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL).strip()
+
+
+def prompt_rev(playbook: str) -> str:
+    """유효 정책 텍스트(시스템 프롬프트 + 트리거 절 + 플레이북)의 12자리 지문.
+
+    결정마다 기록해 **어느 정책 판본이 그 결정을 냈는지**를 로그 자체가 말하게 한다.
+    프롬프트를 고치면 전/후를 가르는 경계가 라이브 기록 안에 남아야 한다 — 파일의
+    변경 로그는 사람이 읽는 기록이지 결정 레코드가 아니라서, 그것만으로는 나중에
+    "이 결정은 개정 전인가 후인가"를 로그만 보고 답할 수 없다.
+
+    템플릿을 그대로 해싱한다(시장별 포맷 적용 전) — 판본이 같으면 세 시장이 같은
+    값을 갖게 해서, 시장 차이와 개정 차이가 한 필드에 섞이지 않는다.
+    """
+    blob = SYSTEM_PROMPT + TRIGGER_SYSTEM_CLAUSE + playbook
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 SYSTEM_PROMPT = """\
 너는 {market} 시장의 포트폴리오 매니저다. 매일 1회, 자산 배분비율만으로 의사를 표현한다.
@@ -47,6 +75,9 @@ SYSTEM_PROMPT = """\
   cited_memory_ids 에 넣어라. 없으면 빈 리스트.
 - alpha_signals 는 OOS 검증된 팩터의 당일 스코어다(양수 = 익일 상대 우위 기대,
   oos_ic 가 신뢰 크기). 참고했다면 해당 키를 cited_signal_ids 에 넣어라.
+  이 스코어는 연구 패널 안에서 **자산끼리 비교한 순위**이지 시장 전체의 방향이 아니다.
+  따라서 자산 간 비중을 가르는 근거로만 쓰고, **총 노출(CASH 비중)의 근거로 인용하지
+  말 것** — 어느 자산이 상대적으로 낫다는 말은 얼마나 들어가야 하는지에 답하지 않는다.
 
 반드시 아래 JSON 만 출력한다 (설명 문장 금지):
 {{
@@ -236,6 +267,7 @@ class LLMTrader:
         self.budget_fn = budget_fn  # 계좌 예산 제약 (adapters.allocation.BudgetSnapshot)
         self.debate = debate
         self.playbook = load_playbook()
+        self.prompt_rev = prompt_rev(self.playbook)  # 결정마다 기록 — 정책 판본 경계
         self.last_decision: dict | None = None
 
     async def _decide_once(
@@ -387,6 +419,7 @@ class LLMTrader:
             "scenario_expected": decision.scenario_expected,
             "scenario_invalidation": decision.scenario_invalidation,
             "model": f"{base_resp.provider}:{base_resp.model}",
+            "prompt_rev": self.prompt_rev,  # 정책 텍스트 판본 — 개정 전/후를 로그에서 가른다
             "tokens": tokens,
         }
         return final

@@ -63,6 +63,9 @@ def read_recent_decisions(log_dir: Path, market: str, limit: int = 30) -> list[d
             "scenario_expected": d.get("scenario_expected"),
             "scenario_invalidation": d.get("scenario_invalidation"),
             "budget": d.get("budget"),  # None = 그날 예산 조회 실패 또는 순자산 0
+            # 정책 텍스트 판본 — 프롬프트·플레이북 개정의 전/후를 로그에서 가른다.
+            # None = 판본 기록이 시작되기 전의 결정.
+            "prompt_rev": d.get("prompt_rev"),
         }
     return [rows[k] for k in sorted(rows)][-limit:]
 
