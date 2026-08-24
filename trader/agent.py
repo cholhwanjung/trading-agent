@@ -9,13 +9,10 @@ last_decision 에 근거·인용 ID·시나리오가 남아 loop 가 감사 로�
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from datetime import date
-from pathlib import Path
 
 from adapters.allocation import CASH
 from adapters.base import DISCLOSURE_SOURCES, Bar, Observation, Position
@@ -25,82 +22,15 @@ from trader.etf_premium import observed_etf_premium
 from trader.events import upcoming_events
 from trader.features import InsufficientHistoryError, compute_features
 from trader.fundamentals import observed_fundamentals
+from trader.prompt_store import assemble, load_manifest, render
 from trader.schema import parse_decision
 
 HistoryFn = Callable[[list[str], date], Awaitable[dict[str, list[Bar]]]]
 
-# 베이스 지식 — 검증 교훈(memory)과 분리된 사전 원칙. 수정은 승인 게이트.
-PLAYBOOK_PATH = Path(__file__).parent / "playbook.md"
-
-
-def load_playbook() -> str:
-    """플레이북 원칙 텍스트. **변경 로그(HTML 주석)는 제거하고** 원칙만 넘긴다.
-
-    변경 로그는 사람이 읽는 개정 기록이지 결정의 사전 지식이 아니다. 그대로 실으면
-    "직전 판본은 방어적이어서 성과가 나빴다" 같은 **개정의 경위**가 매 결정 프롬프트에
-    들어가는데, 그것은 원칙보다 훨씬 강하고 통제되지 않는 유도다 — 모델이 원칙을 읽는
-    대신 과거 성과 서사에 반응하게 된다. 주석 문법(`<!-- -->`)이 이미 "렌더된 문서에
-    보이지 않는 것"을 뜻하므로, 프롬프트에서도 같게 취급한다.
-    """
-    if not PLAYBOOK_PATH.exists():
-        return ""
-    text = PLAYBOOK_PATH.read_text(encoding="utf-8")
-    return re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL).strip()
-
-
-def prompt_rev(playbook: str) -> str:
-    """유효 정책 텍스트(시스템 프롬프트 + 트리거 절 + 플레이북)의 12자리 지문.
-
-    결정마다 기록해 **어느 정책 판본이 그 결정을 냈는지**를 로그 자체가 말하게 한다.
-    프롬프트를 고치면 전/후를 가르는 경계가 라이브 기록 안에 남아야 한다 — 파일의
-    변경 로그는 사람이 읽는 기록이지 결정 레코드가 아니라서, 그것만으로는 나중에
-    "이 결정은 개정 전인가 후인가"를 로그만 보고 답할 수 없다.
-
-    템플릿을 그대로 해싱한다(시장별 포맷 적용 전) — 판본이 같으면 세 시장이 같은
-    값을 갖게 해서, 시장 차이와 개정 차이가 한 필드에 섞이지 않는다.
-    """
-    blob = SYSTEM_PROMPT + TRIGGER_SYSTEM_CLAUSE + playbook
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
-
-SYSTEM_PROMPT = """\
-너는 {market} 시장의 포트폴리오 매니저다. 매일 1회, 자산 배분비율만으로 의사를 표현한다.
-
-제약 (위반 시 결정 전체가 거부된다):
-- 배분 대상은 {tradable} 와 "CASH" 뿐이다. 그 외 심볼 금지.
-- 관측은 {universe} 전체를 받는다. 배분할 수 없는 종목도 판단 근거로 쓰되, 그 판단은
-  해당 종목을 담고 있는 ETF 의 비중으로만 표현된다(지수 내 구성 비중만큼만 전달).
-- 모든 비중 ≥ 0 (long-only), 합계 = 1.0. 현금도 포지션이다 — 확신이 없으면 현금 비중을 높여라.
-- 관측 데이터는 전일까지다. 오늘의 가격은 알 수 없다.
-- verified_lessons 는 반복 검증을 통과한 과거 교훈이다. 참고했다면 해당 id 를
-  cited_memory_ids 에 넣어라. 없으면 빈 리스트.
-- alpha_signals 는 OOS 검증된 팩터의 당일 스코어다(양수 = 익일 상대 우위 기대,
-  oos_ic 가 신뢰 크기). 참고했다면 해당 키를 cited_signal_ids 에 넣어라.
-  이 스코어는 연구 패널 안에서 **자산끼리 비교한 순위**이지 시장 전체의 방향이 아니다.
-  따라서 자산 간 비중을 가르는 근거로만 쓰고, **총 노출(CASH 비중)의 근거로 인용하지
-  말 것** — 어느 자산이 상대적으로 낫다는 말은 얼마나 들어가야 하는지에 답하지 않는다.
-
-반드시 아래 JSON 만 출력한다 (설명 문장 금지):
-{{
-  "allocation": {{"<symbol>": <float>, ..., "CASH": <float>}},
-  "rationale": "<핵심 근거 2~3문장, 한국어>",
-  "cited_signal_ids": ["<참고한 feature 이름>", ...],
-  "cited_memory_ids": [],
-  "scenario": {{
-    "expected": "<예상 시나리오 1문장>",
-    "invalidation": "<이 결정이 틀렸다고 판정할 구체적 조건 1문장>"
-  }}
-}}"""
-
-# 실시간 트리거 소집 시에만 시스템 프롬프트에 덧붙는다 — 일간 경로는 불변.
-# "오늘의 가격은 알 수 없다"는 기본 전제를 이 결정에 한해 예외 처리하고, 하방 방어를
-# 기본값으로 지시. 당일 정보는 행동 판단에만, 학습·재해석에 쓰지 않는다.
-TRIGGER_SYSTEM_CLAUSE = (
-    "[실시간 트리거 모드] 이번 결정은 장중 급변 이벤트로 소집됐다. user 메시지의 "
-    "realtime_trigger 에 당일 가격·변동이 제공된다 — '오늘의 가격은 알 수 없다'는 기본 "
-    "전제의 예외다. 이 정보로 현재 배분이 여전히 유효한지 재판단하라. 하방 방어(현금 확대)가 "
-    "기본 선택지이며, 확신 없는 추격 매수는 금지한다. 이 당일 정보로 과거 관측·feature 를 "
-    "재해석하지 말 것."
-)
+# 결정 프롬프트는 코드 상수가 아니라 prompts/manifest.toml 이 선언한 블록에서 조립된다.
+# 블록 하나가 곧 변경 단위이고, 조립 결과의 지문(rev)이 결정마다 로그에 남는다.
+PROMPT_MANIFEST = load_manifest()
+PROMPT_SPEC = assemble(PROMPT_MANIFEST)
 
 
 def build_user_prompt(
@@ -266,21 +196,23 @@ class LLMTrader:
         self.prev_weights_fn = prev_weights_fn  # 대형 포지션 변경 트리거 기준
         self.budget_fn = budget_fn  # 계좌 예산 제약 (adapters.allocation.BudgetSnapshot)
         self.debate = debate
-        self.playbook = load_playbook()
-        self.prompt_rev = prompt_rev(self.playbook)  # 결정마다 기록 — 정책 판본 경계
+        # 조립은 프로세스당 1회 — 실행 중 블록이 바뀌어도 한 런 안에서 판본이 흔들리지 않는다.
+        self.prompt_spec = PROMPT_SPEC
+        self.prompt_rev = PROMPT_SPEC.rev  # 결정마다 기록 — 정책 판본 경계
         self.last_decision: dict | None = None
 
     async def _decide_once(
         self, obs, positions, features, lessons: list[dict], signals: dict,
         debate: dict | None = None, trigger: dict | None = None, budget=None,
     ):
-        system = SYSTEM_PROMPT.format(
-            market=self.market, universe=self.universe, tradable=self.tradable
+        system = render(
+            self.prompt_spec,
+            PROMPT_MANIFEST,
+            trigger=bool(trigger),
+            market=self.market,
+            universe=self.universe,
+            tradable=self.tradable,
         )
-        if self.playbook:
-            system += "\n\n" + self.playbook
-        if trigger:
-            system += "\n\n" + TRIGGER_SYSTEM_CLAUSE
         resp = await self.router.complete(
             self.tier,
             purpose="decision",

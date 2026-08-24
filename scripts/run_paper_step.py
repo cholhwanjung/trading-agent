@@ -84,6 +84,8 @@ from risk import (  # noqa: E402
     concentration,
 )
 from trader import LLMTrader  # noqa: E402
+from trader.agent import PROMPT_SPEC  # noqa: E402
+from trader.prompt_store import record_revision  # noqa: E402
 
 # 관측 유니버스 — 뉴스·데이터 커버리지가 좋은 대형 종목 + 광범위 지수 ETF.
 CRYPTO_UNIVERSE = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # 메이저 3종 (전부 연구 유니버스 소속)
@@ -123,6 +125,8 @@ COST_BPS = {"CRYPTO": 10.0, "US": 1.0, "KR": 3.0}  # 가상 포트폴리오 거�
 # 지수 벤치마크 조회 창. 매일 같은 창을 받아 병합하므로 첫 실행이 곧 백필이고, 이후
 # 누락일(잡 실패·휴장 오인)도 다음 실행이 스스로 메운다.
 INDEX_LOOKBACK_DAYS = 300
+# 정책 판본 스냅샷 — 결정 로그의 prompt_rev 를 원문으로 되돌리는 유일한 경로.
+PROMPT_REV_DIR = STATE_DIR / "prompt_revs"
 
 
 def _ratio(raw: str | None) -> float | None:
@@ -659,6 +663,11 @@ async def main() -> int:
     args = _parse_args()
     env = load_env(ROOT / ".env")
     configure_observation(env)  # 관측 윈도우 길이 .env 오버라이드(실험 변수, 미설정 시 기본)
+
+    # 이 런이 쓰는 정책 판본을 원문째로 남긴다(처음 보는 판본일 때만). 결정 로그에는
+    # 지문만 실리므로, 이 스냅샷이 없으면 나중에 "그 판본이 무엇이었나"에 답할 수 없다.
+    if record_revision(PROMPT_REV_DIR, PROMPT_SPEC, date.today()):
+        print(f"prompt_rev={PROMPT_SPEC.rev} 신규 판본 기록 blocks={','.join(PROMPT_SPEC.blocks)}")
 
     # 계좌 락 — catch-up/중복 런이 같은 계좌에 이중 주문하거나 상태 파일(risk_*·
     # live_notional_*)을 레이스로 덮어쓰지 않게 한다(실계좌 경로 필수). 키가 시장이라

@@ -25,7 +25,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 #: 초안이 건드릴 수 있는 유일한 파일 (레포 루트 기준 상대 경로)
-TARGET = "trader/playbook.md"
+TARGET = "trader/prompts/blocks/playbook.md"
 PROPOSAL_DIR = "data/proposals"
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")

@@ -18,8 +18,9 @@ from adapters.allocation import CASH
 from adapters.base import Bar, Observation
 from llm import LLMRouter
 from risk import RiskEngine, RiskLimits
-from trader.agent import SYSTEM_PROMPT, build_user_prompt
+from trader.agent import PROMPT_MANIFEST, PROMPT_SPEC, build_user_prompt
 from trader.features import InsufficientHistoryError, compute_features
+from trader.prompt_store import render
 from trader.schema import parse_decision
 
 UNAVAILABLE_FEATURES = ("atr14_ratio", "vol_ratio_20d")  # 종가 이력만으론 계산 불가
@@ -96,7 +97,7 @@ def make_ltb_agent(
             async def _decide() -> dict[str, float]:
                 resp = await router.complete(
                     tier,
-                    system=SYSTEM_PROMPT.format(market="LTB", universe=universe),
+                    system=render(PROMPT_SPEC, PROMPT_MANIFEST, market="LTB", universe=universe),
                     messages=[
                         {"role": "user", "content": build_user_prompt(obs, [], features)}
                     ],

@@ -1,0 +1,28 @@
+# 결정 프롬프트 조립 규칙 — 에이전트 행동을 코드가 아니라 선언으로 둔다.
+#
+# 이 목록에 없는 파일은 프롬프트에 **들어갈 수 없다**. 블록 디렉토리에 파일을 놓는
+# 것만으로는 아무 일도 일어나지 않는다. 이전에는 플레이북 파일을 통째로 읽어 넘겨서,
+# 사람이 읽으라고 쓴 주석(개정 이력)까지 모델에게 갔다 — 조립 집합을 선언으로 고정하면
+# 그런 유입이 구조적으로 불가능하다.
+#
+# join  — 앞 블록에 붙는 방식. "section"(빈 줄로 분리, 기본) | "line"(줄바꿈 하나).
+#         제약 목록처럼 한 문단 안에서 이어지는 블록은 "line".
+# format — {market}·{universe}·{tradable} 치환과 `{{`→`{` 이스케이프를 적용할지.
+#         중괄호가 없는 블록은 false 로 둔다(치환 사고 방지).
+
+[decision]
+tier = "smart"
+blocks = [
+  { name = "role", format = true },
+  { name = "constraints", format = true },
+  { name = "memory_semantics", join = "line" },
+  { name = "signal_semantics", join = "line" },
+  { name = "output_schema", format = true },
+  { name = "playbook" },
+]
+
+# 실시간 트리거로 소집된 결정에만 덧붙는다. 일간 경로는 위 blocks 그대로.
+[decision.trigger]
+blocks = [
+  { name = "trigger_clause" },
+]
