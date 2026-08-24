@@ -1,5 +1,12 @@
 """Eval — 병행 페이퍼 운용·ablation 측정 + 상위 결합 지수."""
 
+from eval.exposure import (
+    alpha_decomposition,
+    cash_weights,
+    exposure_summary,
+    meta_alpha_decomposition,
+    meta_exposure,
+)
 from eval.index_bench import (
     index_hist,
     index_path,
@@ -23,10 +30,15 @@ from eval.rolling import meta_rolling_report, meta_shadow_delta, rolling_delta, 
 __all__ = [
     "RegimeScore",
     "VirtualPortfolio",
+    "alpha_decomposition",
+    "cash_weights",
     "compare_regimes",
     "combined_index",
     "combined_index_dynamic",
     "daily_returns",
+    "exposure_summary",
+    "meta_alpha_decomposition",
+    "meta_exposure",
     "drawdown_series",
     "index_hist",
     "index_path",

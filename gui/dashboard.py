@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 from adapters.news_kr import KR_STOCK_NAMES  # noqa: E402
 from adapters.universe import ETF, ETF_REF, universe_meta  # noqa: E402
+from eval.exposure import meta_alpha_decomposition, meta_exposure  # noqa: E402
 from eval.index_bench import index_hist, load_index_series, normalized  # noqa: E402
 from eval.meta import combined_index, load_arm_history, load_meta_shadow  # noqa: E402
 from eval.perf import drawdown_series, perf_stats  # noqa: E402
@@ -265,7 +266,7 @@ with tab_dash:
 
     # META 결합 지수
     meta = combined_index(VIRTUAL, "llm")
-    cols = st.columns(4)
+    cols = st.columns(5)
     if meta:
         cols[0].metric("META 결합 지수 (llm)", f"{meta['index']:.4f}", f"{meta['ret_pct']:+.3f}%")
         cols[1].metric("META MDD", f"{meta['mdd_pct']:.2f}%")
@@ -275,6 +276,27 @@ with tab_dash:
         base_meta = combined_index(VIRTUAL, "llm_base")
         if base_meta:
             cols[3].metric("메모리 델타", f"{meta['ret_pct'] - base_meta['ret_pct']:+.3f}%p")
+        expo = meta_exposure(LOG_DIR)
+        if expo:
+            cols[4].metric(
+                "평균 노출 (1−현금)", f"{expo['mean']:.1%}", f"최근 {expo['last']:.1%}",
+                delta_color="off",
+            )
+
+    # α 를 만든 것이 노출인지 선별인지 — 두 항의 합이 위 α 와 같다.
+    decomp = meta_alpha_decomposition(VIRTUAL, LOG_DIR)
+    if decomp:
+        per_market = " · ".join(
+            f"{m} {d['cash_drag_pct']:+.2f}/{d['selection_pct']:+.2f}"
+            for m, d in sorted(decomp["by_market"].items())
+        )
+        st.caption(
+            f"**α 분해** — 현금 드래그 `{decomp['cash_drag_pct']:+.2f}%p` + "
+            f"종목선택 `{decomp['selection_pct']:+.2f}%p` = α `{decomp['alpha_pct']:+.2f}%p`. "
+            "매일 llm 이 실제로 가졌던 노출만큼만 B&H 바스켓을 든 합성 포트폴리오와 대조한 것 — "
+            "**드래그는 안 들어가서 잃은 몫, 선택은 같은 노출에서 무엇을 골랐나**다. "
+            f"시장별 드래그/선택(%p): {per_market}"
+        )
 
     st.divider()
     st.subheader("자본 배분")
