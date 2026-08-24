@@ -30,6 +30,7 @@ logs/
 .vscode/
 
 # 로컬 전용 — 개인 문서·노트 (어플리케이션 비필수)
+.claude/
 CLAUDE.md
 docs/
 trading-agent-design.md

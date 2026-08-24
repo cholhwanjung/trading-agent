@@ -30,7 +30,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eval import VirtualPortfolio, record_meta_shadow  # noqa: E402
+from adapters.market_index import fetch_index_series  # noqa: E402
+from eval import VirtualPortfolio, index_path, record_index_series, record_meta_shadow  # noqa: E402
 from harness import (  # noqa: E402
     BuyAndHold,
     JsonlLogger,
@@ -119,6 +120,9 @@ STATE_DIR = ROOT / "data" / "state"
 # 시장별 최신 regime 의 cross-job 공유 — 장 시간 분리로 시장이 별도 잡이어도 메타 제안이 전 시장을 본다.
 REGIME_STATE_PATH = STATE_DIR / "regime_latest.json"
 COST_BPS = {"CRYPTO": 10.0, "US": 1.0, "KR": 3.0}  # 가상 포트폴리오 거래비용
+# 지수 벤치마크 조회 창. 매일 같은 창을 받아 병합하므로 첫 실행이 곧 백필이고, 이후
+# 누락일(잡 실패·휴장 오인)도 다음 실행이 스스로 메운다.
+INDEX_LOOKBACK_DAYS = 300
 
 
 def _ratio(raw: str | None) -> float | None:
@@ -894,6 +898,24 @@ async def main() -> int:
 
             prices, day = await fetch_prices(adapter, symbols)
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)
+
+            # 시장 대표 지수 종가 (표시 전용) — 대시보드가 브로커를 직접 못 부르므로
+            # 여기서 받아 상태 파일로 남긴다. 결정·리스크·승격 판정 어디에도 안 들어간다.
+            # 첫 실행이 창 전체를 받아오므로 별도 백필이 없다.
+            index_series = await fetch_index_series(
+                market, today, INDEX_LOOKBACK_DAYS, env,
+                kis_session=getattr(adapter, "session", None),
+            )
+            if index_series is not None:
+                added = record_index_series(index_path(STATE_DIR, market), index_series)
+                logger.log(market, "market_index", {
+                    "index": index_series.name, "source": index_series.source,
+                    "n_closes": len(index_series.closes), "n_new": added,
+                    "last_day": index_series.closes[-1][0].isoformat(),
+                    "last_close": index_series.closes[-1][1],
+                })
+                print(f"market={market} index={index_series.name}"
+                      f" n_closes={len(index_series.closes)} n_new={added}")
 
             # 시장 국면 (shadow) — 계산·로깅만, 결정/리스크 미개입. 검증 후 승격.
             # n_bars 는 실제로 받은 봉 수 — 요청한 창(LOOKBACK_DAYS)보다 짧게 오면 롤링 피크·

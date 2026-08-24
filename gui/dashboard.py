@@ -26,9 +26,15 @@ sys.path.insert(0, str(ROOT))
 
 from adapters.news_kr import KR_STOCK_NAMES  # noqa: E402
 from adapters.universe import ETF, ETF_REF, universe_meta  # noqa: E402
+from eval.index_bench import index_hist, load_index_series, normalized  # noqa: E402
 from eval.meta import combined_index, load_arm_history, load_meta_shadow  # noqa: E402
 from eval.perf import drawdown_series, perf_stats  # noqa: E402
-from eval.rolling import ROLLING_K, meta_shadow_delta, rolling_report  # noqa: E402
+from eval.rolling import (  # noqa: E402
+    ROLLING_K,
+    meta_rolling_report,
+    meta_shadow_delta,
+    rolling_report,
+)
 from gui.panels import (  # noqa: E402
     admission_progress,
     counterfactual_ledger,
@@ -88,7 +94,11 @@ st.set_page_config(page_title="trading-agent", page_icon="📈", layout="wide")
 
 
 def load_equity_frame(market: str) -> pd.DataFrame | None:
-    """가상 arm equity 곡선 → wide DataFrame (index=day, columns=arm)."""
+    """가상 arm equity 곡선 + 시장 지수 → wide DataFrame (index=day, columns=arm).
+
+    지수는 수준(KOSPI 6900 · NASDAQ 26000)이 arm equity 와 스케일이 달라, arm 첫날의
+    equity 에 맞춰 정규화해 같은 축에 올린다. 지수 원천이 없는 시장(CRYPTO)은 열이 없다.
+    """
     series = {}
     for arm in ARMS:
         history = load_arm_history(VIRTUAL, market, arm)
@@ -96,7 +106,18 @@ def load_equity_frame(market: str) -> pd.DataFrame | None:
             series[arm] = pd.Series(
                 [h["equity"] for h in history], index=[h["day"] for h in history]
             )
-    return pd.DataFrame(series) if series else None
+    if not series:
+        return None
+    idx, state = index_hist(STATE, market), load_index_series(STATE, market)
+    if idx and state:
+        first = min(s.index.min() for s in series.values())
+        base = next(iter(series.values())).iloc[0]
+        curve = normalized(idx, first)
+        if curve:
+            series[f"지수({state['index']})"] = pd.Series(
+                [p["equity"] * base for p in curve], index=[p["day"] for p in curve]
+            )
+    return pd.DataFrame(series)
 
 
 @st.cache_data(ttl=60)
@@ -869,19 +890,40 @@ with tab_ops:
     st.divider()
 
     st.subheader("rolling-k delta (승격 판정 입력)")
+    st.caption(
+        f"{ROLLING_K}거래일 창을 하루씩 굴린 상대 성과의 **승률**. memory=llm−llm_base · "
+        "alpha=llm−bh(같은 유니버스 균등보유) · index=llm−시장 지수. **승격 판정은 "
+        "memory·alpha 로만** 한다 — index 는 벤치마크가 유니버스가 아니라 시장 전체라 "
+        "\"그 기간이 어떤 장이었나\"를 답하는 맥락이다. p 는 겹치지 않는 청크에만 적용하며 "
+        "청크 5개(=100거래일) 미만이면 n/a."
+    )
+
+    def rolling_line(label: str, rolled: dict, names: tuple[str, ...]) -> str:
+        line = f"**{label}** — "
+        for name in names:
+            r = rolled.get(name)
+            if r is None:
+                line += f"{name}: —  · "
+                continue
+            p = f"p={r['p_value']:.3f}" if r["p_value"] is not None else "p=n/a"
+            line += f"{name}: 승률 {r['win_rate']:.0%} (Δ{r['mean_delta_pct']:+.2f}%p, {p}) · "
+        return line.rstrip(" ·")
+
+    meta_rolled = meta_rolling_report(VIRTUAL)
+    if meta_rolled["alpha"] or meta_rolled["memory"]:
+        st.markdown(rolling_line("META (결합 지수)", meta_rolled, ("memory", "alpha")))
     for market in MARKETS:
         if not (VIRTUAL / f"{market}_llm.json").exists():
             continue
-        rolled = rolling_report(VIRTUAL, market)
-        line = f"**{market}** — "
-        for name in ("memory", "alpha"):
-            r = rolled[name]
-            if r is None:
-                line += f"{name}: 데이터 {ROLLING_K + 1}일 미만 · "
-            else:
-                p = f"p={r['p_value']:.3f}" if r["p_value"] is not None else "p=n/a"
-                line += f"{name}: 승률 {r['win_rate']:.0%} ({p}) · "
-        st.markdown(line.rstrip(" ·"))
+        st.markdown(
+            rolling_line(market, rolling_report(VIRTUAL, market), ("memory", "alpha", "index"))
+        )
+    if any(load_index_series(STATE, m) is None for m in MARKETS):
+        missing = [m for m in MARKETS if load_index_series(STATE, m) is None]
+        st.caption(
+            f"지수 열 `—` ({', '.join(missing)}): 무료 실지수 원천이 없는 시장. 대장 코인은 "
+            "지수가 아니라 B&H 바스켓의 구성종목이라 벤치마크로 쓰지 않는다."
+        )
 
     st.subheader("메타 shadow — 동적 배분 vs 고정균등 (집행 전 검증)")
     st.caption(

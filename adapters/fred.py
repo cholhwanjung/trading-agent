@@ -23,6 +23,20 @@ MACRO_SERIES = {
 }
 
 
+def _parse_observations(observations: list[dict]) -> list[tuple[date, float]]:
+    """관측 리스트 → (날짜, 값) 오름차순. 결측('.')·파싱 불가 행은 버린다."""
+    out: list[tuple[date, float]] = []
+    for obs in observations:
+        v = obs.get("value")
+        if not v or v == ".":
+            continue
+        try:
+            out.append((date.fromisoformat(obs["date"]), float(v)))
+        except (KeyError, ValueError):
+            continue
+    return sorted(out)
+
+
 def _latest_valid(observations: list[dict]) -> float | None:
     """관측 리스트(내림차순)에서 최신 유효값. FRED 결측은 '.' 문자로 온다."""
     for obs in observations:
@@ -65,3 +79,30 @@ async def fetch_fred_latest(
             except Exception:
                 out[label] = None
     return out
+
+
+async def fetch_fred_history(
+    api_key: str, series_id: str, start: date, end: date
+) -> list[tuple[date, float]]:
+    """한 시리즈의 [start, end] 일간 관측 (오름차순). 조회 실패 → [] (fail-open).
+
+    `fetch_fred_latest` 가 최신 한 점만 보는 것과 달리 구간 전체를 돌려준다 — 곡선을
+    그리려면 점이 아니라 시계열이 필요하다. 상한은 호출부가 t−1 로 잘라 넘긴다.
+    """
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            resp = await client.get(
+                FRED_BASE,
+                params={
+                    "series_id": series_id,
+                    "api_key": api_key,
+                    "file_type": "json",
+                    "observation_start": start.isoformat(),
+                    "observation_end": end.isoformat(),
+                    "sort_order": "asc",
+                },
+            )
+            resp.raise_for_status()
+            return _parse_observations(resp.json().get("observations") or [])
+        except Exception:
+            return []

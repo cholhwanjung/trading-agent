@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from eval.meta import combined_index_dynamic, load_arm_history
+from eval.index_bench import index_hist
+from eval.meta import combined_index, combined_index_dynamic, load_arm_history
 from memory.admission import sign_test_p
 
 ROLLING_K = 20  # 거래일 기준 ~1개월
@@ -55,14 +56,54 @@ def rolling_delta(hist_a: list[dict], hist_b: list[dict], k: int = ROLLING_K) ->
     }
 
 
-def rolling_report(state_dir: Path | str, market: str, k: int = ROLLING_K) -> dict:
-    """시장 1곳의 승격 판정용 rolling 지표 — memory(llm−llm_base) · alpha(llm−bh)."""
+def rolling_report(
+    state_dir: Path | str, market: str, k: int = ROLLING_K, index_dir: Path | str | None = None
+) -> dict:
+    """시장 1곳의 rolling 지표 — memory(llm−llm_base) · alpha(llm−bh) · index(llm−지수).
+
+    승격 판정에 쓰는 것은 memory·alpha 뿐이다. index 는 벤치마크가 유니버스가 아니라
+    시장 전체라 "그 기간이 어떤 장이었나"를 답하는 맥락 열이고, 지수 원천이 없는
+    시장에서는 None 이다.
+
+    `state_dir` 는 가상 arm 디렉토리(`data/state/virtual`)인데 지수 시계열은 arm 이
+    아니라서 그 부모(`data/state`)에 산다 — `index_dir` 기본값이 그 관계를 담는다.
+    """
     state_dir = Path(state_dir)
     hists = {arm: load_arm_history(state_dir, market, arm) for arm in ("llm", "llm_base", "bh")}
+    idx = index_hist(index_dir if index_dir is not None else state_dir.parent, market)
     return {
         "market": market,
         "memory": rolling_delta(hists["llm"], hists["llm_base"], k) if hists["llm"] else None,
         "alpha": rolling_delta(hists["llm"], hists["bh"], k) if hists["llm"] else None,
+        "index": rolling_delta(hists["llm"], idx, k) if hists["llm"] and idx else None,
+    }
+
+
+def _curve_hist(result: dict | None) -> list[dict] | None:
+    """combined_index 계열 결과 → rolling_delta 입력 형태([{day, equity}]). None 은 전파."""
+    if result is None:
+        return None
+    return [{"day": p["day"], "equity": p["index"]} for p in result["curve"]]
+
+
+def meta_rolling_report(state_dir: Path | str, k: int = ROLLING_K) -> dict:
+    """결합 지수 층위의 rolling 지표 — memory(llm−llm_base) · alpha(llm−bh).
+
+    `rolling_report` 의 META 판. 시장 하나의 승률은 그 시장의 운·불운에 좌우되고, 셋을
+    따로 읽으면 "전체가 이기고 있는가"에 답하지 못한다. 결합은 KPI 행과 같은
+    `combined_index`(고정 1/3·리밸런싱 없음)라 화면의 α 와 같은 곡선을 본다.
+
+    지수 열은 없다 — CRYPTO 에 대응하는 지수 원천이 없어 2/3 만으로 결합하면 arm 과
+    구성이 달라져 비교가 성립하지 않는다. 지수 대비는 시장별로만 읽는다.
+    """
+    state_dir = Path(state_dir)
+    hists = {arm: _curve_hist(combined_index(state_dir, arm))
+             for arm in ("llm", "llm_base", "bh")}
+    llm = hists["llm"]
+    return {
+        "market": "META",
+        "memory": rolling_delta(llm, hists["llm_base"], k) if llm and hists["llm_base"] else None,
+        "alpha": rolling_delta(llm, hists["bh"], k) if llm and hists["bh"] else None,
     }
 
 
@@ -82,6 +123,4 @@ def meta_shadow_delta(
     fixed = combined_index_dynamic(state_dir, arm, {})  # 빈 dict = 고정 균등 baseline
     if dyn is None or fixed is None:
         return None
-    dyn_hist = [{"day": p["day"], "equity": p["index"]} for p in dyn["curve"]]
-    fixed_hist = [{"day": p["day"], "equity": p["index"]} for p in fixed["curve"]]
-    return rolling_delta(dyn_hist, fixed_hist, k)
+    return rolling_delta(_curve_hist(dyn), _curve_hist(fixed), k)
