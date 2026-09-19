@@ -5,9 +5,11 @@
 골라 잃은 것이라면 선별의 문제다.
 
 분해는 **합성 포트폴리오**로 한다: 매일 llm 이 실제로 가졌던 노출(1−현금)만큼만 B&H
-바스켓을 든 가상 포트폴리오를 굴린다.
+바스켓을 든 가상 포트폴리오를 굴린다. 가상 arm 은 결정을 다음 봉 시가에 체결하므로 한
+결정의 노출은 **체결 시가부터 다음 체결 시가까지** 유효하다 — 구간을 종가로 끊으면 밤사이
+갭이 엉뚱한 결정의 노출에 곱해져 '종목선택' 으로 둔갑한다.
 
-    synth_{t+1} = synth_t · (1 + exposure_t · r_bh(t→t+1))
+    synth ← synth · (1 + exposure_t · r_bh(시가_{t+1} → 시가_{t+2}))
 
     현금 드래그 = synth 수익 − bh 수익    (노출이 낮아서 잃은 몫)
     종목선택   = llm 수익  − synth 수익   (같은 노출에서 무엇을 골랐나)
@@ -71,17 +73,25 @@ def alpha_decomposition(
         return None
 
     bh_by_day = {p["day"]: p["equity"] for p in bh_hist}
+    bh_open = {p["day"]: p.get("equity_open") for p in bh_hist}
     days = sorted(bh_by_day)
+
+    def fill_mark(i: int) -> float:
+        """days[i] 봉의 체결 직전(시가) 평가액. 시가 기록이 없는 이력은 직전 종가로 친다."""
+        return bh_open[days[i]] or bh_by_day[days[i - 1]]
+
     synth = 1.0
     used: list[float] = []
-    for prev_day, day in zip(days, days[1:]):
-        c = cash.get(prev_day)
-        e0, e1 = bh_by_day[prev_day], bh_by_day[day]
-        if c is None or e0 <= 0:
+    for i in range(1, len(days)):
+        c = cash.get(days[i - 1])  # days[i] 시가에 체결되는 결정
+        start = fill_mark(i)
+        # 다음 체결 시가까지. 마지막 구간은 아직 다음 봉이 없으므로 종가에서 끊는다
+        end = fill_mark(i + 1) if i + 1 < len(days) else bh_by_day[days[i]]
+        if c is None or start <= 0:
             continue  # 그날 llm 이 돌지 않았다 — 노출을 지어내지 않고 건너뛴다
         exposure = 1.0 - c
         used.append(exposure)
-        synth *= 1.0 + exposure * (e1 / e0 - 1.0)
+        synth *= 1.0 + exposure * (end / start - 1.0)
     if not used:
         return None
 

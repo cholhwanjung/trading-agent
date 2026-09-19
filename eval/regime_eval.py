@@ -32,7 +32,7 @@ from regime.pulse import UPTREND
 FSM_EVENT, JM_EVENT = "regime", "jm_regime"
 FSM_RISK_ON = frozenset({UPTREND})  # UNDER_PRESSURE·CORRECTION 은 전부 risk_off
 JM_RISK_ON = frozenset({"bull"})
-MARKET_ARM = "bh"  # 시장 대리 — 결정에 영향받지 않는 고정 균등 arm
+MARKET_ARM = "bh"  # 시장 대리 — 결정에 영향받지 않는 매수 후 보유 arm
 MIN_DAYS = 21  # 판정 최소 표본 (다른 승격 지표와 동일 하한)
 TRADING_DAYS_PER_YEAR = 252
 

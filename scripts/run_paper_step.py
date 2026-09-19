@@ -12,7 +12,7 @@ CRYPTO 23:00 KST(24/7) · KR 10:00 KST · US 00:30 KST(양 시간대 모두 미�
 
 구성 (시장별):
 - 실계좌: RiskGuardedPolicy(LLMTrader) — 라이브 페이퍼가 진실 verifier.
-- 가상 3종(llm/bh/random): 동일 관측·t-1 종가 forward 시뮬레이션 → 델타 측정 기준선.
+- 가상 4종(llm/llm_base/bh/random): 동일 관측 forward 시뮬레이션(결정은 다음 봉 시가에 체결) → 델타 측정 기준선.
   가상 llm 은 실계좌와 같은 목표 배분을 사용(추가 LLM 호출 없음).
 
 로그: data/logs/{market}/{date}.jsonl · 가상 상태: data/state/virtual/*.json
@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT))
 from adapters.market_index import fetch_index_series  # noqa: E402
 from eval import VirtualPortfolio, index_path, record_index_series, record_meta_shadow  # noqa: E402
 from harness import (  # noqa: E402
-    BuyAndHold,
+    CASH,
     JsonlLogger,
     MarketRun,
     RandomPolicy,
@@ -469,44 +469,82 @@ async def close_unselected(adapters: dict, keep: set[str]) -> list:
 
 
 async def fetch_prices(adapter, symbols: list[str]):
-    """t-1 종가 + 기준일 — 가상 마킹과 메모리 outcome 계측이 공유."""
+    """관측 창의 봉별 (시가, 종가) + t-1 종가 + 기준일.
+
+    t-1 종가는 가상 마킹과 메모리 outcome 계측이 공유한다. 봉별 시가는 가상 포트폴리오가
+    직전 결정을 체결하는 가격이다 — 최신 봉만이 아니라 창 전체를 넘기는 것은, 런이 하루
+    걸러졌을 때 그 결정이 **그다음 봉**의 시가에 체결돼야 하기 때문이다.
+    """
     today = datetime.now(timezone.utc).date()
     bars = await adapter.get_ohlcv(symbols, today)
+    by_day: dict = {}
+    for symbol, rows in bars.items():
+        for bar in rows:
+            opens, closes = by_day.setdefault(bar.day, ({}, {}))
+            opens[symbol], closes[symbol] = bar.open, bar.close
     prices = {s: b[-1].close for s, b in bars.items() if b}
-    day = max((b[-1].day for b in bars.values() if b), default=None)
-    return prices, day
+    day = max(by_day, default=None)
+    return by_day, prices, day
+
+
+def buy_and_hold_target(portfolio: VirtualPortfolio, tradable: list[str]) -> dict | None:
+    """매수 후 보유 arm 이 오늘 낼 결정 — 든 종목이 매매 가능 종목과 같으면 None(그대로 보유).
+
+    처음 한 번 균등하게 사고, 정의역이 바뀔 때만 다시 맞춘다. 매일 1/N 로 되돌리면 그것은
+    보유가 아니라 리밸런싱 전략이고, 거래비용도 매일 낸다.
+    """
+    if portfolio.pending is not None:
+        held = {s for s, w in portfolio.pending.items() if s != CASH and w > 0}
+    else:
+        held = {s for s, q in portfolio.qty.items() if q > 0}
+    if held == set(tradable):
+        return None
+    return {**{s: 1.0 / len(tradable) for s in tradable}, CASH: 0.0}
 
 
 async def run_virtual(
     market: str,
     symbols: list[str],
-    prices: dict,
+    bars_by_day: dict,
     day,
     llm_weights: dict | None,
     llm_base_weights: dict | None,
     logger: JsonlLogger,
 ) -> None:
-    """가상 4종 스텝 — t-1 종가로 마킹.
+    """가상 4종 스텝 — 직전 결정을 이 봉의 시가에 체결하고 종가로 마킹한다.
 
-    llm = 메모리 블렌딩 최종 배분(실계좌와 동일) / llm_base = 무메모리 base 배분.
-    두 arm 의 equity 델타가 ablation 의 측정치다 (No-Memory vs +Memory).
+    llm = 최종 배분(실계좌 목표와 동일) / llm_base = 교훈·토론·리스크 적용 이전의 1차 결정.
+    둘의 차이는 메모리만의 효과가 아니라 그 뒤 단계 전부의 합이다.
+
+    bh·random 은 **매매할 수 있는 종목**만 든다. 계좌가 살 수 없는 종목이 기준선에 들어가면
+    그 종목의 등락이 정책의 초과·미달로 읽힌다.
     """
-    if len(prices) < len(symbols) or day is None:
-        logger.log(market, "virtual_skip", {"reason": "missing_prices", "have": list(prices)})
+    closes = bars_by_day[day][1] if day is not None else {}
+    if len(closes) < len(symbols):
+        logger.log(market, "virtual_skip", {"reason": "missing_prices", "have": list(closes)})
         return
 
-    obs = None  # baseline 정책은 관측을 쓰지 않는다 (B&H 고정 / 랜덤)
-    policies: dict[str, dict | None] = {
-        "llm": llm_weights,
-        "llm_base": llm_base_weights,
-        "bh": await BuyAndHold(symbols).decide(obs, []),
-        "random": await RandomPolicy(symbols, seed=int(day.strftime("%Y%m%d"))).decide(obs, []),
-    }
-    for name, weights in policies.items():
-        if weights is None:
-            continue
+    tradable = TRADABLE[market]
+    obs = None  # baseline 정책은 관측을 쓰지 않는다
+    seed = int(day.strftime("%Y%m%d"))
+    for name in ("llm", "llm_base", "bh", "random"):
         portfolio = VirtualPortfolio(STATE_DIR / "virtual" / f"{market}_{name}.json")
-        equity = portfolio.step(day, prices, weights, cost_bps=COST_BPS[market])
+        if name == "llm":
+            weights = llm_weights
+        elif name == "llm_base":
+            weights = llm_base_weights
+        elif name == "bh":
+            weights = buy_and_hold_target(portfolio, tradable)
+        else:
+            weights = await RandomPolicy(tradable, seed=seed).decide(obs, [])
+        if weights is None and not portfolio.history:
+            continue  # 한 번도 결정한 적 없는 arm 을 빈 곡선으로 만들지 않는다
+        # 결정이 없는 날(None)도 스텝은 밟는다 — 직전 결정의 체결과 종가 마킹은 그날 일어난다.
+        # 런이 걸러져 밀린 봉은 결정 없이 차례로 밟는다: 대기 중이던 결정이 제 봉의 시가에 체결된다.
+        last = portfolio.history[-1]["day"] if portfolio.history else day.isoformat()
+        for missed in sorted(d for d in bars_by_day if last < d.isoformat() < day.isoformat()):
+            portfolio.step(missed, *bars_by_day[missed], None, cost_bps=COST_BPS[market])
+        equity = portfolio.step(day, *bars_by_day[day], weights, cost_bps=COST_BPS[market])
         logger.log(
             market,
             "virtual_step",
@@ -985,8 +1023,10 @@ async def main() -> int:
                     f" pre={breach['pre']:,.0f} post={breach['post']:,.0f}",
                 )
 
-            prices, day = await fetch_prices(adapter, symbols)
-            await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)
+            bars_by_day, prices, day = await fetch_prices(adapter, symbols)
+            await run_virtual(
+                market, symbols, bars_by_day, day, llm_weights, llm_base_weights, logger
+            )
 
             # 시장 대표 지수 종가 (표시 전용) — 대시보드가 브로커를 직접 못 부르므로
             # 여기서 받아 상태 파일로 남긴다. 결정·리스크·승격 판정 어디에도 안 들어간다.
