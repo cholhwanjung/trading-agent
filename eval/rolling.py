@@ -59,9 +59,10 @@ def rolling_delta(hist_a: list[dict], hist_b: list[dict], k: int = ROLLING_K) ->
 def rolling_report(
     state_dir: Path | str, market: str, k: int = ROLLING_K, index_dir: Path | str | None = None
 ) -> dict:
-    """시장 1곳의 rolling 지표 — memory(llm−llm_base) · alpha(llm−bh) · index(llm−지수).
+    """시장 1곳의 rolling 지표 — pipeline(llm−llm_base) · alpha(llm−bh) · index(llm−지수).
 
-    승격 판정에 쓰는 것은 memory·alpha 뿐이다. index 는 벤치마크가 유니버스가 아니라
+    pipeline 은 1차 결정 뒤에 붙는 단계(교훈·토론·리스크) 전부의 효과다 — 메모리만의
+    몫은 eval.attribution 이 단계별로 가른다. index 는 벤치마크가 유니버스가 아니라
     시장 전체라 "그 기간이 어떤 장이었나"를 답하는 맥락 열이고, 지수 원천이 없는
     시장에서는 None 이다.
 
@@ -73,7 +74,7 @@ def rolling_report(
     idx = index_hist(index_dir if index_dir is not None else state_dir.parent, market)
     return {
         "market": market,
-        "memory": rolling_delta(hists["llm"], hists["llm_base"], k) if hists["llm"] else None,
+        "pipeline": rolling_delta(hists["llm"], hists["llm_base"], k) if hists["llm"] else None,
         "alpha": rolling_delta(hists["llm"], hists["bh"], k) if hists["llm"] else None,
         "index": rolling_delta(hists["llm"], idx, k) if hists["llm"] and idx else None,
     }
@@ -87,7 +88,7 @@ def _curve_hist(result: dict | None) -> list[dict] | None:
 
 
 def meta_rolling_report(state_dir: Path | str, k: int = ROLLING_K) -> dict:
-    """결합 지수 층위의 rolling 지표 — memory(llm−llm_base) · alpha(llm−bh).
+    """결합 지수 층위의 rolling 지표 — pipeline(llm−llm_base) · alpha(llm−bh).
 
     `rolling_report` 의 META 판. 시장 하나의 승률은 그 시장의 운·불운에 좌우되고, 셋을
     따로 읽으면 "전체가 이기고 있는가"에 답하지 못한다. 결합은 KPI 행과 같은
@@ -102,7 +103,7 @@ def meta_rolling_report(state_dir: Path | str, k: int = ROLLING_K) -> dict:
     llm = hists["llm"]
     return {
         "market": "META",
-        "memory": rolling_delta(llm, hists["llm_base"], k) if llm and hists["llm_base"] else None,
+        "pipeline": rolling_delta(llm, hists["llm_base"], k) if llm and hists["llm_base"] else None,
         "alpha": rolling_delta(llm, hists["bh"], k) if llm and hists["bh"] else None,
     }
 

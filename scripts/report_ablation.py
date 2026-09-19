@@ -4,12 +4,13 @@
     uv run python scripts/report_ablation.py
 
 arm 의미:
-    llm       = 메모리 블렌딩 최종 배분 (실계좌와 동일)
-    llm_base  = 무메모리 base 배분 (No-Memory ablation arm)
-    bh        = Buy&Hold 균등 배분 / random = 무작위(일별 seed)
+    llm       = 최종 배분 (실계좌 목표와 동일)
+    llm_base  = 1차 결정 — 교훈 블렌딩·토론 재결정·리스크 적용 이전
+    bh        = 매매 가능 종목을 균등하게 사서 보유 / random = 매매 가능 종목 무작위(일별 seed)
 
-핵심 지표: memory_delta = llm − llm_base (메모리 영향력의 순기여, ablation)
-           alpha_vs_bh = llm − bh (성공기준의 분자)
+핵심 지표: pipeline_delta = llm − llm_base (교훈+토론+리스크 세 단계의 합)
+           stage_*        = 그 합을 단계별로 가른 기여 (메모리의 순기여는 stage_memory)
+           alpha_vs_bh    = llm − bh (성공기준의 분자)
 """
 
 from __future__ import annotations
@@ -21,7 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 STATE = ROOT / "data" / "state" / "virtual"
 LOGS = ROOT / "data" / "logs"
+OBSERVATIONS = ROOT / "data" / "state" / "observations"
 
+from eval.attribution import stage_attribution  # noqa: E402
 from eval.meta import load_arm_history, max_drawdown  # noqa: E402
 
 
@@ -60,7 +63,11 @@ def main() -> int:
             )
         llm, base, bh = arms.get("llm"), arms.get("llm_base"), arms.get("bh")
         if llm and base:
-            print(f"memory_delta_pct={llm['ret_pct'] - base['ret_pct']:+.4f}  # llm − llm_base")
+            print(f"pipeline_delta_pct={llm['ret_pct'] - base['ret_pct']:+.4f}  # llm − llm_base")
+        staged = stage_attribution(LOGS, OBSERVATIONS, market)
+        if staged:
+            for name, stage in staged["stages"].items():
+                print(f"stage_{name}_pct={stage['pct']:+.4f} days={stage['days']}/{staged['n']}")
         if llm and bh:
             print(f"alpha_vs_bh_pct={llm['ret_pct'] - bh['ret_pct']:+.4f}  # 성공기준 분자")
 
@@ -68,7 +75,7 @@ def main() -> int:
         from eval.rolling import ROLLING_K, rolling_report
 
         rolled = rolling_report(STATE, market)
-        for name, r in (("memory", rolled["memory"]), ("alpha", rolled["alpha"])):
+        for name, r in (("pipeline", rolled["pipeline"]), ("alpha", rolled["alpha"])):
             if r is None:
                 print(f"rolling_{name} status=insufficient need_days>={ROLLING_K + 1}")
                 continue

@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 from adapters.news_kr import KR_STOCK_NAMES  # noqa: E402
 from adapters.universe import ETF, ETF_REF, universe_meta  # noqa: E402
+from eval.attribution import STAGES, stage_attribution  # noqa: E402
 from eval.exposure import meta_alpha_decomposition, meta_exposure  # noqa: E402
 from eval.index_bench import index_hist, load_index_series, normalized  # noqa: E402
 from eval.meta import combined_index, load_arm_history, load_meta_shadow  # noqa: E402
@@ -278,7 +279,11 @@ with tab_dash:
             cols[2].metric("META α vs B&H", f"{meta['ret_pct'] - bh_meta['ret_pct']:+.3f}%p")
         base_meta = combined_index(VIRTUAL, "llm_base")
         if base_meta:
-            cols[3].metric("메모리 델타", f"{meta['ret_pct'] - base_meta['ret_pct']:+.3f}%p")
+            cols[3].metric(
+                "후처리 델타", f"{meta['ret_pct'] - base_meta['ret_pct']:+.3f}%p",
+                help="llm − llm_base. 1차 결정 뒤의 교훈·토론·리스크 세 단계를 합친 효과다 — "
+                "메모리만의 몫은 아래 단계별 기여에서 본다.",
+            )
         expo = meta_exposure(LOG_DIR)
         if expo:
             cols[4].metric(
@@ -921,9 +926,9 @@ with tab_ops:
 
     st.subheader("rolling-k delta (승격 판정 입력)")
     st.caption(
-        f"{ROLLING_K}거래일 창을 하루씩 굴린 상대 성과의 **승률**. memory=llm−llm_base · "
-        "alpha=llm−bh(같은 유니버스 균등보유) · index=llm−시장 지수. **승격 판정은 "
-        "memory·alpha 로만** 한다 — index 는 벤치마크가 유니버스가 아니라 시장 전체라 "
+        f"{ROLLING_K}거래일 창을 하루씩 굴린 상대 성과의 **승률**. pipeline=llm−llm_base"
+        "(교훈·토론·리스크 세 단계의 합) · alpha=llm−bh(매매 가능 종목 매수 후 보유) · "
+        "index=llm−시장 지수. **승격 판정은 pipeline·alpha 로만** 한다 — index 는 벤치마크가 유니버스가 아니라 시장 전체라 "
         "\"그 기간이 어떤 장이었나\"를 답하는 맥락이다. p 는 겹치지 않는 청크에만 적용하며 "
         "청크 5개(=100거래일) 미만이면 n/a."
     )
@@ -940,13 +945,13 @@ with tab_ops:
         return line.rstrip(" ·")
 
     meta_rolled = meta_rolling_report(VIRTUAL)
-    if meta_rolled["alpha"] or meta_rolled["memory"]:
-        st.markdown(rolling_line("META (결합 지수)", meta_rolled, ("memory", "alpha")))
+    if meta_rolled["alpha"] or meta_rolled["pipeline"]:
+        st.markdown(rolling_line("META (결합 지수)", meta_rolled, ("pipeline", "alpha")))
     for market in MARKETS:
         if not (VIRTUAL / f"{market}_llm.json").exists():
             continue
         st.markdown(
-            rolling_line(market, rolling_report(VIRTUAL, market), ("memory", "alpha", "index"))
+            rolling_line(market, rolling_report(VIRTUAL, market), ("pipeline", "alpha", "index"))
         )
     if any(load_index_series(STATE, m) is None for m in MARKETS):
         missing = [m for m in MARKETS if load_index_series(STATE, m) is None]
@@ -954,6 +959,27 @@ with tab_ops:
             f"지수 열 `—` ({', '.join(missing)}): 무료 실지수 원천이 없는 시장. 대장 코인은 "
             "지수가 아니라 B&H 바스켓의 구성종목이라 벤치마크로 쓰지 않는다."
         )
+
+    st.subheader("단계별 기여 — 후처리 델타의 분해")
+    st.caption(
+        "llm − llm_base 를 1차 결정 뒤의 세 단계로 가른다: memory(교훈 블렌딩) · debate(토론 "
+        "재결정) · risk(리스크 엔진). 배분 차이 × 그 배분이 유효했던 구간(체결 시가 → 다음 시가)의 "
+        "수익률이며 비용·복리를 뺀 1차 근사다. 일수는 그 단계가 배분을 실제로 바꾼 날."
+    )
+    staged = [r for m in MARKETS if (r := stage_attribution(LOG_DIR, OBS_DIR, m))]
+    if staged:
+        st.dataframe(
+            pd.DataFrame([
+                {"시장": r["market"], "결정": r["n"],
+                 **{f"{k} (%p)": round(r["stages"][k]["pct"], 2) for k in STAGES},
+                 **{f"{k} 일수": r["stages"][k]["days"] for k in STAGES},
+                 "합계 (%p)": round(r["total_pct"], 2)}
+                for r in staged
+            ]),
+            hide_index=True,
+        )
+    else:
+        st.caption("결정 로그·관측 스냅샷이 쌓이면 표시.")
 
     st.subheader("메타 shadow — 동적 배분 vs 고정균등 (집행 전 검증)")
     st.caption(
