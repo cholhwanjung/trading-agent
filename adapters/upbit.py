@@ -1,12 +1,9 @@
-"""Upbit 어댑터 2종 — 크립토 실계좌 체결(UpbitAdapter) + 자금 이체 자동 레그(UpbitTreasury).
+"""Upbit 어댑터 — 크립토 실계좌 체결.
 
-둘 다 ccxt upbit 를 쓰지만 책임과 위험도가 다르다. 체결은 계좌 *안*에서 자산 구성만
-바꾸므로(blast radius 가 계좌 안에서 닫힌다) 결정론 가드 하에 자율이고, 출금은 계좌
-*밖*으로 자금을 내보내는 비가역 행위라 별도 이체 가드가 필요하다. 한 클래스에 합치면
-그 경계가 흐려져 체결 경로의 버그가 출금 권한을 건드릴 수 있게 되므로 분리해 둔다.
+체결은 계좌 *안*에서 자산 구성만 바꾼다(blast radius 가 계좌 안에서 닫힌다) — 결정론 가드
+하에 자율이다. 계좌 *밖*으로 자금을 내보내는 출금 기능은 이 코드베이스에 두지 않는다.
 
 - UpbitAdapter: 배분비율 → KRW 마켓 주문. 관측은 Binance 공개 USDT 채널을 그대로 승계.
-- UpbitTreasury: 가용 KRW 조회 + 등록 계좌로 KRW 출금(TreasuryCapable).
 """
 
 from __future__ import annotations
@@ -193,40 +190,3 @@ class UpbitAdapter(BinanceDataFeed, MarketAdapter):
             return OrderResult(
                 market=self.market, submitted_at=now, accepted=False, error=str(e)[:300]
             )
-
-
-class UpbitTreasury:
-    """Upbit KRW 자금 이체(자동 레그). ccxt upbit 로 잔고 조회 + KRW 출금만 담당."""
-
-    venue = "UPBIT"
-
-    def __init__(self, api_key: str, secret: str) -> None:
-        import ccxt.async_support as ccxt_async
-
-        # timeout(ms) 명시 — 다른 브로커 어댑터 REST(15s)와 통일
-        self.ex = ccxt_async.upbit({"apiKey": api_key, "secret": secret, "timeout": 15000})
-
-    async def close(self) -> None:
-        """aiohttp 세션 정리. 사용 후 반드시 호출."""
-        await self.ex.close()
-
-    async def withdrawable_krw(self) -> float:
-        """출금 가능한 KRW 가용 잔고(free). 잠금·미체결분 제외."""
-        balance = await with_retry(self.ex.fetch_balance)
-        return float(balance.get("free", {}).get("KRW") or 0)
-
-    async def withdraw_krw(self, amount: float) -> dict:
-        """등록 계좌로 KRW 출금 — **실자금 이동, 비멱등**. 이체 가드 통과 후에만 호출.
-
-        ccxt withdraw(code="KRW") 는 /withdraws/krw 로 라우팅되며 address 인자는 무시된다
-        (KRW 목적지 = 거래소 KYC 등록 계좌 고정). 재시도 없음 — 이중 출금 방지.
-        일부 계정은 Upbit 가 two_factor_type 를 요구할 수 있다(활성화 시 확인해 params 전달).
-        """
-        tx = await self.ex.withdraw("KRW", amount, "")
-        info = tx.get("info") or {}
-        return {
-            "uuid": tx.get("id") or info.get("uuid"),
-            "state": info.get("state"),
-            "amount": float(tx.get("amount") or amount),
-            "raw": info,
-        }

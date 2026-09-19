@@ -2,8 +2,7 @@
 
 고정 1/N anchor 대비 각 시장의 국면으로 예산을 bounded 틸트한다. LLM 미개입(순수 함수).
 증거 부족(regime_state=None)한 시장은 anchor 유지(무개입 fallback). v1 은 shadow —
-제안만 반환하고 집행/Risk 변조는 라이브 검증 후에만. 출력 weights 는
-`treasury.guard.plan_transfers` 의 target_split 로 직결된다(시장 = venue).
+제안만 반환하고 집행/Risk 변조는 라이브 검증 후에만.
 
 regime 이 모두 동일하면 틸트가 균일→재정규화로 anchor 복귀: 시장 간 *상대* 국면차가
 없으면 예산을 옮길 이유가 없다(하방 방어는 각 버킷 내부 현금비중이 담당, 시장 격리 유지).

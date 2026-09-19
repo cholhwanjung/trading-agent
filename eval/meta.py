@@ -25,7 +25,7 @@ MARKET_CAPITAL_WEIGHTS = {"CRYPTO": 1 / 3, "US": 1 / 3, "KR": 1 / 3}  # 초기 �
 def load_arm_history(state_dir: Path, market: str, arm: str) -> list[dict]:
     """가상 arm 상태 파일({market}_{arm}.json)의 equity history. 없으면 [].
 
-    가상 equity 를 읽는 모든 소비자(rolling·GUI·리포트·treasury 스텝)의 단일 리더.
+    가상 equity 를 읽는 모든 소비자(rolling·GUI·리포트)의 단일 리더.
     """
     path = state_dir / f"{market}_{arm}.json"
     if not path.exists():

@@ -61,7 +61,6 @@ from gui.panels import (  # noqa: E402
     scenario_outcomes,
     session_draft_diff,
     session_proposals,
-    treasury_dryrun_report,
     universe_rows,
     usage_report,
     veto_rows,
@@ -1007,30 +1006,6 @@ with tab_ops:
             st.caption(
                 f"최신 제안 ({meta_evt.get('day')}): `{meta_evt.get('weights')}` · "
                 f"편차 L1 {meta_evt.get('deviation_l1')} · 근거 {meta_evt.get('cited')}"
-            )
-
-    st.subheader("Treasury 이체 dry-run (집행 전 · 결정론 가드)")
-    st.caption("메타 제안 → 버킷 이체 계획을 dry-run 으로만 로깅(실집행·잔고변경 없음).")
-    tr = treasury_dryrun_report(LOG_DIR)
-    if tr is None:
-        st.caption("Treasury dry-run 로그 없음 — run_treasury_step 이 쌓으면 표시.")
-    else:
-        plan = tr["plan"]
-        pc = st.columns(3)
-        pc[0].metric("버킷 목표", str(plan.get("bucket_target")))
-        pc[1].metric("현재 split", str(plan.get("current_split")))
-        pc[2].metric("이체 의도 수", plan.get("n_intents", 0))
-        st.caption(f"한도: {plan.get('limits')}")
-        if tr["intents"]:
-            st.dataframe(
-                pd.DataFrame([
-                    {"from": i.get("from"), "to": i.get("to"), "금액": i.get("amount"),
-                     "사유": i.get("reason"), "허용": i.get("would_allow"),
-                     "위반": ", ".join(i.get("violations") or []),
-                     "자동레그": i.get("auto_leg"), "집행": i.get("executed")}
-                    for i in tr["intents"]
-                ]),
-                hide_index=True,
             )
 
     st.subheader("Alpha 팩터 라이브러리")

@@ -276,20 +276,6 @@ def latest_meta_event(log_dir: Path) -> dict | None:
     return events[-1] if events else None
 
 
-def treasury_dryrun_report(log_dir: Path) -> dict | None:
-    """TREASURY 최신 dry-run plan + 같은 실행의 이체 의도들. 없으면 None."""
-    plans = list(iter_events(log_dir, "TREASURY", "treasury_dryrun_plan"))
-    if not plans:
-        return None
-    last = plans[-1]
-    day = str(last.get("ts", ""))[:10]
-    intents = [
-        i for i in iter_events(log_dir, "TREASURY", "treasury_dryrun_intent")
-        if str(i.get("ts", ""))[:10] == day
-    ]
-    return {"plan": last, "intents": intents}
-
-
 def load_latest_requests(requests_dir: Path) -> dict | None:
     """가장 최근 달의 능력 갭 요구 파일({YYYY-MM}.json)을 읽는다. 없으면 None."""
 

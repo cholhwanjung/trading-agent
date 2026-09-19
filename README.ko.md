@@ -115,9 +115,7 @@ LLM writer가 제한된 DSL(AST 화이트리스트, 미래 참조 불가)로 팩
 
 각 시장의 국면을 무료 일간 지수 봉으로 분류하고, 균등 배분을 기준선으로 국면차만큼 예산을 결정론적으로 틸트합니다. 상대 국면차가 없으면 옮기지 않습니다 — 하방 방어는 각 시장 내부의 현금 비중이 맡고, 그래야 시장 격리가 유지됩니다.
 
-실제 자본 이동은 LLM 비개입 가드를 통과한 것만 집행합니다. 하드코딩된 목적지 allowlist(런타임·관측·LLM에서 유입 불가), 건당·일일 상한, 드리프트 게이트, 쿨다운, 잔고 대조입니다. 거래소 KRW 출금은 본인 명의 등록 계좌로 자동이지만, 증권↔은행 레그는 자금이동 API가 없어서 사람이 옮기고 시스템은 사람의 확인을 신뢰하는 대신 잔고 조회로 완료를 검증합니다.
-
-집행 없이 미리 보려면 이렇게 실행하세요: `uv run python scripts/run_treasury_step.py`
+제안은 기록하고 채점하기만 합니다. 이 코드베이스에는 거래소 간에 자본을 옮기거나 자금을 출금하는 기능이 없습니다.
 
 ## 평가
 
@@ -161,14 +159,13 @@ memory/       episodic/semantic/procedural + admission/retention 게이트 + 영
 risk/         결정론 가드레일 · 실패 패턴 veto · 실주문 상한 · 집중도 지표
 regime/       상태기계 + jump model + 매크로 + 실현변동성 + 시장 간 배분 제안
 watcher/      장중 트리거 판정 (순수 함수)
-treasury/     시장 간 자본 이체 가드, 자동/수동 레그
 alpha_lab/    팩터 DSL → IC 백테스터 → 4단계 admission (writer/judge LLM 루프)
 reflection/   주간 성과·기여 재평가
 interaction/  Chat Gateway, 답변은 근거 ID 인용 강제 (FastAPI + MCP)
 eval/         4-arm ablation + rolling 유의성 + 시장 간 결합 지수
 gui/          읽기 전용 대시보드
 llm/          멀티 프로바이더 백본 + 토큰·비용 계측
-scripts/      운영: 일일 스텝 · alpha 사이클 · 워처 · 자본 이체 · 리포트 · 스케줄러
+scripts/      운영: 일일 스텝 · alpha 사이클 · 워처 · 리포트 · 스케줄러
 ```
 
 ## 시작
@@ -211,7 +208,6 @@ uv run python scripts/run_paper_step.py --markets CRYPTO
 | `scripts/run_alpha_lab.py` | 일요일 22:00 | 팩터 생성 → 백테스트 → admission |
 | `scripts/request_capabilities.py` | 매월 1일 20:30 | 측정된 갭에서 에이전트가 쓰는 능력 요구 |
 | `scripts/propose_improvements.py` | 매월 1일 21:00 | self-improve 제안서, 자동 적용 없음 |
-| `scripts/run_treasury_step.py` | 수동, dry-run | 이체 계획·가드 판정, 집행 없음 |
 | `scripts/report_ablation.py` | 수동 | memory delta, B&H 대비 α, 국면 신호 채점 |
 | `streamlit run gui/dashboard.py` | 수동 | 읽기 전용 대시보드 |
 | `uvicorn interaction.api:app --port 8721` | 상시 | Chat Gateway |

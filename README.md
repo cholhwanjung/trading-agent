@@ -115,9 +115,7 @@ Each cycle begins by retiring factors whose realized live IC edge has decayed. A
 
 Each market's regime is classified from free daily index bars, and the budget is tilted deterministically off an equal split by the regime difference. No relative difference means no transfer — downside defense belongs to each market's own cash weight, which keeps the markets isolated.
 
-Actual capital movement passes LLM-free guards only: a hardcoded destination allowlist (never sourced from runtime, observations or the LLM), per-transfer and daily caps, a drift gate, cooldown and balance reconciliation. Exchange KRW withdrawal is automatic to a registered account of the same owner. The brokerage-to-bank leg has no transfer API, so a human moves the funds and the system verifies completion by balance query rather than trusting a confirmation.
-
-Preview without execution: `uv run python scripts/run_treasury_step.py`
+The proposal is logged and scored only. Nothing in this codebase moves capital between venues or withdraws funds.
 
 ## Evaluation
 
@@ -161,14 +159,13 @@ memory/       episodic/semantic/procedural + admission/retention gates + influen
 risk/         deterministic guardrails · failure veto · live-order caps · concentration metric
 regime/       state machine + jump model + macro + realized volatility + cross-market proposal
 watcher/      intraday trigger evaluation (pure functions)
-treasury/     cross-market capital transfer guards, automatic and manual legs
 alpha_lab/    factor DSL → IC backtester → 4-stage admission (writer/judge LLM loop)
 reflection/   weekly performance and contribution re-scoring
 interaction/  chat gateway, answers must cite evidence IDs (FastAPI + MCP)
 eval/         4-arm ablation + rolling significance + cross-market combined index
 gui/          read-only dashboard
 llm/          multi-provider backbone + token/cost accounting
-scripts/      operations: daily step · alpha cycle · watcher · treasury · reports · scheduler
+scripts/      operations: daily step · alpha cycle · watcher · reports · scheduler
 ```
 
 ## Getting started
@@ -211,7 +208,6 @@ Markets run as separate jobs because orders only fill during their own session.
 | `scripts/run_alpha_lab.py` | Sunday 22:00 | factor generation → backtest → admission |
 | `scripts/request_capabilities.py` | monthly, 1st 20:30 | agent-authored capability requests from measured gaps |
 | `scripts/propose_improvements.py` | monthly, 1st 21:00 | self-improvement proposals, never auto-applied |
-| `scripts/run_treasury_step.py` | manual, dry-run | transfer plan and guard verdict, no execution |
 | `scripts/report_ablation.py` | manual | memory delta, α vs B&H, regime scoring |
 | `streamlit run gui/dashboard.py` | manual | read-only dashboard |
 | `uvicorn interaction.api:app --port 8721` | continuous | chat gateway |
