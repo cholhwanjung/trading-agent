@@ -119,14 +119,16 @@ The proposal is logged and scored only. Nothing in this codebase moves capital b
 
 ## Evaluation
 
-Four arms run virtually against the same observations, marked at t−1 closes with transaction costs.
+Four arms run virtually against the same observations. A decision fills at the **next bar's open** — the first tradable price after the information it used — and is marked at that bar's close, with transaction costs. Filling at the bar the decision had already seen would credit the policy with an overnight move it partly knew about, an edge the passive baseline never gets.
 
 | Arm | Content |
 |---|---|
 | `llm` | the allocation actually submitted, after the risk engine |
-| `llm_base` | raw LLM allocation — no memory, no risk engine |
-| `bh` | buy and hold |
-| `random` | random allocation |
+| `llm_base` | first-pass LLM allocation — before lessons, debate and the risk engine |
+| `bh` | the tradable symbols, bought once in equal weights and held |
+| `random` | random allocation over the tradable symbols |
+
+`llm − llm_base` is the combined effect of three later stages, not of memory alone. `eval/attribution.py` splits it into memory, debate and risk contributions straight from the decision logs.
 
 Significance uses a sign test over **non-overlapping** 20-day chunks. Rolling windows are reported as descriptive statistics only, since overlapping windows inflate the sample through autocorrelation.
 
@@ -208,7 +210,7 @@ Markets run as separate jobs because orders only fill during their own session.
 | `scripts/run_alpha_lab.py` | Sunday 22:00 | factor generation → backtest → admission |
 | `scripts/request_capabilities.py` | monthly, 1st 20:30 | agent-authored capability requests from measured gaps |
 | `scripts/propose_improvements.py` | monthly, 1st 21:00 | self-improvement proposals, never auto-applied |
-| `scripts/report_ablation.py` | manual | memory delta, α vs B&H, regime scoring |
+| `scripts/report_ablation.py` | manual | stage-by-stage pipeline delta, α vs B&H, regime scoring |
 | `streamlit run gui/dashboard.py` | manual | read-only dashboard |
 | `uvicorn interaction.api:app --port 8721` | continuous | chat gateway |
 | `scripts/run_mcp_server.py` | on demand | MCP server for Claude |

@@ -119,14 +119,16 @@ LLM writer가 제한된 DSL(AST 화이트리스트, 미래 참조 불가)로 팩
 
 ## 평가
 
-같은 관측에 대해 4개 arm을 가상 운용하고 t−1 종가로 마킹합니다(거래비용 포함).
+같은 관측에 대해 4개 arm을 가상 운용합니다. 결정은 **다음 봉의 시가** — 그 결정이 쓴 정보 이후 처음 거래할 수 있는 가격 — 에 체결하고 그 봉의 종가로 마킹합니다(거래비용 포함). 결정이 이미 본 봉에 체결하면 일부 알고 있던 밤사이 움직임이 정책의 공으로 잡히는데, 정보를 쓰지 않는 기준선에는 그 이득이 없습니다.
 
 | arm | 내용 |
 |---|---|
 | `llm` | 실제로 제출된 배분 — 리스크 엔진 적용 후 |
-| `llm_base` | 원본 LLM 배분 — 메모리도 리스크 엔진도 없음 |
-| `bh` | Buy & Hold |
-| `random` | 랜덤 배분 |
+| `llm_base` | 1차 LLM 배분 — 교훈·토론·리스크 엔진 적용 이전 |
+| `bh` | 매매 가능 종목을 균등하게 한 번 사서 보유 |
+| `random` | 매매 가능 종목 위의 랜덤 배분 |
+
+`llm − llm_base` 는 메모리만의 효과가 아니라 그 뒤 세 단계의 합입니다. `eval/attribution.py` 가 결정 로그에서 메모리·토론·리스크 기여로 가릅니다.
 
 유의성은 **겹치지 않는** 20일 청크의 부호검정으로만 판단합니다. 롤링 창은 기술 통계로만 보고합니다 — 중첩 창은 자기상관으로 표본을 부풀리기 때문입니다.
 
@@ -208,7 +210,7 @@ uv run python scripts/run_paper_step.py --markets CRYPTO
 | `scripts/run_alpha_lab.py` | 일요일 22:00 | 팩터 생성 → 백테스트 → admission |
 | `scripts/request_capabilities.py` | 매월 1일 20:30 | 측정된 갭에서 에이전트가 쓰는 능력 요구 |
 | `scripts/propose_improvements.py` | 매월 1일 21:00 | self-improve 제안서, 자동 적용 없음 |
-| `scripts/report_ablation.py` | 수동 | memory delta, B&H 대비 α, 국면 신호 채점 |
+| `scripts/report_ablation.py` | 수동 | 단계별 후처리 델타, B&H 대비 α, 국면 신호 채점 |
 | `streamlit run gui/dashboard.py` | 수동 | 읽기 전용 대시보드 |
 | `uvicorn interaction.api:app --port 8721` | 상시 | Chat Gateway |
 | `scripts/run_mcp_server.py` | 온디맨드 | Claude용 MCP 서버 |
