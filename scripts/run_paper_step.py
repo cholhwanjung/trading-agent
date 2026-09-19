@@ -76,14 +76,15 @@ from adapters import (  # noqa: E402
     is_market_weekend,
 )
 from adapters.ledger import AccountLedger  # noqa: E402
-from adapters.universe import ETF, asset_class, resolve_asset_caps  # noqa: E402
+from adapters.universe import ETF, asset_class  # noqa: E402
 from risk import (  # noqa: E402
     RiskEngine,
     RiskGuardedPolicy,
-    RiskLimits,
     account_fingerprint,
     concentration,
+    limits_rev,
 )
+from risk.limits_config import load_limits, record_limits_rev  # noqa: E402
 from trader import LLMTrader  # noqa: E402
 from trader.agent import PROMPT_SPEC  # noqa: E402
 from trader.prompt_store import record_revision  # noqa: E402
@@ -102,23 +103,10 @@ TRADABLE = {
     "US": ["SCHX"],
     "KR": ["278530"],
 }
-_EQUITY_CAP = {"CRYPTO": 0.40, "US": 0.35, "KR": 0.40}
-_MIN_CASH = 0.10
-LIMITS = {
-    # 개별 종목은 지수 ETF 보다 변동성이 크다 — 종목당 상한을 유니버스 크기에 맞춰 강화.
-    # ETF 상한은 최대 구성종목 노출이 개별주 상한을 넘지 않는 선에서 따로 도출한다.
-    market: RiskLimits(
-        max_weight_per_asset=_EQUITY_CAP[market],
-        min_cash=_MIN_CASH,
-        max_daily_turnover=0.50,
-        mdd_circuit=0.20 if market == "CRYPTO" else 0.15,
-        asset_caps=resolve_asset_caps(symbols, _EQUITY_CAP[market], _MIN_CASH),
-        # 정의역을 엔진에도 알린다 — 결정 단계 검증만으로는 직전 배분에 남은
-        # 옛 종목이 turnover blend 를 타고 되살아난다.
-        tradable=frozenset(symbols),
-    )
-    for market, symbols in TRADABLE.items()
-}
+# 시장별 한도 — 기준값 파일에 운용 중 덮어쓰기를 얹어 조립한다. 프로세스가 뜰 때 한 번 읽으므로
+# 덮어쓰기는 다음 런부터 적용된다(도는 중인 스텝에 끼어들지 않는다).
+LIMITS_CONFIG = load_limits(ROOT, TRADABLE)
+LIMITS = LIMITS_CONFIG.limits
 STATE_DIR = ROOT / "data" / "state"
 # 일일 스텝이 계좌 락을 기다리는 시한(초). 워처가 락을 쥐는 시간은 발동 없이 수 초, 발동해
 # 결정·주문까지 가도 1~2분이다.
@@ -755,6 +743,20 @@ async def main() -> int:
     # 지문만 실리므로, 이 스냅샷이 없으면 나중에 "그 판본이 무엇이었나"에 답할 수 없다.
     if record_revision(PROMPT_REV_DIR, PROMPT_SPEC, date.today()):
         print(f"prompt_rev={PROMPT_SPEC.rev} 신규 판본 기록 blocks={','.join(PROMPT_SPEC.blocks)}")
+    # 한도 판본도 같은 이유로 남긴다 — 결정 기록의 config_rev 를 값으로 되돌리는 경로.
+    for market, limits in LIMITS.items():
+        if record_limits_rev(ROOT, market, limits, LIMITS_CONFIG.overrides.get(market)):
+            print(f"config_rev={limits_rev(limits)} market={market} 신규 한도 판본 기록"
+                  f" override={json.dumps(LIMITS_CONFIG.overrides.get(market) or {})}")
+    # 버려진 덮어쓰기 — 그 시장은 기준값으로 돈다. 조인 한도가 풀린 채 도는 것일 수 있어
+    # 조용히 넘기지 않는다.
+    if LIMITS_CONFIG.errors:
+        for error in LIMITS_CONFIG.errors:
+            print(f"config_error {error}")
+        JsonlLogger(ROOT / "data" / "logs").log(
+            "CONFIG", "config_error", {"errors": LIMITS_CONFIG.errors}
+        )
+        await notify(env, "한도 덮어쓰기 무시됨 — 기준값으로 실행", "\n".join(LIMITS_CONFIG.errors))
 
     # 계좌 락 — catch-up/중복 런이 같은 계좌에 이중 주문하거나 상태 파일(risk_*·
     # live_notional_*)을 레이스로 덮어쓰지 않게 한다(실계좌 경로 필수). 키가 시장이라

@@ -15,7 +15,7 @@ from adapters.allocation import CASH
 from adapters.base import REGULAR_SESSIONS, Observation, Position
 from adapters.retry import with_retry
 from harness.policy import Policy
-from risk.engine import RiskEngine
+from risk.engine import RiskEngine, limits_rev
 
 # 평가액 조회 재시도 예산. 어댑터가 자기 호출에 두는 예산보다 길게 잡는다 — 이 한 번의
 # 실패는 값 하나가 비는 데서 끝나지 않고 **그날 집행 전체를 스킵**시키기 때문이다
@@ -131,6 +131,8 @@ class RiskGuardedPolicy:
         # 계좌 지문 — 어댑터/계좌 전환 시 stale equity 이력 리셋 트리거 (account_fingerprint)
         self.account_key = account_key
         self.name = f"risk_guarded({inner.name})"
+        # 이 정책이 집행하는 한도의 지문 — 결정마다 기록해 한도 변경 전/후를 로그에서 가른다
+        self.config_rev = limits_rev(engine.limits)
         self.last_decision: dict | None = None
 
     def _load_state(self) -> dict:
@@ -179,6 +181,7 @@ class RiskGuardedPolicy:
                     # 저널이 이 키로 미집행 원안을 반사실 기록에 남긴다 — 동결된 배분만
                     # 남기면 veto 된 패턴의 표본이 끊겨 재검증이 불가능해지기 때문.
                     "counterfactual_key": key,
+                    "config_rev": self.config_rev,
                     "risk_violations": [f"forbidden_pattern key={key}"],
                     "circuit_open": False,
                     "equity": None,
@@ -232,6 +235,7 @@ class RiskGuardedPolicy:
         self.last_decision = {
             **inner_meta,
             "weights_pre_risk": raw,
+            "config_rev": self.config_rev,
             "risk_violations": decision.violations,
             "circuit_open": decision.circuit_open,
             "equity": equity,

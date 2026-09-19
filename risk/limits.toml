@@ -1,0 +1,28 @@
+# 시장별 리스크 한도의 기준값.
+#
+# 이 파일은 코드와 같은 경로(리뷰·커밋)로만 바뀐다. 운용 중 조정은 로컬 CLI
+# (scripts/limits_cli.py)가 data/state/limits_override.json 에 덮어쓰기로 남기고,
+# 덮어쓰기를 지우면 이 값으로 돌아온다. 덮어쓸 수 있는 항목과 그 범위는 코드 상수다.
+#
+# max_weight_per_asset 은 개별 종목 기준이다 — 개별 종목은 지수 ETF 보다 변동성이 커서
+# 유니버스 크기에 맞춰 잡았다. 지수 ETF 의 상한은 여기 적지 않는다: 최소 현금이 허용하는
+# 최대치(1 − min_cash)로 도출되고, 그 ETF 의 최대 구성종목 노출이 이 개별주 상한을 넘지
+# 않는지 조립할 때 확인한다.
+
+[CRYPTO]
+max_weight_per_asset = 0.40
+min_cash = 0.10
+max_daily_turnover = 0.50
+mdd_circuit = 0.20
+
+[US]
+max_weight_per_asset = 0.35
+min_cash = 0.10
+max_daily_turnover = 0.50
+mdd_circuit = 0.15
+
+[KR]
+max_weight_per_asset = 0.40
+min_cash = 0.10
+max_daily_turnover = 0.50
+mdd_circuit = 0.15

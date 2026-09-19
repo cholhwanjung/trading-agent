@@ -16,6 +16,8 @@ LLM 이 이 레이어를 우회/완화하는 경로는 존재하지 않는다 �
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 
 from adapters.allocation import CASH
@@ -35,6 +37,27 @@ class RiskLimits:
     # 배분 벡터의 정의역 — 계좌가 실제로 주문을 낼 수 있는 종목. 관측 유니버스는 이보다
     # 넓을 수 있다. 빈 집합은 "제약 없음"이며, 정의역을 모르는 호출부의 동작을 바꾸지 않는다.
     tradable: frozenset[str] = frozenset()
+
+
+def limits_payload(limits: RiskLimits) -> dict:
+    """한도의 정규형 — 지문과 판본 스냅샷이 같은 내용을 쓴다."""
+    return {
+        "max_weight_per_asset": limits.max_weight_per_asset,
+        "min_cash": limits.min_cash,
+        "max_daily_turnover": limits.max_daily_turnover,
+        "mdd_circuit": limits.mdd_circuit,
+        "asset_caps": dict(sorted(limits.asset_caps.items())),
+        "tradable": sorted(limits.tradable),
+    }
+
+
+def limits_rev(limits: RiskLimits) -> str:
+    """한도의 지문 — 결정 기록에 새겨, 한도가 바뀐 날을 로그만 보고 가를 수 있게 한다.
+
+    설정 파일이 아니라 **엔진이 실제로 집행하는 값**에서 만든다. 덮어쓰기를 읽지 못해 기준값으로
+    돈 날도, 코드에서 정의역을 바꾼 날도 같은 방식으로 드러난다."""
+    payload = json.dumps(limits_payload(limits), sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
 @dataclass(frozen=True)

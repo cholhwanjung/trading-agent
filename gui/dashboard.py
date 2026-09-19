@@ -69,10 +69,10 @@ from gui.panels import (  # noqa: E402
 )
 from harness.env import load_env  # noqa: E402
 from risk.engine import RiskLimits  # noqa: E402
+from risk.limits_config import load_limits  # noqa: E402
 from scripts.run_paper_step import (  # noqa: E402
     CRYPTO_UNIVERSE,
     KR_UNIVERSE,
-    LIMITS,
     TRADABLE,
     US_UNIVERSE,
 )
@@ -335,8 +335,11 @@ with tab_dash:
         "없어서, 배정해도 주문 투영이 매일 통째로 현금으로 되돌린다. 그래서 낼 수 있는 주문만 "
         "정의역에 두고 나머지는 판단 근거로만 읽는다. 금액 열은 그 시장의 관측 통화 그대로다."
     )
+    # 화면을 그릴 때마다 읽는다 — 이 프로세스는 오래 떠 있어서, 뜰 때 읽은 값을 쓰면 운용 중
+    # 바뀐 한도가 재시작 전까지 보이지 않는다.
+    current_limits = load_limits(ROOT, TRADABLE).limits
     for market in MARKETS:
-        limits = LIMITS[market]
+        limits = current_limits[market]
         budget_rec = latest_budget(read_recent_decisions(LOG_DIR, market))
         rows = universe_rows(
             universe_meta(OBSERVED_UNIVERSE[market], TRADABLE[market]),
