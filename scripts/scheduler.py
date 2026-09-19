@@ -79,19 +79,29 @@ def run_job(job: Job) -> int:
     return proc.returncode
 
 
+def pick_next(schedule: dict[Job, datetime]) -> Job:
+    """가장 이른 잡. 같은 시각이면 먼저 등록된 잡이다 — 잡 객체끼리는 비교하지 않는다
+    (interval 잡 둘은 다음 실행 시각이 늘 같아서, 시각과 잡을 묶어 정렬하면 잡 비교로 넘어가 죽는다)."""
+    return min(schedule, key=schedule.__getitem__)
+
+
 def main() -> None:
     print(f"scheduler_start jobs={[j.name for j in JOBS]} tz=Asia/Seoul", flush=True)
+    now = datetime.now(KST)
+    schedule = {job: next_run_at(job, now) for job in JOBS}
     while True:
-        now = datetime.now(KST)
-        upcoming = sorted((next_run_at(j, now), j) for j in JOBS)
-        when, job = upcoming[0]
-        wait = (when - now).total_seconds()
-        print(f"next job={job.name} at={when.isoformat()} wait_s={int(wait)}", flush=True)
-        time.sleep(max(1.0, wait))
+        job = pick_next(schedule)
+        when = schedule[job]
+        wait = (when - datetime.now(KST)).total_seconds()
+        print(f"next job={job.name} at={when.isoformat()} wait_s={int(max(0.0, wait))}", flush=True)
+        time.sleep(max(0.0, wait))
         try:
             run_job(job)
         except Exception as e:  # 잡 실패가 스케줄러를 죽이면 안 된다
             print(f"job={job.name} error={type(e).__name__}: {e}", flush=True)
+        # 돈 잡의 시각만 다시 잡는다 — 전부 다시 계산하면 interval 잡의 시계가 매번 초기화돼
+        # 같은 시각의 두 번째 잡이 영영 차례를 못 얻는다.
+        schedule[job] = next_run_at(job, datetime.now(KST))
 
 
 if __name__ == "__main__":
