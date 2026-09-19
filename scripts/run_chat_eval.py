@@ -2,7 +2,7 @@
 
     uv run python scripts/run_chat_eval.py snapshot
     uv run python scripts/run_chat_eval.py items  [--snapshot latest]
-    uv run python scripts/run_chat_eval.py run    [--snapshot latest] [--categories A,B,D,G,I,J]
+    uv run python scripts/run_chat_eval.py run    [--snapshot latest] [--categories A,B,D,G,I,J,K]
                                                   [--repeats 3] [--limit N] [--concurrency 4]
                                                   [--model provider:model]
     uv run python scripts/run_chat_eval.py report [--run latest]
@@ -16,7 +16,7 @@
 
 산출물은 전부 data/eval/chat 아래다 — 실계좌 기록이 들어 있어 저장소에 올리지 않는다.
     snapshots/{날짜}-{context 해시}/   동결한 root (context 가 읽는 파일 + 플레이북)
-    items.jsonl                       수작업 문항 (기권·입력 조작·제안 초안)
+    items.jsonl                       수작업 문항 (기권·입력 조작·제안 초안·설정 변경 요청)
     runs/{run_id}/                    manifest.json · summary.json · results.jsonl · items.jsonl
 """
 
@@ -296,7 +296,13 @@ async def run_item(
             proposal.path.unlink(missing_ok=True)  # 스냅샷에 초안 파일을 남기지 않는다
             resp.diff = proposal.diff
         else:
-            answer, _ = await engine.ask(item.question)
+            sid = None
+            if item.transcript:  # 앞선 대화가 있는 문항 — 시장이나 항목이 앞 턴에만 나온다
+                sid = uuid.uuid4().hex[:12]
+                engine.sessions[sid] = DiscussionSession(
+                    session_id=sid, market=item.market, messages=[dict(m) for m in item.transcript]
+                )
+            answer, _ = await engine.ask(item.question, session_id=sid)
             resp.answer, resp.cited_ids = answer.answer, answer.cited_ids
     except GroundingError as e:
         resp.error = f"grounding: {e}"
@@ -320,6 +326,7 @@ async def run_item(
         "answer": resp.answer,
         "cited_ids": resp.cited_ids,
         "diff": resp.diff,
+        "requests": resp.requests,
         "error": resp.error,
         **graded,
         "latency_s": call.get("latency_s"),
@@ -484,7 +491,9 @@ def _regrade(run_dir: Path, snapshots: Path) -> tuple[dict, list[dict]]:
     rows = []
     for line in (run_dir / "results.jsonl").read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
-        resp = Response(row["answer"], row["cited_ids"], row["error"], row["diff"])
+        resp = Response(
+            row["answer"], row["cited_ids"], row["error"], row["diff"], row.get("requests") or []
+        )
         row.update(
             score(items[row["item_id"]], resp, contents=contents, market_ids=ids, playbook=playbook)
         )
@@ -552,10 +561,12 @@ def _print_summary(manifest: dict, summary: dict) -> None:
         f"latency_p50_s={summary['latency_p50_s']} latency_p95_s={summary['latency_p95_s']}"
     )
     for cat, c in summary["categories"].items():
+        kinds = f" kinds={json.dumps(c['kinds'])}" if c.get("kinds") else ""
         print(
             f"category={cat} items={c['items']} calls={c['calls']} pass_rate={c['pass_rate']} "
             f"pass_all={c['pass_all']} grounding_errors={c['grounding_errors']} "
             f"call_errors={c['call_errors']} gates={json.dumps(c['gates'], ensure_ascii=False)}"
+            f"{kinds}"
         )
     print(
         f"gates={json.dumps(summary['gates'], ensure_ascii=False)} "
