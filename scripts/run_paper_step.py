@@ -146,6 +146,20 @@ def _ratio(raw: str | None) -> float | None:
     return value if 0.0 < value <= 1.0 else None
 
 
+def weekend_markets(markets: list[str], now: datetime) -> list[str]:
+    """지금이 그 시장의 현지 주말이라 오늘 스텝을 돌리지 않을 시장. 24/7 시장은 해당 없음.
+
+    주말에는 체결될 주문이 없다. 그런데도 결정을 내리면 그 결정은 갈 곳이 없는 채로
+    흔적만 남긴다 — 직전 목표 배분이 계좌가 가진 적 없는 값으로 덮이고, 성과가 정확히 0 인
+    기록이 학습 저장소에 쌓이며, 병행 가상 포트폴리오는 금요일 종가에 토요일의 결정을
+    체결해 실계좌가 월요일에 실제로 집행하는 결정과 다른 길을 간다. 월요일 스텝은 같은
+    뉴스 창으로 주말 소식을 전부 보므로, 주말에 결정하지 않아서 잃는 정보는 없다.
+
+    공휴일은 가리지 않는다(휴장일 달력이 없다) — 그날은 종전대로 결정하고 브로커가 거부한다.
+    """
+    return sorted(m for m in markets if is_market_weekend(m, now))
+
+
 def load_prev_weights(state_path: Path) -> dict[str, float] | None:
     """리스크 상태 파일에서 직전 목표 배분을 읽는다. 파일 없으면 None."""
     if state_path.exists():
@@ -703,6 +717,16 @@ async def main() -> int:
     # 워처(같은 계좌, 다른 잡)와도 상호 배제되고, 장 시간이 다른 시장은 서로 막지 않는다.
     # 시장 미지정 런은 키 있는 시장 전부를 매매하므로 전 시장을 잡는다.
     markets = sorted(args.markets) if args.markets else sorted(_VALID_MARKETS)
+    # 주말인 시장은 락·브로커·LLM 어느 것도 건드리기 전에 뺀다. 건너뛴 사실은 로그에
+    # 남긴다 — 그날 파일이 아예 없으면 '잡이 안 돌았다'와 구분되지 않는다. 관측만 하는
+    # --dry-run 은 결정도 주문도 없어 막을 이유가 없다(주말 연결 점검에 쓰인다).
+    skipped = [] if args.dry_run else weekend_markets(markets, datetime.now(timezone.utc))
+    for market in skipped:
+        JsonlLogger(ROOT / "data" / "logs").log(market, "daily_skip", {"reason": "market_weekend"})
+        print(f"market={market} status=closed detail=주말 게이팅 스킵 — 결정·주문 없음")
+    markets = [m for m in markets if m not in skipped]
+    if not markets:
+        return 0
     markets_key = ",".join(markets)
     # 같은 락을 두고 경합하는 15분 워처는 길어야 1~2분 쥔다. 하루 한 번 도는 이 잡이
     # 그 몇 초에 물러나면 그날의 결정이 통째로 사라지고 유실분은 되채우지 않으므로,
@@ -721,10 +745,12 @@ async def main() -> int:
 
     adapters = build_adapters(env)
     peer_adapters: list = []  # 이 잡의 시장이 아니지만 총자산 계산에 필요해 열어 둔 것
-    # --markets KR / --markets CRYPTO,US — 장 시간이 다른 시장을 별도 잡으로 분리
-    if args.markets:
-        wanted = args.markets
-        dropped = wanted - set(adapters)
+    # --markets KR / --markets CRYPTO,US — 장 시간이 다른 시장을 별도 잡으로 분리.
+    # 시장을 지정하지 않은 런도 주말에 빠진 시장이 있으면 같은 길로 걸러낸다(그때는 키
+    # 없는 시장이 오류가 아니므로 경고하지 않는다).
+    if args.markets or skipped:
+        wanted = set(markets)
+        dropped = wanted - set(adapters) if args.markets else set()
         peer_adapters = await close_unselected(adapters, wanted)
         adapters = {k: v for k, v in adapters.items() if k in wanted}
         if dropped:

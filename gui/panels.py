@@ -242,20 +242,29 @@ def market_health(log_dir: Path, market: str, today: date) -> dict:
 
     staleness 는 결정 로그의 asof_day 기준(마지막 결정이 며칠 전인가). mdd 는 리스크
     엔진이 서킷브레이커 판정에 쓰는 값(가상 arm 낙폭과는 다른 기준). 파일만 읽는다.
+
+    days_since_run 은 잡이 마지막으로 **돈** 날부터의 간격이다. 주말에는 잡이 돌아도
+    결정을 내리지 않고 건너뛴 사실만 남기므로, 결정 신선도만 보면 월요일마다 멀쩡한 잡이
+    멈춘 것처럼 보인다. 경고는 이 값으로 걸고 결정 신선도는 표시용으로 남긴다.
     """
     decisions = read_recent_decisions(log_dir, market)
     last = decisions[-1] if decisions else None
     last_day = last["day"] if last else None
-    days_stale: int | None = None
-    if last_day:
+    skip_days = [str(rec.get("ts", ""))[:10] for rec in iter_events(log_dir, market, "daily_skip")]
+    last_run_day = max([d for d in (last_day, *skip_days) if d], default=None)
+
+    def _age(day: str | None) -> int | None:
         try:
-            days_stale = (today - date.fromisoformat(last_day)).days
+            return (today - date.fromisoformat(day)).days if day else None
         except ValueError:
-            days_stale = None
+            return None
+
     return {
         "market": market,
         "last_day": last_day,
-        "days_stale": days_stale,
+        "days_stale": _age(last_day),
+        "days_since_run": _age(last_run_day),
+        "skipped_since": bool(last_run_day and last_run_day != last_day),
         "mdd": last.get("mdd") if last else None,
         "violation_days": [d["day"] for d in decisions if d["risk_violations"]][-3:],
     }

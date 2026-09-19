@@ -235,10 +235,13 @@ with tab_dash:
             if h["last_day"] is None:
                 st.caption(f"**{market}** · 결정 로그 없음")
                 continue
-            stale = h["days_stale"] is not None and h["days_stale"] > STALE_DAYS
+            # 경고는 잡이 마지막으로 돈 날 기준 — 주말에는 돌아도 결정을 내리지 않는다
+            stale = h["days_since_run"] is not None and h["days_since_run"] > STALE_DAYS
             tripped = h["mdd"] is not None and h["mdd"] >= mdd_circuit
             age = f"{h['days_stale']}일 전" if h["days_stale"] is not None else h["last_day"]
             line = f"**{market}** · 최근 결정 {age}"
+            if h["skipped_since"]:
+                line += " · 주말 스킵"
             if h["mdd"]:
                 line += f" · MDD {h['mdd']:.1%}"
             if tripped:

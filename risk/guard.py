@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from adapters.allocation import CASH
-from adapters.base import Observation, Position
+from adapters.base import REGULAR_SESSIONS, Observation, Position
 from adapters.retry import with_retry
 from harness.policy import Policy
 from risk.engine import RiskEngine
@@ -79,12 +79,25 @@ def adjust_peak(peak: float | None, prev_equity: float | None, equity: float) ->
     return equity
 
 
-def _elapsed_days(prev_day: str | None, asof_day: date | None) -> int:
-    """직전 스텝과의 간격(일). 기록이 없거나 읽을 수 없으면 1 일로 본다(가장 좁은 상한)."""
+def _elapsed_days(
+    prev_day: str | None, asof_day: date | None, market: str | None = None
+) -> int:
+    """직전 스텝과의 간격(일). 기록이 없거나 읽을 수 없으면 1 일로 본다(가장 좁은 상한).
+
+    정규장이 있는 시장은 **평일만** 센다. 이 간격은 '시장이 움직일 수 있었던 날 수'로
+    쓰이는데 주말에는 가격이 움직이지 않는다. 달력일로 세면 금요일 다음 스텝이 월요일인
+    것만으로 설명 가능한 변동의 상한이 3배가 되어, 그 사이의 출금이 상한 안에 숨어
+    손실로 읽힌다. 공휴일은 가리지 않는다(휴장일 달력이 없다) — 그만큼 상한이 넓어지는
+    쪽이라 입출금을 놓칠 수는 있어도 손익을 입출금으로 오인하지는 않는다.
+    """
     try:
-        return max((asof_day - date.fromisoformat(prev_day)).days, 1)
+        start = date.fromisoformat(prev_day)
+        span = (asof_day - start).days
     except (TypeError, ValueError):
         return 1
+    if market in REGULAR_SESSIONS:
+        span = sum(1 for i in range(1, span + 1) if (start + timedelta(days=i)).weekday() < 5)
+    return max(span, 1)
 
 
 def account_fingerprint(adapter: object) -> str:
@@ -201,7 +214,7 @@ class RiskGuardedPolicy:
                 prev_equity,
                 equity,
                 1.0 - prev_cash if prev_cash is not None else 1.0,
-                _elapsed_days(state.get("prev_day"), asof_day),
+                _elapsed_days(state.get("prev_day"), asof_day, getattr(obs, "market", None)),
             )
             if cash_flow:
                 peak = adjust_peak(peak, prev_equity, equity)
