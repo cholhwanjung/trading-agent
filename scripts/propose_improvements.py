@@ -80,7 +80,7 @@ async def main() -> int:
                     "role": "user",
                     "content": (
                         f"{month} 월간 증거:\n" + json.dumps(evidence, ensure_ascii=False, indent=1)
-                        + "\n\n시스템 프롬프트(trader/agent.py SYSTEM_PROMPT)·Risk limits·"
+                        + "\n\n결정 프롬프트(trader/prompts/manifest.toml 이 조립하는 blocks/*.md)·Risk limits·"
                         "관측 구성에 대한 개선 제안서를 작성하라."
                     ),
                 }
