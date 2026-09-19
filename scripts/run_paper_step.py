@@ -60,11 +60,8 @@ from memory import (  # noqa: E402
     review_retention,
 )
 from regime import (  # noqa: E402
-    compute_market_vol,
     INDEX_PROXY,
-    compute_jm_features,
     compute_jm_regime,
-    compute_macro_regime,
     compute_regime,
     load_market_signals,
     propose_meta_weights,
@@ -81,7 +78,6 @@ from risk import (  # noqa: E402
     RiskEngine,
     RiskGuardedPolicy,
     account_fingerprint,
-    concentration,
     limits_rev,
 )
 from risk.limits_config import load_limits, record_limits_rev  # noqa: E402
@@ -1069,31 +1065,6 @@ async def main() -> int:
                 today,
             )
 
-            # 시장 실현변동성 (shadow) — 전역 VIX 게이지가 못 보는 지역 위기 감지.
-            # 계산·로깅만, 결정/리스크 미개입 — 검증 후 리스크 게이트 입력 승격 대상.
-            vol = await compute_market_vol(adapter, market, today)
-            if vol is not None:
-                logger.log(market, "market_vol", {
-                    "state": vol.state, "realized_vol_20d": vol.realized_vol,
-                    "n_bars": vol.n_bars, "proxy": INDEX_PROXY.get(market),
-                })
-                print(f"market={market} vol_state={vol.state} rv20={vol.realized_vol}"
-                      f" n_bars={vol.n_bars}")
-
-            # jump model 피처 (shadow) — 룰 기반 FSM 과 같은 프록시·같은 창으로 나란히 계산.
-            # 하방편차·Sortino 는 실현변동성이 못 보는 하락 편중과 리스크조정수익을 담는다.
-            # 계산·로깅만, 결정/리스크 미개입 — 두 접근의 라이브 비교가 쌓인 뒤 판정한다.
-            jm = await compute_jm_features(adapter, market, today)
-            if jm is not None:
-                logger.log(market, "jm_features", {
-                    "downside_dev_10": jm.downside_dev,
-                    "sortino_20": jm.sortino_20,
-                    "sortino_60": jm.sortino_60,
-                    "n_bars": jm.n_bars, "proxy": INDEX_PROXY.get(market),
-                })
-                print(f"market={market} dd10={jm.downside_dev} sortino20={jm.sortino_20}"
-                      f" sortino60={jm.sortino_60} n_bars={jm.n_bars}")
-
             # jump model 국면 (shadow) — FSM 과 같은 프록시로 이산 상태를 내 나란히 채점된다.
             # 계산·로깅만, 결정/리스크 미개입. 판정은 report_ablation 의 REGIME 섹션에서.
             jm_state = await compute_jm_regime(
@@ -1103,28 +1074,6 @@ async def main() -> int:
                 logger.log(market, "jm_regime", jm_state)
                 print(f"market={market} jm_state={jm_state['state']}"
                       f" n_train={jm_state['n_train']} refit={int(jm_state['refit'])}")
-
-            # 배분 집중도·실효 분산 (shadow) — 종목당 상한이 못 보는 동조 리스크.
-            # 계산·로깅만, Risk Engine 미개입 — 검증 후 집중도 상한 게이트 승격 대상.
-            if llm_weights:
-                try:
-                    hist = await adapter.get_ohlcv_history(symbols, today, lookback_days=120)
-                    conc = concentration(
-                        llm_weights, {s: [b.close for b in bars] for s, bars in hist.items()}
-                    )
-                except Exception as e:
-                    conc = None
-                    logger.log(market, "concentration_error", {
-                        "error_type": type(e).__name__, "error": str(e)[:200],
-                    })
-                if conc is not None:
-                    logger.log(market, "concentration", {
-                        "hhi": conc.hhi, "effective_n": conc.effective_n,
-                        "effective_n_corr": conc.effective_n_corr,
-                        "avg_corr": conc.avg_corr, "n_assets": conc.n_assets,
-                    })
-                    print(f"market={market} eff_n={conc.effective_n}"
-                          f" eff_n_corr={conc.effective_n_corr} avg_corr={conc.avg_corr}")
 
             # KR 수급 (shadow) — 투자자별 순매수(외인/기관/개인) 계산·로깅만, 결정 미개입.
             # 수급 축적·반전은 봉·뉴스가 못 담는 포지셔닝 신호 — 관측 승격은 라이브 검증 후.
@@ -1168,17 +1117,6 @@ async def main() -> int:
             except Exception as e:
                 logger.log(market, "memory_error", {"error_type": type(e).__name__, "error": str(e)[:200]})
         memory.close()
-
-        # 매크로 국면 (전역 shadow) — FRED 일간 지표(VIX·금리차·달러·원달러). 계산·로깅만,
-        # 결정/Risk 미개입(검증 전 개입 금지). FRED 키 없으면 생략. 검증 후 게이트 승격 대상.
-        macro = await compute_macro_regime(env, today)
-        if macro is not None:
-            logger.log("MACRO", "macro_regime", {
-                "day": today.isoformat(), "state": macro.state,
-                "vix": macro.vix, "yield_spread": macro.yield_spread, **macro.values,
-            })
-            print(f"market=MACRO regime={macro.state} vix={macro.vix}"
-                  f" yield_spread={macro.yield_spread} usdkrw={macro.values.get('usdkrw')}")
 
         # 시장 간 shadow 메타 배분 — 공유 regime 상태에서 전 시장을 읽어 제안(부분 잡이어도 완전).
         # 제안·로깅·누적만, 집행/Risk 미개입. 검증 후 승격.
