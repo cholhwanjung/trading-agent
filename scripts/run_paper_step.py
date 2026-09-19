@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -119,6 +120,9 @@ LIMITS = {
     for market, symbols in TRADABLE.items()
 }
 STATE_DIR = ROOT / "data" / "state"
+# 일일 스텝이 계좌 락을 기다리는 시한(초). 워처가 락을 쥐는 시간은 발동 없이 수 초, 발동해
+# 결정·주문까지 가도 1~2분이다.
+LOCK_WAIT_S = 180.0
 # 시장별 최신 regime 의 cross-job 공유 — 장 시간 분리로 시장이 별도 잡이어도 메타 제안이 전 시장을 본다.
 REGIME_STATE_PATH = STATE_DIR / "regime_latest.json"
 COST_BPS = {"CRYPTO": 10.0, "US": 1.0, "KR": 3.0}  # 가상 포트폴리오 거래비용
@@ -399,6 +403,31 @@ def link_shared_account(adapters: dict[str, tuple[object, list[str]]]) -> None:
     kr.ledger = us.ledger = ledger
 
 
+def log_ledger_activity(logger, market: str, adapter: object) -> dict | None:
+    """현금 장부에서 일어난 일과 매매 전후 평가액의 연속성을 남긴다. 한도를 넘긴 기록을 돌려준다.
+
+    장부의 수준 점검은 한 스텝에 여러 번 불리고 예산 산출 내역에는 마지막 호출의 상태만
+    남는다 — 앞선 호출이 돈을 나눴어도 뒤 호출의 'ok' 가 그 사실을 덮는다. 분배·이체·
+    기준선 재설정처럼 **일어난 일**은 장부가 따로 쌓아 두므로 여기서 전부 기록한다.
+    일일 스텝과 워처가 같은 주문 경로를 타므로 양쪽에서 부른다.
+    """
+    ledger = getattr(adapter, "ledger", None)
+    if ledger is not None and ledger.events:
+        for event in ledger.events:
+            logger.log(market, "ledger_event", event)
+            print(f"market={market} ledger_event "
+                  + " ".join(f"{k}={v}" for k, v in event.items()))
+        ledger.events.clear()
+    record = getattr(adapter, "last_conservation", None)
+    if not record:
+        return None
+    logger.log(market, "equity_conservation", record)
+    print(f"market={market} equity_conservation pre={record['pre']:,.0f}"
+          f" post={record['post']:,.0f} diff={record['diff']:+,.0f}"
+          f" limit={record['limit']:,.0f} breach={record['breach']}")
+    return record if record["breach"] else None
+
+
 def account_peer(adapter: object) -> object | None:
     """총자산을 셀 때 이 어댑터가 잔고를 조회하는 상대 어댑터. 없으면 None."""
     return getattr(getattr(adapter, "peer_holdings_fn", None), "__self__", None)
@@ -675,10 +704,20 @@ async def main() -> int:
     # 시장 미지정 런은 키 있는 시장 전부를 매매하므로 전 시장을 잡는다.
     markets = sorted(args.markets) if args.markets else sorted(_VALID_MARKETS)
     markets_key = ",".join(markets)
-    locks = market_locks(STATE_DIR, markets, label="페이퍼 스텝")
+    # 같은 락을 두고 경합하는 15분 워처는 길어야 1~2분 쥔다. 하루 한 번 도는 이 잡이
+    # 그 몇 초에 물러나면 그날의 결정이 통째로 사라지고 유실분은 되채우지 않으므로,
+    # 기다렸다가 돈다. 끝내 못 잡으면 조용히 끝내지 않는다 — 종료코드와 통지로 남긴다.
+    lock_started = time.monotonic()
+    locks = market_locks(STATE_DIR, markets, label="페이퍼 스텝", wait_s=LOCK_WAIT_S)
+    lock_wait = time.monotonic() - lock_started
     if locks is None:
-        print(f"status=skip detail=이미 실행 중(markets={markets_key}) — 중복 실행 차단")
-        return 0
+        print(f"status=skip detail=이미 실행 중(markets={markets_key}) — 중복 실행 차단"
+              f" lock_wait_s={lock_wait:.0f}")
+        await notify(env, f"{markets_key} 일일 스텝 미실행",
+                     f"계좌 락을 {lock_wait:.0f}초 기다렸으나 다른 잡이 놓지 않았다")
+        return 1
+    if lock_wait >= 1.0:
+        print(f"status=lock_waited markets={markets_key} lock_wait_s={lock_wait:.0f}")
 
     adapters = build_adapters(env)
     peer_adapters: list = []  # 이 잡의 시장이 아니지만 총자산 계산에 필요해 열어 둔 것
@@ -904,6 +943,15 @@ async def main() -> int:
                       f" account_cash={sp['account_cash']:,.2f} share={share:.4f}"
                       f" reconcile={sp['reconcile'].get('action')}"
                       f" drift={sp['reconcile'].get('drift')}")
+            # 매매만으로 평가액이 뛰었다면 손익이 아니라 산식의 구멍이다 — 그 불연속은
+            # 낙폭으로 쌓여 서킷을 건드리므로, 서킷이 터지기 전에 사람이 알아야 한다.
+            breach = log_ledger_activity(logger, market, adapter)
+            if breach and getattr(adapter, "mode", None) == "real":
+                await notify(
+                    env, f"{market} 매매 전후 평가액 불연속",
+                    f"diff={breach['diff']:+,.0f} limit={breach['limit']:,.0f}"
+                    f" pre={breach['pre']:,.0f} post={breach['post']:,.0f}",
+                )
 
             prices, day = await fetch_prices(adapter, symbols)
             await run_virtual(market, symbols, prices, day, llm_weights, llm_base_weights, logger)

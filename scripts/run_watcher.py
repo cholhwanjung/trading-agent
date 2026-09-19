@@ -39,6 +39,7 @@ from scripts.run_paper_step import (  # noqa: E402
     build_adapters,
     close_unselected,
     load_prev_weights,
+    log_ledger_activity,
 )
 from trader import LLMTrader  # noqa: E402
 from watcher import config_for, evaluate, in_session, max_drift  # noqa: E402
@@ -172,6 +173,7 @@ async def main() -> int:
             f"market={market} status={'ok' if result.accepted else 'rejected'}"
             f" n_orders={len(result.orders)} weights={weights}"
         )
+        log_ledger_activity(logger, market, adapter)
         _save_watch_state(watch_path, new_state)
         return 0 if result.accepted else 1
     finally:

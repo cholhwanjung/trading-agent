@@ -14,6 +14,9 @@
   산 미국 자산은 환율 손익에 노출되므로 USD 가 아닌 KRW 로 계상해 서킷이 FX 낙폭까지
   포착하게 한다. 보유는 취득원가가 아니라 평가금액으로 잡는다 — 원가로 재면 미실현
   손실이 낙폭 서킷에 아예 보이지 않는다.
+  국내와 계좌를 나눠 쓰는 구성(현금 장부 연결)에서는 `원화 장부의 자기 몫 + USD 측 전체`
+  로 센다. USD 측은 해외 보유 + USD 예수금 + 미결제 정산분이다 — 해외 매도대금은 원화로
+  돌아오지 않고 USD 예수금으로 남으므로, 보유만 세면 팔 때마다 평가액이 그만큼 꺼진다.
 - 뉴스: KIS 무료 원천 미정 — 빈 리스트(관측 배선 시 채널 별도 결정).
 """
 
@@ -30,7 +33,13 @@ from adapters.allocation import (
     project_to_executable,
     weights_from_quantities,
 )
-from adapters.ledger import AccountLedger, market_funds, split_record
+from adapters.ledger import (
+    AccountLedger,
+    conservation_record,
+    foreign_funds,
+    market_funds,
+    split_record,
+)
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -125,6 +134,9 @@ class KISOverseasAdapter(MarketAdapter):
         self.ledger: AccountLedger | None = None
         # 예산 산출 내역 — 로깅 전용. _market_funds 가 갱신한다.
         self.last_split: dict | None = None
+        # 매매 전후 평가액 연속성 — 로깅·통지용. 주문이 나간 런에서만 채워진다.
+        self._equity_pre: float | None = None
+        self.last_conservation: dict | None = None
 
     async def close(self) -> None:
         await self.session.close()
@@ -347,22 +359,80 @@ class KISOverseasAdapter(MarketAdapter):
         exrt = (self._psamount_raw or {}).get("exrt") or 0.0
         if not exrt:
             return 0.0, 0.0  # 환율을 못 읽으면 국내 보유분을 합칠 수 없다
+        if self.ledger is not None:
+            return await self._ledger_funds(ceiling, exrt)
         parts = self.last_equity_parts = await self._equity_parts()
         held = sum(p.market_value for p in self._parse_positions(await self._balance_rows()))
         peer = await self.peer_holdings()
         # 장부는 계좌 통화(KRW)로 유지된다 — 국내와 같은 원화를 나눠 쓰기 때문이다.
         # 이 시장의 계산만 USD 로 옮긴다(1주 값과 단위가 같아야 비중이 성립).
         cash_krw, equity_krw = market_funds(
-            self.ledger, self.market, parts["wdrw_psbl_tot_amt"],
+            None, self.market, parts["wdrw_psbl_tot_amt"],
             held * exrt, peer, self.bucket_share,
         )
         cash = min(cash_krw / exrt, ceiling)  # 브로커가 인정하는 외화 여력을 넘지 않는다
         equity = equity_krw / exrt
         self.last_split = {
             **split_record(
-                "USD", self.ledger, self.market, parts["wdrw_psbl_tot_amt"] / exrt,
+                "USD", None, self.market, parts["wdrw_psbl_tot_amt"] / exrt,
                 held, peer / exrt, cash, equity,
             ),
+            "broker_ceiling": round(ceiling, 2),
+            "exrt": exrt,
+        }
+        return cash, equity
+
+    async def _foreign_state(self, exrt: float) -> tuple[dict, float, float, list[Position]]:
+        """(평가액 구성요소, USD 측 전체[KRW], 그중 현금성[USD], 보유 포지션).
+
+        USD 측 전체는 `총자산 − 총예수금` 으로 읽는다 — 해외 보유 + USD 예수금 + 해외 미결제
+        정산분이다. 해외 매도대금은 원화로 돌아오지 않고 USD 예수금으로 남으므로, 보유만
+        세면 팔 때마다 그 대금이 평가액에서 사라진다. 예수금 필드만 따로 더하는 것도 부족하다:
+        결제 전 하루 이틀은 매도대금이 어느 예수금 필드에도 없고, 반대로 USD 예수금으로
+        산 날은 보유가 먼저 늘고 예수금은 결제 때 줄어 평가액이 잠깐 부풀었다가 꺼진다
+        (부푼 값이 고점으로 남아 그 뒤 계속 낙폭으로 읽힌다). 총자산은 미결제를 매수·매도
+        양쪽 다 상계한 값이라 매매와 결제를 가로질러 연속이다.
+        """
+        parts = await self._equity_parts()
+        positions = self._parse_positions(await self._balance_rows())
+        side = parts["tot_asst_amt"] - parts["tot_dncl_amt"]
+        pend = (side - parts["evlu_amt_smtl_amt"]) / exrt
+        return parts, side, pend, positions
+
+    async def _ledger_funds(self, ceiling: float, exrt: float) -> tuple[float, float]:
+        """장부가 있는 구성의 (쓸 수 있는 현금, 예산) — USD.
+
+        이 시장의 예산 = 원화 장부의 자기 몫 + USD 측 전체. 원화 장부는 매매로 움직이지 않고
+        결제 때 USD 측으로 넘어간 만큼만 줄어든다(장부의 sync_foreign). 계좌 현금의 수준은
+        여기서 맞춰 보지 않는다 — 이 조회로는 국내의 미결제 정산분을 볼 수 없어, 수준을
+        대면 국내가 매도한 날마다 그 대금이 출금으로 읽힌다.
+        """
+        parts, side, pend, positions = await self._foreign_state(exrt)
+        self.last_equity_parts = parts
+        self.ledger.sync_foreign(
+            self.market, pend, {p.symbol: p.quantity for p in positions}, exrt
+        )
+        own = self.ledger.cash_of(self.market)
+        if own is None:
+            return 0.0, 0.0  # 아직 배정 전 — 계좌 현금 전체를 보는 국내 쪽이 지분대로 배정한다
+        cash_krw, equity_krw = foreign_funds(own, side, pend * exrt)
+        self._equity_pre = equity_krw
+        cash = min(cash_krw / exrt, ceiling)  # 브로커가 인정하는 외화 여력을 넘지 않는다
+        equity = equity_krw / exrt
+        held = sum(p.market_value for p in positions)
+        peer = await self.peer_holdings()
+        self.last_split = {
+            **split_record(
+                "USD", None, self.market, parts["tot_dncl_amt"] / exrt,
+                held, peer / exrt, cash, equity,
+                account_total=(self.ledger.total_cash() + side + peer) / exrt,
+            ),
+            "reconcile": {"action": "no_level_check"},
+            # 원화 장부 몫과 USD 현금성 잔액을 갈라 남긴다 — 다른 시장으로 옮길 수 있는 것은
+            # 원화 쪽뿐이라(USD 는 환전해야 돌아온다) 합쳐 두면 그 한계가 보이지 않는다.
+            "ledger_krw": round(own, 2),
+            "own_side_krw": round(side, 2),
+            "pend_usd": round(pend, 2),
             "broker_ceiling": round(ceiling, 2),
             "exrt": exrt,
         }
@@ -403,39 +473,62 @@ class KISOverseasAdapter(MarketAdapter):
         exrt = await self._exchange_rate()
         if not exrt:
             return 0.0
+        if self.ledger is not None:
+            parts, side, pend, positions = await self._foreign_state(exrt)
+            self.last_equity_parts = parts
+            self.ledger.sync_foreign(
+                self.market, pend, {p.symbol: p.quantity for p in positions}, exrt
+            )
+            own = self.ledger.cash_of(self.market)
+            return 0.0 if own is None else foreign_funds(own, side, pend * exrt)[1]
         parts = self.last_equity_parts = await self._equity_parts()
         held = sum(p.market_value for p in self._parse_positions(await self._balance_rows()))
         peer = await self.peer_holdings()
         return market_funds(
-            self.ledger, self.market, parts["wdrw_psbl_tot_amt"],
+            None, self.market, parts["wdrw_psbl_tot_amt"],
             held * exrt, peer, self.bucket_share,
         )[1]
 
     async def holdings_value(self) -> float:
-        """이 시장의 보유 평가액(KRW). 계좌를 공유하는 다른 시장이 총자산을 셀 때 쓴다.
+        """이 시장이 원화 현금 밖에 들고 있는 것(KRW). 계좌를 공유하는 다른 시장이 총자산을
+        셀 때 쓴다.
 
-        응답에 원화 합계 필드가 있지만 쓰지 않는다 — 보유가 0 인 동안은 그것이 원화인지
-        외화인지 값으로 확인할 수 없고, 잘못 고르면 보유를 못 본 채 또 사게 된다.
-        USD 평가액에 고시환율을 적용하는 쪽은 단위가 분명하다.
+        보유 종목만이 아니라 USD 측 전체(보유 + USD 예수금 + 미결제 정산분)다 — 예수금을
+        빼면 상대 시장이 세는 계좌 총자산이 그만큼 작아지고, 이 시장의 계좌 내 비중이
+        실제보다 작게 기록된다. 원화 기준 조회의 합계 필드를 그대로 쓴다(조회 1회).
         """
-        usd = sum(p.market_value for p in self._parse_positions(await self._balance_rows()))
-        return usd * await self._exchange_rate() if usd else 0.0
+        parts = await self._equity_parts()
+        return parts["tot_asst_amt"] - parts["tot_dncl_amt"]
 
     async def peer_holdings(self) -> float:
         """계좌를 공유하는 다른 시장의 보유 평가액(KRW). 미연결이면 0(계좌 단독 사용)."""
         return await self.peer_holdings_fn() if self.peer_holdings_fn else 0.0
 
     async def _settle_ledger(self, orders: list[dict]) -> None:
-        """주문이 나갔으면 이 시장의 현금 장부를 계좌 잔고에 맞춘다.
+        """주문이 나갔으면 체결 직후의 USD 측을 다시 읽어 기준선을 새로 뜬다.
 
-        체결 금액을 더하고 빼지 않는다 — 부분체결·수수료·환전 차이를 전부 흡수하려면
-        계좌를 다시 읽는 쪽이 정확하다. 주문이 0건이면 부르지 않는다(그 사이의 외부
-        입금까지 이 시장이 삼킨다).
+        원화 장부는 건드리지 않는다 — 해외 매매는 USD 측 안에서 보유와 미결제 정산분을
+        맞바꿀 뿐이고, 원화는 결제 때에야 넘어간다(다음 런의 sync_foreign 이 읽는다).
+        기준선을 새로 뜨지 않으면 이 매매가 움직인 미결제분이 다음 런에서 원화 이체로 읽힌다.
+
+        같은 조회로 **매매 전후 평가액이 이어지는지**도 남긴다. 매매는 자산의 형태만 바꾸므로
+        차이는 수수료·호가 수준이어야 하고, 그보다 크면 평가액 산식이 브로커의 어떤 필드
+        움직임을 놓치고 있다는 뜻이다.
         """
         if not self.ledger or not any(not o.get("skipped") for o in orders):
             return
-        parts = self.last_equity_parts_post = await self._equity_parts()
-        self.ledger.settle(self.market, parts["wdrw_psbl_tot_amt"])
+        exrt = await self._exchange_rate()
+        if not exrt:
+            return
+        parts, side, pend, positions = await self._foreign_state(exrt)
+        self.last_equity_parts_post = parts
+        self.ledger.snapshot_foreign(
+            self.market, pend, {p.symbol: p.quantity for p in positions}
+        )
+        own = self.ledger.cash_of(self.market)
+        if own is not None and self._equity_pre is not None:
+            post = foreign_funds(own, side, pend * exrt)[1]
+            self.last_conservation = conservation_record(self._equity_pre, post)
 
     async def _exchange_rate(self) -> float:
         """고시환율(KRW/USD). 매수여력 응답에 실려 오므로 이미 조회했으면 그 값을 쓴다."""

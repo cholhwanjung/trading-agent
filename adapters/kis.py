@@ -30,7 +30,7 @@ from adapters.allocation import (
     project_to_executable,
     weights_from_quantities,
 )
-from adapters.ledger import AccountLedger, market_funds, split_record
+from adapters.ledger import AccountLedger, conservation_record, market_funds, split_record
 from adapters.base import (
     Bar,
     MarketAdapter,
@@ -289,6 +289,12 @@ def summarize_flows(rows: list[dict], short: int = 5, long: int = 20) -> dict:
     return out
 
 
+# 체결 뒤 잔고를 다시 읽는 횟수·간격. 시장가는 즉시 체결되지만 잔고 반영이 한 박자 늦는
+# 날이 있다 — 그때 읽은 값으로 장부를 옮기면 체결분이 빠진다.
+SETTLE_READS = 5
+SETTLE_READ_DELAY = 1.0
+
+
 class KISDomesticAdapter(MarketAdapter):
     market = "KR"
 
@@ -324,6 +330,11 @@ class KISDomesticAdapter(MarketAdapter):
         self.ledger: AccountLedger | None = None
         # 예산 산출 내역 — 로깅 전용. _bucket 이 갱신한다.
         self.last_split: dict | None = None
+        # 주문 직전에 읽은 계좌 현금·평가액 — 체결 뒤 같은 필드를 다시 읽어 차이만 장부에
+        # 반영하고, 매매 전후 평가액이 이어지는지 남긴다. _bucket 이 갱신한다.
+        self._cash_pre: float | None = None
+        self._equity_pre: float | None = None
+        self.last_conservation: dict | None = None
 
     async def close(self) -> None:
         await self.session.close()
@@ -485,6 +496,7 @@ class KISDomesticAdapter(MarketAdapter):
         self.last_split = split_record(
             "KRW", self.ledger, self.market, account_cash, held, peer_held, cash, equity
         )
+        self._cash_pre, self._equity_pre = account_cash, equity
         return cash, equity
 
     async def holdings_value(self) -> float:
@@ -708,7 +720,7 @@ class KISDomesticAdapter(MarketAdapter):
                         "order_id": (placed.get("output") or {}).get("ODNO"),
                     }
                 )
-            await self._settle_ledger(orders)
+            await self._settle_ledger(orders, final_qty)
             return OrderResult(
                 market=self.market,
                 submitted_at=now,
@@ -724,14 +736,38 @@ class KISDomesticAdapter(MarketAdapter):
             return OrderResult(
                 market=self.market, submitted_at=now, accepted=False, error=str(e)[:300]
             )
-    async def _settle_ledger(self, orders: list[dict]) -> None:
-        """주문이 나갔으면 이 시장의 현금 장부를 계좌 잔고에 맞춘다.
+    async def _settle_ledger(self, orders: list[dict], expected_qty: dict[str, float]) -> None:
+        """주문이 나갔으면 그 매매가 움직인 계좌 현금만큼 이 시장의 장부를 옮긴다.
 
         체결 금액을 더하고 빼지 않는다 — 부분체결·수수료·호가 차이를 전부 흡수하려면
-        계좌를 다시 읽는 쪽이 정확하다. 주문이 0건이면 부르지 않는다(그 사이의 외부
-        입금까지 이 시장이 삼킨다).
+        계좌를 다시 읽는 쪽이 정확하다. 다만 읽은 **수준**에 장부를 맞추지 않고 주문
+        직전에 같은 필드로 읽은 값과의 **차이**만 반영한다. 수준에 맞추면 그 순간 계좌에
+        있는 다른 불일치(확정 전인 입금, 상대 시장의 아직 반영 안 된 결제)까지 이 시장이
+        삼킨다.
+
+        차이만 보므로 체결이 잔고에 실린 뒤에 읽어야 한다 — 늦게 실린 체결분은 어느 시장의
+        것도 아닌 불일치로 남는다. 보유 수량이 기대에 닿을 때까지 몇 번 기다려 읽는다.
         """
         if not self.ledger or not any(not o.get("skipped") for o in orders):
             return
-        out2 = ((await self._balance()).get("output2") or [{}])[0]
-        self.ledger.settle(self.market, float(out2.get("prvs_rcdl_excc_amt") or 0))
+        want = {s: q for s, q in expected_qty.items() if q}
+        for attempt in range(SETTLE_READS):
+            data = await self._balance()
+            got = {p.symbol: p.quantity for p in self._parse_positions(data)}
+            if got == want:
+                break
+            if attempt < SETTLE_READS - 1:
+                await asyncio.sleep(SETTLE_READ_DELAY)
+        else:
+            self.ledger.events.append(
+                {"action": "settle_incomplete", "market": self.market, "want": want, "got": got}
+            )
+        out2 = (data.get("output2") or [{}])[0]
+        cash_post = float(out2.get("prvs_rcdl_excc_amt") or 0)
+        if self._cash_pre is None:
+            return
+        self.ledger.settle(self.market, self._cash_pre, cash_post)
+        own = self.ledger.cash_of(self.market)
+        if own is not None and self._equity_pre is not None:
+            held = sum(p.market_value for p in self._parse_positions(data))
+            self.last_conservation = conservation_record(self._equity_pre, max(own, 0.0) + held)

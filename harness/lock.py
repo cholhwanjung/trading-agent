@@ -19,9 +19,13 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO
+
+
+LOCK_RETRY_INTERVAL = 2.0  # 락 재시도 간격(초)
 
 
 def single_instance(lock_path: Path, label: str | None = None) -> IO | None:
@@ -51,7 +55,9 @@ def single_instance(lock_path: Path, label: str | None = None) -> IO | None:
     return fh
 
 
-def market_locks(state_dir: Path, markets: list[str], label: str) -> list[IO] | None:
+def market_locks(
+    state_dir: Path, markets: list[str], label: str, wait_s: float = 0.0
+) -> list[IO] | None:
     """시장(계좌) 단위 락 — 같은 계좌를 건드리는 **서로 다른 잡** 사이의 상호 배제.
 
     잡 이름으로 락을 잡으면 자기 중첩만 막고 교차 중첩은 못 막는다. 실제로 위험한 것은
@@ -61,16 +67,27 @@ def market_locks(state_dir: Path, markets: list[str], label: str) -> list[IO] | 
 
     all-or-nothing: 하나라도 이미 잡혀 있으면 취득분을 전부 반납하고 None 을 돌려준다.
     부분 취득으로 진행하면 요청한 시장 중 일부만 매매하는 절반짜리 런이 된다.
+
+    wait_s 를 주면 그 시간까지 다시 시도한다. 양보의 비용은 잡마다 다르다 — 15분마다 도는
+    잡은 한 번 건너뛰어도 곧 다시 오지만, 하루 한 번 도는 잡이 몇 초짜리 충돌에 물러나면
+    그날의 결정이 통째로 사라진다. 기다릴지는 호출하는 잡이 정한다(기본은 즉시 포기).
     """
-    acquired: list[IO] = []
-    for market in sorted(markets):
-        fh = single_instance(state_dir / f"account_{market}.lock", label=f"{label} {market}")
-        if fh is None:
-            for held in acquired:
-                held.close()
+    deadline = time.monotonic() + wait_s
+    while True:
+        acquired: list[IO] = []
+        for market in sorted(markets):
+            fh = single_instance(state_dir / f"account_{market}.lock", label=f"{label} {market}")
+            if fh is None:
+                for held in acquired:
+                    held.close()
+                acquired = None
+                break
+            acquired.append(fh)
+        if acquired is not None:
+            return acquired
+        if time.monotonic() >= deadline:
             return None
-        acquired.append(fh)
-    return acquired
+        time.sleep(LOCK_RETRY_INTERVAL)
 
 
 def read_run_marker(lock_path: Path) -> dict | None:
