@@ -42,6 +42,7 @@ from harness import (  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 from scripts.run_paper_step import (  # noqa: E402
     STATE_DIR,
+    TRADABLE,
     build_adapters,
     build_market_policy,
     close_unselected,
@@ -110,7 +111,10 @@ async def main() -> int:
     router = LLMRouter(env, usage_sink=make_usage_sink(ROOT))
     try:
         now = datetime.now(timezone.utc)
-        current = await adapter.get_current_prices(symbols)
+        # 급변은 **매매할 수 있는 종목**으로만 판정한다. 관측 전용 종목까지 보면 계좌가
+        # 들 수 없는 종목 하나의 변동성이 재결정과 주문을 끌고 다닌다 — 움직인 건 그 종목인데
+        # 사고파는 건 지수 ETF 다. 관측 전용 종목은 결정의 근거로만 남는다(t-1 관측).
+        current = await adapter.get_current_prices(TRADABLE[market])
         state = _load_watch_state(watch_path)
         trigger, new_state = evaluate(state, current, now, config)
 
