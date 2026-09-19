@@ -6,9 +6,11 @@
 
 **학습 제외**: 트리거 결정은 메모리 파이프라인(record/promote/probation/outcome/
 reflection)을 호출하지 않는다 — 당일 정보 기반 결정을 admission 에 넣으면 leakage 오염.
-승격 교훈이 0인 v1 은 memory_fn 도 생략(방어 반응 우선).
+교훈 주입도 하지 않는다(일간 결정에서 배운 것을 당일 급변이라는 다른 조건에 적용할
+근거가 없다).
 
-유니버스·리스크 한도·어댑터 구성은 run_paper_step 에서 import — 단일 출처 유지.
+유니버스·어댑터·정책 조립·집행 게이트는 일간 스텝의 것을 그대로 쓴다 — 주문으로 가는
+길이 둘이면 한쪽에만 게이트가 붙는다.
 
 사용법:
     uv run python scripts/run_watcher.py                 # CRYPTO 1회 점검(+발동 시 주문)
@@ -29,19 +31,22 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from adapters import configure_observation  # noqa: E402
-from harness import JsonlLogger, load_env, make_usage_sink, market_locks  # noqa: E402
+from harness import (  # noqa: E402
+    JsonlLogger,
+    decide_and_submit,
+    load_env,
+    make_usage_sink,
+    market_locks,
+    notify,
+)
 from llm import LLMRouter  # noqa: E402
-from risk import RiskEngine, RiskGuardedPolicy, account_fingerprint  # noqa: E402
 from scripts.run_paper_step import (  # noqa: E402
-    LIMITS,
     STATE_DIR,
-    TRADABLE,
     build_adapters,
+    build_market_policy,
     close_unselected,
-    load_prev_weights,
     log_ledger_activity,
 )
-from trader import LLMTrader  # noqa: E402
 from watcher import config_for, evaluate, in_session, max_drift  # noqa: E402
 
 
@@ -128,32 +133,12 @@ async def main() -> int:
             print("dry_run=1 detail=주문·상태저장 생략")
             return 0
 
-        # 결정 경로 재사용 — 당일 급변을 trigger 채널로 주입, Risk Engine 동일 게이팅.
-        # memory_fn 생략(v1): 승격 교훈 0 + 방어 반응 우선. signals_fn 은 일간과 동일.
-        signals_fn = None
-        if market == "CRYPTO":
-            from alpha_lab.signals import compute_alpha_signals
-
-            async def signals_fn(obs, _syms=symbols):
-                return await compute_alpha_signals(
-                    STATE_DIR / "alpha_library_CRYPTO.json", _syms, obs.asof_day
-                )
-
-        risk_path = STATE_DIR / f"risk_{market}.json"
-        trader = LLMTrader(
-            router, market, symbols, adapter.get_ohlcv_history,
-            tradable=TRADABLE[market],  # 일간 스텝과 같은 계좌·같은 정의역
-            signals_fn=signals_fn,
-            prev_weights_fn=lambda p=risk_path: load_prev_weights(p),
-        )
-        guard = RiskGuardedPolicy(
-            trader, RiskEngine(LIMITS[market]), risk_path, equity_fn=adapter.get_equity,
-            account_key=account_fingerprint(adapter),
-        )
+        # 일간 스텝과 같은 정책 조립·같은 집행 게이트 — 당일 급변만 trigger 채널로 더한다.
+        guard = build_market_policy(market, adapter, symbols, router, None, env, "auto")
         obs = await adapter.observe_and_audit(symbols)  # 상한 t-1 누출 감사 (행동 컨텍스트)
-        positions = await adapter.get_positions()
-        weights = await guard.decide(obs, positions, trigger=trigger)
-        result = await adapter.submit_allocation(weights)
+        weights, _, result, venue_error = await decide_and_submit(
+            adapter, guard, obs, trigger=trigger
+        )
 
         meta = guard.last_decision or {}
         logger.log(
@@ -161,18 +146,29 @@ async def main() -> int:
             "realtime_action",
             {
                 "weights": weights,
+                "execution_mode": "degraded" if venue_error else "live",
                 "accepted": result.accepted,
                 "n_orders": len(result.orders),
                 "orders": result.orders,
                 "risk_violations": meta.get("risk_violations", []),
+                "circuit_open": meta.get("circuit_open"),
+                "mdd": meta.get("mdd"),
                 "rationale": meta.get("rationale", ""),
                 "error": result.error,
             },
         )
+        status = "ok" if result.accepted else ("degraded" if venue_error else "rejected")
         print(
-            f"market={market} status={'ok' if result.accepted else 'rejected'}"
-            f" n_orders={len(result.orders)} weights={weights}"
+            f"market={market} status={status} n_orders={len(result.orders)}"
+            f" mdd={meta.get('mdd')} weights={weights}"
+            + (f" error={result.error}" if result.error else "")
         )
+        # 실자금 계좌만 통지 — 일간 스텝과 같은 기준(주문 거부·집행 스킵·낙폭 서킷).
+        if getattr(adapter, "mode", None) == "real":
+            if not result.accepted:
+                await notify(env, f"{market} 워처 주문 실패", result.error or "accepted=False")
+            elif meta.get("circuit_open"):
+                await notify(env, f"{market} 실계좌 MDD 서킷", f"mdd={meta.get('mdd')} (워처)")
         log_ledger_activity(logger, market, adapter)
         _save_watch_state(watch_path, new_state)
         return 0 if result.accepted else 1

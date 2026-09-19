@@ -11,7 +11,13 @@ import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from adapters.base import MarketAdapter, Observation, OrderResult, bar_observation_window
+from adapters.base import (
+    MarketAdapter,
+    Observation,
+    OrderResult,
+    Position,
+    bar_observation_window,
+)
 from harness.jsonlog import JsonlLogger
 from harness.policy import Policy
 
@@ -89,6 +95,48 @@ def write_observation_snapshot(snapshot_dir: Path, obs: Observation) -> Path:
     return path
 
 
+async def decide_and_submit(
+    adapter: MarketAdapter,
+    policy: Policy,
+    obs: Observation,
+    trigger: dict | None = None,
+) -> tuple[dict[str, float], list[Position], OrderResult, str | None]:
+    """결정 → 계약 검증 → 집행 게이트 → 주문. 주문으로 가는 길은 이 함수 하나다.
+
+    일간 스텝과 실시간 트리거가 같은 문을 지나야 한다 — 경로마다 따로 짜면 한쪽에만
+    게이트가 붙는다. 계좌 조회(보유·평가액)에 실패하면 결정은 남기되 **주문은 내지
+    않는다**: 평가액을 못 읽은 결정은 낙폭이 0 으로 계산된 채라, 그대로 집행하면 낙폭
+    서킷이 걸러야 할 주문이 검증 없이 나간다. 반환의 마지막 값이 그 사유다(None = 정상).
+    """
+
+    venue_error: str | None = None
+    try:
+        positions = await adapter.get_positions()
+    except Exception as e:
+        positions, venue_error = [], f"{type(e).__name__}: {str(e)[:200]}"
+
+    # trigger 는 실시간 소집에서만 넘긴다 — 기준선 정책은 이 인자를 받지 않는다
+    weights = await (
+        policy.decide(obs, positions, trigger=trigger) if trigger else policy.decide(obs, positions)
+    )
+    validate_weights(weights)
+
+    # 평가액 조달 실패(정책 내부의 리스크 게이트 입력)도 같은 사유로 취급
+    meta = getattr(policy, "last_decision", None) or {}
+    venue_error = venue_error or meta.get("equity_error")
+
+    if venue_error:
+        result = OrderResult(
+            market=adapter.market,
+            submitted_at=datetime.now(timezone.utc),
+            accepted=False,
+            error=f"execution_skipped venue_unavailable — {venue_error}",
+        )
+    else:
+        result = await adapter.submit_allocation(weights)
+    return weights, positions, result, venue_error
+
+
 async def run_daily_step(
     adapter: MarketAdapter,
     policy: Policy,
@@ -114,28 +162,7 @@ async def run_daily_step(
     if snapshot_dir is not None:
         write_observation_snapshot(snapshot_dir, obs)
 
-    venue_error: str | None = None
-    try:
-        positions = await adapter.get_positions()
-    except Exception as e:
-        positions, venue_error = [], f"{type(e).__name__}: {str(e)[:200]}"
-
-    weights = await policy.decide(obs, positions)
-    validate_weights(weights)
-
-    # 평가액 조달 실패(정책 내부의 리스크 게이트 입력)도 같은 degraded 사유로 취급
-    meta = getattr(policy, "last_decision", None) or {}
-    venue_error = venue_error or meta.get("equity_error")
-
-    if venue_error:
-        result = OrderResult(
-            market=adapter.market,
-            submitted_at=datetime.now(timezone.utc),
-            accepted=False,
-            error=f"execution_skipped venue_unavailable — {venue_error}",
-        )
-    else:
-        result = await adapter.submit_allocation(weights)
+    weights, positions, result, venue_error = await decide_and_submit(adapter, policy, obs)
 
     logger.log(
         adapter.market,

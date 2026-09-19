@@ -581,17 +581,23 @@ def build_market_policy(
     adapter,
     symbols: list[str],
     router: LLMRouter,
-    memory: MemoryStore,
+    memory: MemoryStore | None,
     env: dict[str, str],
     debate: str,
 ) -> RiskGuardedPolicy:
-    """시장 1곳의 실계좌 정책 조립 — LLMTrader(교훈·신호 주입) + Risk 가드."""
+    """시장 1곳의 실계좌 정책 조립 — LLMTrader(교훈·신호 주입) + Risk 가드.
+
+    일간 스텝과 실시간 트리거가 이 조립을 함께 쓴다 — 따로 조립하면 한쪽에서만 입력이
+    빠진다. memory=None 은 학습 저장소를 쓰지 않는 호출자(트리거)용: 교훈 주입과 실패
+    패턴 veto 가 함께 빠진다. 둘 다 일간 결정에서 배운 것이라, 당일 급변이라는 다른
+    조건의 결정에 그대로 적용할 근거가 없다.
+    """
     risk_path = STATE_DIR / f"risk_{market}.json"
     trader = LLMTrader(
         router, market, symbols, adapter.get_ohlcv_history,
         # 관측은 유니버스 전체, 배분은 낼 수 있는 주문만 — 개별 종목은 판단 근거로 남는다
         tradable=TRADABLE[market],
-        memory_fn=make_memory_fn(memory, router, market),
+        memory_fn=make_memory_fn(memory, router, market) if memory is not None else None,
         signals_fn=make_signals_fn(env, market, symbols),
         # debate 트리거 입력: 직전 배분(대형 변경 감지) + 사용자 강제 소집
         prev_weights_fn=lambda: load_prev_weights(risk_path),
@@ -604,7 +610,7 @@ def build_market_policy(
         RiskEngine(LIMITS[market]),
         risk_path,
         equity_fn=adapter.get_equity,
-        forbidden_patterns_fn=make_forbidden_fn(memory, market),
+        forbidden_patterns_fn=make_forbidden_fn(memory, market) if memory is not None else None,
         account_key=account_fingerprint(adapter),  # 어댑터 전환 시 stale MDD 상태 리셋
     )
 
