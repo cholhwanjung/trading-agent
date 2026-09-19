@@ -158,6 +158,10 @@ async def main() -> int:
                 "circuit_open": meta.get("circuit_open"),
                 "mdd": meta.get("mdd"),
                 "rationale": meta.get("rationale", ""),
+                # 일간 기록과 같은 두 지문 — 없으면 이 발동이 어느 정책 텍스트·어느 한도에서
+                # 결정됐는지 이 기록만으로는 답할 수 없다(한도는 운용 중에 바뀔 수 있다).
+                "prompt_rev": meta.get("prompt_rev"),
+                "config_rev": meta.get("config_rev"),
                 "error": result.error,
             },
         )
