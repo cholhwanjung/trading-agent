@@ -9,12 +9,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from harness.jsonlog import JsonlLogger
 from interaction.context import allowed_ids, build_context
 from interaction.proposal import TARGET, Proposal, diff_applies, proposal_path, render
 from llm import extract_json
@@ -37,6 +40,11 @@ JSON 만 출력:
 context:
 """
 
+#: 챗 턴 로그 네임스페이스 — 시장 횡단 호출이라 사용량 로그처럼 한 곳에 모은다
+CHAT_NS = "CHAT"
+#: 챗 프롬프트 판본 — 턴 기록에 새겨 프롬프트 개정 전/후를 로그에서 가른다
+PROMPT_REV = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12]
+
 
 PROPOSE_PROMPT = """\
 너는 실행 중인 트레이딩 에이전트 본인이다. 아래 토론에서 도출된 변경을 `{target}` 에
@@ -50,6 +58,9 @@ PROPOSE_PROMPT = """\
 - 토론이 플레이북 변경으로 이어지지 않으면 빈 문자열을 출력한다. 억지로 만들지 않는다.
 - 리스크 한도·유니버스·집행 설정은 이 파일에 없다 — 그런 결론이 나왔다면 diff 로 옮기지
   말고 빈 문자열을 낸다.
+- 관측된 성과 수치(수익률·B&H 대비 차이·현금 드래그 같은 실측값)는 원칙 본문에 쓰지 않는다.
+  본문은 매 결정에 그대로 실린다 — 원칙은 규칙만 말하고, 개정의 계기가 된 수치가 필요하면
+  파일 머리의 변경 로그(HTML 주석) 안에만 적는다.
 
 원문 (그대로 옮길 것):
 """
@@ -104,10 +115,44 @@ def enforce_grounding(answer: ChatAnswer, allowed: set[str]) -> None:
 
 
 class ChatEngine:
-    def __init__(self, router, root: Path | str) -> None:
+    def __init__(self, router, root: Path | str, log_turns: bool = True) -> None:
         self.router = router
         self.root = Path(root)
         self.sessions: dict[str, DiscussionSession] = {}
+        # 평가 실행기는 끈다 — 동결한 스냅샷에 기록이 쌓이면 안 된다
+        self.log_turns = log_turns
+
+    def _log_turn(self, session: DiscussionSession, question: str, resp, start: float,
+                  answer: ChatAnswer | None = None, error: GroundingError | None = None) -> None:
+        """챗 1턴을 남긴다 — 거부된 답도. 게이트웨이가 거부한 답은 사용자에게 보이지 않아,
+        기록이 없으면 무엇이 틀렸는지 사후에 볼 길이 없다."""
+        if not self.log_turns:
+            return
+        if answer is None:
+            data = extract_json(resp.text)
+            data = data if isinstance(data, dict) else {}
+            text = str(data.get("answer", resp.text))
+            cited = [str(x) for x in data.get("cited_ids") or []]
+        else:
+            text, cited = answer.answer, answer.cited_ids
+        JsonlLogger(self.root / "data" / "logs").log(
+            CHAT_NS,
+            "chat_turn",
+            {
+                "session_id": session.session_id,
+                "for_market": session.market or "",
+                "turn": sum(m["role"] == "user" for m in session.messages),
+                "question": question,
+                "answer": text,
+                "cited_ids": cited,
+                "grounding": "ok" if error is None else f"error: {error}",
+                "latency_s": round(time.monotonic() - start, 2),
+                "model": f"{resp.provider}:{resp.model}",
+                "prompt_rev": PROMPT_REV,
+                "in": resp.input_tokens,
+                "out": resp.output_tokens,
+            },
+        )
 
     async def ask(
         self, question: str, session_id: str | None = None, market: str | None = None
@@ -124,6 +169,7 @@ class ChatEngine:
             self.sessions[session.session_id] = session
 
         session.messages.append({"role": "user", "content": question})
+        start = time.monotonic()
         resp = await self.router.complete(
             "smart",
             purpose="chat",
@@ -133,12 +179,17 @@ class ChatEngine:
             max_tokens=4096,
             json_mode=True,
         )
-        answer = _parse(resp.text)
-        enforce_grounding(answer, allowed)
+        try:
+            answer = _parse(resp.text)
+            enforce_grounding(answer, allowed)
+        except GroundingError as e:
+            self._log_turn(session, question, resp, start, error=e)
+            raise
         session.messages.append({"role": "assistant", "content": resp.text})
         for cid in answer.cited_ids:
             if cid not in session.cited_ids:
                 session.cited_ids.append(cid)
+        self._log_turn(session, question, resp, start, answer=answer)
         return answer, session.session_id
 
     async def propose(self, session_id: str) -> Proposal:

@@ -4,7 +4,10 @@
     uv run python scripts/run_chat_eval.py items  [--snapshot latest]
     uv run python scripts/run_chat_eval.py run    [--snapshot latest] [--categories A,B,D,G,I,J]
                                                   [--repeats 3] [--limit N] [--concurrency 4]
+                                                  [--model provider:model]
     uv run python scripts/run_chat_eval.py report [--run latest]
+    uv run python scripts/run_chat_eval.py rescore [--run latest]
+    uv run python scripts/run_chat_eval.py compare --base RUN [--new latest] [--categories J]
 
 평가는 라이브 root 가 아니라 동결한 스냅샷에서만 돈다. 토론 마감·제안 초안은 root 아래에
 파일을 쓰므로 라이브에서 돌리면 메모리와 제안 디렉터리가 오염된다. 사용량 싱크도 달지
@@ -43,6 +46,7 @@ from eval.chat_quality import (  # noqa: E402
     MARKETS,
     Item,
     Response,
+    compare,
     context_hash,
     generate,
     item_set_hash,
@@ -63,12 +67,19 @@ from interaction.proposal import TARGET  # noqa: E402
 from llm import LLMRouter, extract_json  # noqa: E402
 from memory import MemoryStore  # noqa: E402
 
+from eval import chat_quality as scorer_module  # noqa: E402
+
 EVAL_DIR = ROOT / "data" / "eval" / "chat"
 ARMS = ("llm", "llm_base", "bh", "random")
 
 
 def _rev(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:12]
+
+
+def scorer_rev() -> str:
+    """채점 규칙의 판본 — 결과는 답만이 아니라 채점기에도 달려 있다."""
+    return _rev(Path(scorer_module.__file__).read_text(encoding="utf-8"))
 
 
 # ── 스냅샷 ────────────────────────────────────────────────────────────────
@@ -273,7 +284,7 @@ async def run_item(
         variant = make_variant(snapshot, work / f"{item.id}-{repeat}", item.inject)
         root = variant
         contents = {it["id"]: it["content"] for it in build_context(variant)["items"]}
-    engine = ChatEngine(rec, root)
+    engine = ChatEngine(rec, root, log_turns=False)  # 스냅샷에 기록을 남기지 않는다
     resp = Response()
     try:
         if item.category == "J":
@@ -418,6 +429,7 @@ def execute(
         "repeats_behavioral": repeats,
         "concurrency": concurrency,
         "models": {tier: ":".join(router.spec(tier)) for tier in ("smart", "fast")},
+        "scorer_rev": scorer_rev(),
         "chat_prompt_rev": _rev(SYSTEM_PROMPT),
         "propose_prompt_rev": _rev(PROPOSE_PROMPT),
         "live_delta": {k: after[k] - before[k] for k in before},
@@ -456,6 +468,82 @@ def _items(
     return items
 
 
+def _regrade(run_dir: Path, snapshots: Path) -> tuple[dict, list[dict]]:
+    """저장된 답을 지금의 채점기로 다시 채점한 행들 — LLM 을 다시 부르지 않는다.
+
+    입력 조작 문항은 주입 사본이 지워져 원본 스냅샷 context 로 채점하는데, 그 범주의 검사는
+    context 를 읽지 않는다."""
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    snapshot = snapshots / manifest["snapshot_id"]
+    lines = (run_dir / "items.jsonl").read_text(encoding="utf-8").splitlines()
+    items = {i.id: i for i in (Item(**json.loads(line)) for line in lines if line.strip())}
+    contents = {it["id"]: it["content"] for it in build_context(snapshot)["items"]}
+    ids = market_ids(snapshot)
+    playbook_path = snapshot / TARGET
+    playbook = playbook_path.read_text(encoding="utf-8") if playbook_path.exists() else ""
+    rows = []
+    for line in (run_dir / "results.jsonl").read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        resp = Response(row["answer"], row["cited_ids"], row["error"], row["diff"])
+        row.update(
+            score(items[row["item_id"]], resp, contents=contents, market_ids=ids, playbook=playbook)
+        )
+        rows.append(row)
+    return manifest, rows
+
+
+def rescore(run_dir: Path, snapshots: Path) -> dict:
+    """저장된 답을 지금의 채점기로 다시 채점해 요약을 남긴다 — 채점 규칙을 고친 효과를
+    **같은 답** 위에서 본다."""
+    manifest, rows = _regrade(run_dir, snapshots)
+    summary = summarize(rows)
+    rev = scorer_rev()
+    out = {"scorer_rev": rev, "original_scorer_rev": manifest.get("scorer_rev"), "summary": summary}
+    (run_dir / f"rescore-{rev}.json").write_text(
+        json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+    return summary
+
+
+#: 두 실행이 무엇이 달랐는지 — 비교 결과를 읽기 전에 먼저 봐야 하는 칸
+_SETUP_KEYS = ("snapshot_id", "models", "chat_prompt_rev", "propose_prompt_rev", "item_set_hash")
+
+
+def compare_runs(
+    base_dir: Path, new_dir: Path, snapshots: Path, categories: list[str] | None = None
+) -> dict:
+    """두 실행을 **지금의 채점기로 둘 다 다시 채점한 뒤** 문항 단위로 맞댄다.
+
+    각자 저장된 점수를 그대로 비교하면 그 사이 채점기가 바뀐 몫이 모델·프롬프트 차이로
+    읽힌다. 스냅샷이 다르면 같은 문항 id 라도 정답이 달라 짝이 성립하지 않는다."""
+    base_manifest, base_rows = _regrade(base_dir, snapshots)
+    new_manifest, new_rows = _regrade(new_dir, snapshots)
+    if base_manifest["snapshot_id"] != new_manifest["snapshot_id"]:
+        raise SystemExit("스냅샷이 다르다 — 같은 문항 id 라도 정답이 달라 비교할 수 없다")
+    if categories:
+        base_rows = [r for r in base_rows if r["category"] in categories]
+        new_rows = [r for r in new_rows if r["category"] in categories]
+    result = compare(base_rows, new_rows)
+    result["setup"] = {
+        k: {"base": base_manifest.get(k), "new": new_manifest.get(k)}
+        for k in _SETUP_KEYS
+        if base_manifest.get(k) != new_manifest.get(k)
+    }
+    result["tokens"] = {
+        "base": {
+            "in": sum(r.get("tokens_in") or 0 for r in base_rows),
+            "out": sum(r.get("tokens_out") or 0 for r in base_rows),
+            "calls": len(base_rows),
+        },
+        "new": {
+            "in": sum(r.get("tokens_in") or 0 for r in new_rows),
+            "out": sum(r.get("tokens_out") or 0 for r in new_rows),
+            "calls": len(new_rows),
+        },
+    }
+    return result
+
+
 def _print_summary(manifest: dict, summary: dict) -> None:
     print(
         f"chat_eval run_id={manifest['run_id']} snapshot={manifest['snapshot_id']} "
@@ -488,8 +576,17 @@ def main() -> int:
         p.add_argument("--limit", type=int, default=None, help="범주별 문항 수 상한 (시험 실행용)")
     p_run.add_argument("--repeats", type=int, default=3, help="행동 범주 반복 횟수")
     p_run.add_argument("--concurrency", type=int, default=4)
+    p_run.add_argument(
+        "--model", default=None, help="챗 모델 교체 (provider:model) — 기본은 .env 의 LLM_SMART"
+    )
+    p_compare = sub.add_parser("compare", help="두 실행을 문항 단위로 비교 (지금의 채점기로)")
+    p_compare.add_argument("--base", required=True)
+    p_compare.add_argument("--new", default="latest")
+    p_compare.add_argument("--categories", default=None, help="비교할 범주만 (예: J)")
     p_report = sub.add_parser("report", help="지난 실행 요약")
     p_report.add_argument("--run", default="latest")
+    p_rescore = sub.add_parser("rescore", help="저장된 답을 지금의 채점기로 다시 채점")
+    p_rescore.add_argument("--run", default="latest")
     args = parser.parse_args()
 
     if args.cmd == "snapshot":
@@ -499,6 +596,39 @@ def main() -> int:
             f"chat_eval_snapshot id={meta['snapshot_id']} items={meta['n_items']} "
             f"kinds={json.dumps(meta['kinds'])} playbook_rev={meta['playbook_rev']} path={dest}"
         )
+        return 0
+    if args.cmd == "rescore":
+        run_dir = _resolve(EVAL_DIR / "runs", args.run)
+        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        summary = rescore(run_dir, EVAL_DIR / "snapshots")
+        print(
+            f"chat_eval_rescore scorer_rev={scorer_rev()} "
+            f"original_scorer_rev={manifest.get('scorer_rev')}"
+        )
+        _print_summary(manifest, summary)
+        return 0
+    if args.cmd == "compare":
+        runs = EVAL_DIR / "runs"
+        cats = [c.strip() for c in args.categories.split(",")] if args.categories else None
+        result = compare_runs(
+            _resolve(runs, args.base), _resolve(runs, args.new), EVAL_DIR / "snapshots", cats
+        )
+        print(
+            f"chat_eval_compare shared_items={result['shared_items']} "
+            f"setup_diff={json.dumps(result['setup'], ensure_ascii=False)}"
+        )
+        print(f"tokens={json.dumps(result['tokens'])}")
+        for cat, c in result["categories"].items():
+            print(
+                f"category={cat} items={c['items']} base={c['base_pass']} new={c['new_pass']} "
+                f"gates_base={c['gates_base']} gates_new={c['gates_new']}"
+            )
+        for kind in ("improved", "regressed"):
+            for r in result[kind]:
+                print(
+                    f"{kind} item={r['item_id']} base={r['base']} new={r['new']} "
+                    f"gates_base={r['gates_base']} gates_new={r['gates_new']}"
+                )
         return 0
     if args.cmd == "report":
         run_dir = _resolve(EVAL_DIR / "runs", args.run)
@@ -522,7 +652,8 @@ def main() -> int:
         return 0
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{uuid.uuid4().hex[:4]}"
-    router = LLMRouter(load_env(ROOT / ".env"))  # 사용량 싱크 없음 — 라이브 집계에 섞지 않는다
+    # 사용량 싱크 없음 — 라이브 집계에 섞지 않는다. 챗은 smart tier 만 쓰므로 --model 이 곧 챗 모델
+    router = LLMRouter(load_env(ROOT / ".env"), smart=args.model)
     manifest = execute(
         items,
         snapshot=snapshot,

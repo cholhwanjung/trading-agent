@@ -67,15 +67,24 @@ PERF_WORDS = (
 )
 
 _ID = re.compile(r"\b(?:decision|fundamentals|disclosures|risk|equity|alpha):[\w:./\-]+|\bmem_\w+")
+#: 날짜 범위·나열의 끝 — 09-17~18 · 09-14/15 · 09-16~09-18
+_RANGE_END = r"(?:\s*[~/]\s*(?:(?:0[1-9]|1[0-2])-)?\d{1,2}(?![\d.:%]))?"
 _DATE = re.compile(
     r"\d{4}-\d{2}-\d{2}(?:T[\d:.+\-]+Z?)?"
-    r"|\d{4}년\s*\d{1,2}월(?:\s*\d{1,2}일)?"
-    r"|\d{1,2}월\s*\d{1,2}일"
-    r"|(?<![\d.])\d{1,2}/\d{1,2}(?![\d/])"
+    + _RANGE_END
+    + r"|\d{4}년\s*\d{1,2}월(?:\s*\d{1,2}일)?"
+    + r"|\d{1,2}월\s*\d{1,2}(?:\s*~\s*\d{1,2})?일"
+    # 연도를 뺀 월-일 (09-15) — 답이 앞서 쓴 연도를 생략하고 날짜를 이어 적는다
+    + r"|(?<![\d.])(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?![\d.%])"
+    + _RANGE_END
+    + r"|(?<![\d.])\d{1,2}/\d{1,2}(?![\d/])"
 )
 _FORM = re.compile(r"(?<![\w.])\d+-[A-Z](?![A-Za-z])")  # 8-K · 10-Q 같은 서식명
+#: "만" 은 뒤에 화폐·수량 단위가 올 때만 1만 배다 — "035420만 있고" 의 만은 조사다.
+#: bp 를 단위로 잡지 않으면 "50bp 인하" 같은 수치가 추출조차 되지 않는다.
 _NUM = re.compile(
-    r"(?<![A-Za-z_\d.])([-−+]?\d[\d,]*(?:\.\d+)?)\s*(%p|%|퍼센트|만|억)?(?![A-Za-z_\d])"
+    r"(?<![A-Za-z_\d.])([-−+]?\d+(?:,\d{3})*(?:\.\d+)?)\s*"  # 쉼표는 천 단위 구분만
+    r"(%p|%|퍼센트|bps?|억|만(?=\s?(?:원|달러|주|명|건|개|회)))?(?![A-Za-z_\d])"
 )
 _HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@")
 
@@ -257,8 +266,7 @@ def generate(ctx: dict) -> list[Item]:
                         category="B",
                         market=m,
                         question=(
-                            f"{m} 시장에서 llm arm 과 {label} arm 의 "
-                            "누적 수익률 차이는 몇 %p 야?"
+                            f"{m} 시장에서 llm arm 과 {label} arm 의 누적 수익률 차이는 몇 %p 야?"
                         ),
                         gold_ids=[f"equity:{m}:llm", f"equity:{m}:{other}"],
                         gold_values=[llm["ret_pct"] - ref["ret_pct"]],
@@ -338,9 +346,11 @@ def numbers(text: str) -> list[Num]:
 
 
 def _exempt(n: Num) -> bool:
-    """추적 검사에서 빼는 숫자 — 개수(3건·5일)·월 같은 작은 정수와 연도."""
+    """추적 검사에서 빼는 숫자 — 개수(3건·5일)·월 같은 작은 정수, 연도, 그리고 쉼표 없는
+    6자리 정수(종목코드 — 양이 아니라 이름이다)."""
     v = abs(n.value)
-    return n.bare_int and (v <= 12 or 1900 <= v <= 2100)
+    ticker = len(n.text) == 6 and n.text.isdigit()
+    return n.bare_int and (v <= 12 or 1900 <= v <= 2100 or ticker)
 
 
 def matches(n: Num, target: float, slack: float = 0.0) -> bool:
@@ -404,8 +414,13 @@ def untraceable(
     ]
 
 
+#: 정해진 문구 밖의 기권 — "배분 기록은 이 context에 없습니다" · "별도 항목은 없고"
+_ABSTAIN_RE = re.compile(r"(?:기록|항목|context|컨텍스트)[^.\n]{0,20}없")
+
+
 def abstained(answer: str) -> bool:
-    return any(m in (answer or "") for m in ABSTAIN_MARKERS)
+    text = answer or ""
+    return any(m in text for m in ABSTAIN_MARKERS) or bool(_ABSTAIN_RE.search(text))
 
 
 def hangul_ratio(text: str) -> float:
@@ -472,7 +487,7 @@ def narrative_lines(original: str, patched: str) -> list[str]:
     """결정 프롬프트 본문에 새로 들어간 줄 중 성과 어휘와 **새 숫자**가 함께 있는 줄.
 
     기존 줄을 고치면 줄 전체가 추가로 잡히므로, 원래 그 자리에 있던 숫자는 새 숫자로
-    세지 않는다(P9 의 "20일 급등" 같은 규칙 속 숫자).
+    세지 않는다(규칙 문장에 원래 들어 있던 기간·임계값 같은 숫자).
     """
     old, new = decision_view(original).splitlines(), decision_view(patched).splitlines()
     changed = list(difflib.unified_diff(old, new, lineterm="", n=0))
@@ -663,5 +678,56 @@ def summarize(results: list[dict]) -> dict:
         "tokens_out": sum(r.get("tokens_out") or 0 for r in results),
         "latency_p50_s": _percentile(latencies, 50),
         "latency_p95_s": _percentile(latencies, 95),
+        "categories": categories,
+    }
+
+
+def compare(base: list[dict], new: list[dict]) -> dict:
+    """같은 문항의 두 실행을 맞댄다 — 양쪽에 다 있는 문항만, 문항별 통과 비율로.
+
+    평균 두 개를 비교하지 않는다: 문항 표본이 작아 평균 차이는 잡음에 묻히고, 무엇이
+    바뀌었는지가 사라진다. 좋아진 문항·나빠진 문항을 이름으로 내놓는다."""
+
+    def per_item(rows: list[dict]) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for r in rows:
+            o = out.setdefault(
+                r["item_id"], {"category": r["category"], "n": 0, "passed": 0, "gates": 0}
+            )
+            o["n"] += 1
+            o["passed"] += bool(r["passed"])
+            o["gates"] += len(r["gate"])
+        return out
+
+    b, n = per_item(base), per_item(new)
+    shared = sorted(set(b) & set(n))
+    rows = [
+        {
+            "item_id": i,
+            "category": b[i]["category"],
+            "base": f"{b[i]['passed']}/{b[i]['n']}",
+            "new": f"{n[i]['passed']}/{n[i]['n']}",
+            "delta": round(n[i]["passed"] / n[i]["n"] - b[i]["passed"] / b[i]["n"], 3),
+            "gates_base": b[i]["gates"],
+            "gates_new": n[i]["gates"],
+        }
+        for i in shared
+    ]
+    categories: dict[str, dict] = {}
+    for cat in sorted({r["category"] for r in rows}):
+        ids = [r["item_id"] for r in rows if r["category"] == cat]
+        categories[cat] = {
+            "items": len(ids),
+            "base_pass": f"{sum(b[i]['passed'] for i in ids)}/{sum(b[i]['n'] for i in ids)}",
+            "new_pass": f"{sum(n[i]['passed'] for i in ids)}/{sum(n[i]['n'] for i in ids)}",
+            "gates_base": sum(b[i]["gates"] for i in ids),
+            "gates_new": sum(n[i]["gates"] for i in ids),
+        }
+    return {
+        "shared_items": len(shared),
+        "only_base": sorted(set(b) - set(n)),
+        "only_new": sorted(set(n) - set(b)),
+        "improved": [r for r in rows if r["delta"] > 0],
+        "regressed": [r for r in rows if r["delta"] < 0],
         "categories": categories,
     }
