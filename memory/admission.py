@@ -9,6 +9,18 @@
 무행동 수익이므로 0 은 "행동이 결과를 바꾸지 못했다"는 뜻이지 실패가 아니다. 휴장일
 결정(가격 불변)과 배분 무변동 결정이 여기 해당하는데, 이를 음(-)으로 세면 Forbidden
 쪽으로만 편향된다 — 동점 4건에 실제 음수 1건이면 p=0.031 로 하드 veto 가 서는 식이다.
+
+hold 패턴은 승격하지 않는다 — hold 는 현금 비중을 그대로 둔 결정이라, 행동 − 무행동
+차이에 남는 것은 체결 반올림·가격 드리프트·현금 축 밖의 종목 교체뿐이다. 상승장에서는
+보유 종목 비중이 저절로 늘어난 몫이 매번 양(+)으로 찍혀 부호검정을 통과하지만 크기는
+몇 bp 에 그친다. 교훈으로 서도 쓸 데가 없다 — 성공이면 어떤 교체였는지가 키에 없어 따라
+할 행동이 없고, 실패면 veto 가 배분을 동결하는데 동결이 곧 hold 다.
+
+probation 은 독립 재현이다 — 승격 표본과 겹치지 않는 라이브 표본이 MIN_PROBATION_N 건
+모이면 한 번 판정한다. 기대 방향 부호검정 p ≤ PROBATION_ALPHA 이고 평균도 같은
+방향이어야 active. 평균 부호만 보면 효과가 없는 패턴도 절반은 통과하고, 표본을 늘려도
+그 비율은 줄지 않는다. 승격은 매일 다시 검정하므로 우연히 임계를 넘은 순간에 멈추는
+선택 편향이 있고, 그것을 걸러낼 수 있는 단계는 여기뿐이다.
 """
 
 from __future__ import annotations
@@ -16,13 +28,15 @@ from __future__ import annotations
 import math
 from datetime import date, timedelta
 
+from memory.journal import is_hold_pattern
 from memory.store import MemoryEntry, MemoryStore
 
 MIN_N = 5
 ALPHA = 0.05
 DUP_COSINE = 0.90
 PROBATION_DAYS = 7
-MIN_PROBATION_N = 2
+MIN_PROBATION_N = 5
+PROBATION_ALPHA = 0.20  # n=5 에서 4/5 이상 — 승격(0.05)보다 느슨하되 동전던지기보다 엄격
 
 
 def sign_test_p(k: int, n: int) -> float:
@@ -69,6 +83,7 @@ def promote_candidates(
         e
         for e in store.query(market, store="episodic", status="active")
         if e.outcome is not None and e.outcome != 0 and e.pattern_key
+        and not is_hold_pattern(e.pattern_key)
     ]
     by_pattern: dict[str, list[MemoryEntry]] = {}
     for e in episodic:
@@ -164,7 +179,12 @@ def review_probation(store: MemoryStore, market: str, asof_day: date) -> list[di
             expected_sign = 1 if entry.data["kind"] == "success" else -1
             if len(oos) >= MIN_PROBATION_N:
                 oos_mean = sum(e.outcome for e in oos) / len(oos)
-                verdict = "active" if oos_mean * expected_sign > 0 else "retired"
+                oos_k = sum(1 for e in oos if e.outcome * expected_sign > 0)
+                replicated = (
+                    sign_test_p(oos_k, len(oos)) <= PROBATION_ALPHA
+                    and oos_mean * expected_sign > 0
+                )
+                verdict = "active" if replicated else "retired"
             else:
                 # OOS 표본 부족 — 패턴 미출현은 무효 증거가 아니므로 유예 연장
                 extended = (asof_day + timedelta(days=PROBATION_DAYS)).isoformat()
@@ -174,6 +194,6 @@ def review_probation(store: MemoryStore, market: str, asof_day: date) -> list[di
             store.update(entry.id, status=verdict)
             events.append(
                 {"event": f"probation_{verdict}", "id": entry.id,
-                 "oos_n": len(oos), "oos_mean": round(oos_mean, 5)}
+                 "oos_n": len(oos), "oos_k": oos_k, "oos_mean": round(oos_mean, 5)}
             )
     return events

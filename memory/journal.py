@@ -50,6 +50,11 @@ def pattern_key(
     return f"{state}|action={action}"
 
 
+def is_hold_pattern(key: str) -> bool:
+    """행동 성분이 hold 인 키인가 — 현금 비중을 ±0.05 안에서 유지한 결정."""
+    return key.endswith("|action=hold")
+
+
 def record_decision(
     store: MemoryStore,
     market: str,

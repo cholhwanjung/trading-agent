@@ -652,9 +652,11 @@ def admission_progress(db_path: Path, market: str) -> list[dict]:
     """패턴별 승격 진행도 — 승격 게이트가 실제로 보는 표본을 그대로 재현.
 
     게이트와 같은 필터(결과 기입됨 · active · 동점 제외 · 이미 승격에 쓰인 표본 제외)를
-    쓰므로, "왜 아직 승격이 없는가"를 표본 수와 p 값으로 직접 읽을 수 있다.
+    쓰므로, "왜 아직 승격이 없는가"를 표본 수와 p 값으로 직접 읽을 수 있다. 게이트가
+    후보에서 빼는 hold 패턴은 행은 남기고 단계만 '승격 제외'로 적는다.
     """
     from memory.admission import ALPHA, MIN_N, sign_test_p
+    from memory.journal import is_hold_pattern
 
     episodic = _daily_episodic(_query(db_path, market, store="episodic", status="active"))
     promoted = _query(db_path, market, store="semantic") + _query(
@@ -681,7 +683,10 @@ def admission_progress(db_path: Path, market: str) -> list[dict]:
         p = None
         if n:
             p = min(sign_test_p(k_pos, n), sign_test_p(n - k_pos, n))
-        if n < MIN_N:
+        if is_hold_pattern(key):
+            # 게이트가 hold 패턴을 표본에서 뺀다 — 통계는 보여 주되 승격 후보로 읽히면 안 된다
+            stage = "승격 제외 (hold 패턴)"
+        elif n < MIN_N:
             stage = f"표본 {n}/{MIN_N}"
         elif p is not None and p <= ALPHA:
             stage = "게이트 통과 (다음 스텝에 승격)"
