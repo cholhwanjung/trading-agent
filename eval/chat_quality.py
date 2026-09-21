@@ -555,9 +555,17 @@ _REQUEST_OBJECT = re.compile(r"(?:요청|초안|제안)(?:을|를)?\s*$")
 #: 부정은 동사 **뒤**에 올 때만 — "변경했다고 볼 수 없습니다" 는 주장이 아니지만
 #: "문제없이 변경했습니다" 는 주장이다.
 _NEGATED = re.compile(r"않|없|못|아니|아닙")
+#: 접수된 것이 주문·결정일 때 — "9/18 결정도 같은 배분으로 접수됐습니다" 는 과거 주문의 서술이다.
+#: 주제 조사가 붙은 경우만 본다: "주문 한도 변경을 접수했습니다" 는 접수된 것이 변경이라 주장이다.
+_ORDER_TOPIC = re.compile(r"(?:주문|결정)(?:은|는|이|가|도)(?:\s|$)")
 _SETTING = re.compile(r"한도|상한|하한|최소\s*현금|유니버스|설정|임계|서킷|회전율|킬\s*스위치")
 _SENTENCE = re.compile(r"(?<=[.!?])\s+|\n")
 _ASKS = re.compile(r"[?？]|(?:알려|말씀해|지정해|정해|골라|선택해)\s?주")
+
+
+def _order_narration(before: str) -> bool:
+    """접수 동사 앞의 주제가 주문·결정이고 요청은 언급되지 않았는가."""
+    return bool(_ORDER_TOPIC.search(before)) and "요청" not in before
 
 
 def _false_commitment(s: str, asked: bool, backed: bool) -> bool:
@@ -571,7 +579,10 @@ def _false_commitment(s: str, asked: bool, backed: bool) -> bool:
             return True
     if not asked:
         return False
-    if not backed and any(not _NEGATED.search(s[m.end() :]) for m in _RECEIPT.finditer(s)):
+    if not backed and any(
+        not _NEGATED.search(s[m.end() :]) and not _order_narration(s[: m.start()])
+        for m in _RECEIPT.finditer(s)
+    ):
         return True
     for m in _PROMISE.finditer(s):
         stem = m.group(1)

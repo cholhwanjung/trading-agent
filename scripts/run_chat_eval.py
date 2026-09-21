@@ -429,6 +429,8 @@ def execute(
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "snapshot_id": snapshot.name,
         "snapshot_context_hash": snap_meta.get("context_hash") or context_hash(snap_ctx),
+        # 동결 때의 지문과 다르면 그 사이에 context 를 만드는 코드가 바뀐 것이다(파일은 같다)
+        "context_hash_at_run": context_hash(snap_ctx),
         "playbook_rev": _rev(playbook) if playbook else None,
         "item_set_hash": item_set_hash(items),
         "n_items": len(items),
