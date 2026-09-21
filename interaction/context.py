@@ -3,7 +3,7 @@
 브로커 API 를 직접 치지 않는다 — 일일 루프가 갱신하는 로그·상태 파일과 메모리
 store 만 읽는다(결정론·감사 가능). 모든 항목은 인용 가능한 안정 ID 를 갖는다:
 
-    decision:{market}:{day}      일일 결정 (배분·근거·인용·risk)
+    decision:{market}:{day}      일일 결정 (배분·근거·인용·risk · 주문 접수 여부와 미접수 사유)
     fundamentals:{market}:{day}  결정에 주입된 재무 비율 (PER·ROE·부채비율)
     disclosures:{market}:{day}   관측 창의 규제기관 접수 공시 (제목·접수일)
     risk:{market}                현재 목표 배분 + equity 고점
@@ -20,6 +20,7 @@ store 만 읽는다(결정론·감사 가능). 모든 항목은 인용 가능한
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +32,22 @@ MARKETS = ("CRYPTO", "US", "KR")
 RECENT_DECISIONS = 5
 RECENT_EPISODIC = 5
 RECENT_DISCLOSURES = 10
+
+
+_URL = re.compile(r"https?://\S+")
+
+
+def _order_error(error) -> str | None:
+    """주문이 접수되지 않은 사유 — 앞부분만 싣는다.
+
+    accepted=False 만 보이고 사유가 없으면 답변이 그 뜻을 지어낸다(주문 거부를 '결정이 검증을
+    통과하지 못했다'로 읽었다). 브로커 오류 문자열에는 요청 URL 이 붙어 오는데 조회 API 의
+    URL 에는 계좌번호가 쿼리로 실린다 — context 는 모델에게 그대로 나가므로 URL 은 버린다.
+    """
+    if not error:
+        return None
+    text = str(error).split(" for url ")[0].splitlines()[0]
+    return _URL.sub("", text).strip()[:160] or None
 
 
 def _read_jsonl_decisions(log_dir: Path, market: str) -> list[dict]:
@@ -98,6 +115,7 @@ def build_context(root: Path | str, markets: tuple[str, ...] = MARKETS) -> dict:
                         "scenario_invalidation": decision.get("scenario_invalidation"),
                         "risk_violations": decision.get("risk_violations"),
                         "accepted": rec.get("accepted"),
+                        "error": _order_error(rec.get("error")),
                     },
                 }
             )
