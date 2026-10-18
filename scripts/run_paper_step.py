@@ -33,6 +33,7 @@ sys.path.insert(0, str(ROOT))
 
 from adapters.market_index import fetch_index_series  # noqa: E402
 from eval import VirtualPortfolio, index_path, record_index_series, record_meta_shadow  # noqa: E402
+from meta.flows import kis_flow_share  # noqa: E402
 from harness import (  # noqa: E402
     CASH,
     JsonlLogger,
@@ -393,9 +394,15 @@ def link_shared_account(adapters: dict[str, tuple[object, list[str]]]) -> None:
         return
     kr.peer_holdings_fn = us.holdings_value
     us.peer_holdings_fn = kr.holdings_value
+    # 장부 지분은 최초 배정과 외부 입출금 분배에만 쓰인다. 장부가 이미 있으면 입출금은 전략
+    # 배분(KR:US 균등)을 향해 부족한 쪽으로 먼저 보낸다 — 매도 없는 리밸런싱. 최초 배정은
+    # 어댑터 지분(균등) 그대로다. 어댑터의 bucket_share 는 장부 없는 구성의 fallback 이라
+    # 건드리지 않는다 — 거기에 0 이 들어가면 한 시장의 예산이 통째로 0 이 된다.
+    ledger_path = STATE_DIR / f"cash_ledger_{kr.cano}_{kr.mode}.json"
+    kr_share = kis_flow_share(STATE_DIR) if ledger_path.exists() else kr.bucket_share
     ledger = AccountLedger(
-        STATE_DIR / f"cash_ledger_{kr.cano}_{kr.mode}.json",
-        {"KR": kr.bucket_share, "US": us.bucket_share},
+        ledger_path,
+        {"KR": kr_share, "US": 1.0 - kr_share},
         account_key=f"{kr.cano}:{kr.mode}",
     )
     kr.ledger = us.ledger = ledger

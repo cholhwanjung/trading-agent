@@ -26,3 +26,32 @@ blocks = [
 blocks = [
   { name = "trigger_clause" },
 ]
+
+# ── 시장 간 메타 배분(주간 shadow) ─────────────────────────────────────────
+# 결정 경로와 절이 다르면 판본 지문도 다르다 — 메타 블록을 고쳐도 [decision] 의 rev 는
+# 그대로다. 세 절은 호출 1건씩: 다이제스트(fast) → 제안(smart) → 감사(fast).
+
+[meta]
+tier = "smart"
+blocks = [
+  { name = "meta_role" },
+  { name = "meta_output_schema" },
+]
+
+[meta_digest]
+tier = "fast"
+blocks = [
+  { name = "meta_digest" },
+]
+
+[meta_audit]
+tier = "fast"
+blocks = [
+  { name = "meta_audit" },
+]
+
+[meta_reflect]
+tier = "fast"
+blocks = [
+  { name = "meta_reflect" },
+]

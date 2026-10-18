@@ -27,32 +27,12 @@ sys.path.insert(0, str(ROOT))
 
 import adapters.kis as kis_module  # noqa: E402
 from harness.env import load_env  # noqa: E402
+from meta.feeds import kis_credentials  # noqa: E402
 from regime.live import INDEX_PROXY  # noqa: E402
 
 STATE_DIR = ROOT / "data" / "state"
 OUT_DIR = ROOT / "data" / "research" / "meta_hist"
 RESEARCH_MAX_PAGES = 80  # ~8,000거래일 — 2010년 이후 전 구간을 덮고도 남는다
-
-
-def _kis_credentials(env: dict[str, str]) -> tuple[str, str, str, Path, str] | None:
-    """시세 조회용 KIS 자격 — 모의 키가 있으면 모의(실전 토큰 캐시를 건드리지 않는다)."""
-    if env.get("KIS_PAPER_APP_KEY") and "-" in env.get("KIS_PAPER_ACCOUNT", ""):
-        return (
-            env["KIS_PAPER_APP_KEY"],
-            env["KIS_PAPER_APP_SECRET"],
-            env["KIS_PAPER_ACCOUNT"],
-            STATE_DIR / "kis_token.json",
-            "demo",
-        )
-    if env.get("KIS_REAL_APP_KEY") and "-" in env.get("KIS_REAL_ACCOUNT", ""):
-        return (
-            env["KIS_REAL_APP_KEY"],
-            env["KIS_REAL_APP_SECRET"],
-            env["KIS_REAL_ACCOUNT"],
-            STATE_DIR / "kis_real_token.json",
-            "real",
-        )
-    return None
 
 
 def _max_gap_days(days: list[date]) -> int:
@@ -102,7 +82,7 @@ async def main(start: date, end: date) -> int:
     finally:
         await feed.close_data()
 
-    creds = _kis_credentials(env)
+    creds = kis_credentials(env, STATE_DIR)
     if creds is None:
         print("status=skip market=KR,US reason=no_kis_credentials")
     else:

@@ -11,7 +11,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from eval.index_bench import index_hist
-from eval.meta import combined_index, combined_index_dynamic, load_arm_history
+from eval.meta import (
+    combined_index,
+    combined_index_dynamic,
+    combined_index_rebalanced,
+    load_arm_history,
+)
 from memory.admission import sign_test_p
 
 ROLLING_K = 20  # 거래일 기준 ~1개월
@@ -113,15 +118,22 @@ def meta_shadow_delta(
     arm: str,
     weights_by_day: dict[str, dict[str, float]],
     k: int = ROLLING_K,
+    cadence: str = "daily",
+    band: float = 0.05,
 ) -> dict | None:
     """동적 메타 배분 vs 고정 균등의 rolling delta.
 
-    두 지수를 **같은 리밸런싱 방법**(combined_index_dynamic)으로 산출 — 가중치만 달라
-    배분 스킬을 분리 측정한다. dynamic − equal 의 창 승률·비중첩 청크 부호검정.
-    집행 승격은 이 델타>0·유의 + 실계좌 전환 후. 데이터 부족 시 None.
+    두 지수를 **같은 리밸런싱 방법·같은 cadence** 로 산출 — 가중치만 달라 배분 스킬을
+    분리 측정한다. dynamic − equal 의 창 승률·비중첩 청크 부호검정. cadence="daily" 는
+    종전과 같은 값(`combined_index_dynamic`)이고, "monthly"/"band" 는 집행 빈도를 흉내 낸
+    `combined_index_rebalanced` 다 — 승격 근거는 집행할 cadence 의 값이다. 데이터 부족 시 None.
     """
-    dyn = combined_index_dynamic(state_dir, arm, weights_by_day)
-    fixed = combined_index_dynamic(state_dir, arm, {})  # 빈 dict = 고정 균등 baseline
+    if cadence == "daily":
+        dyn = combined_index_dynamic(state_dir, arm, weights_by_day)
+        fixed = combined_index_dynamic(state_dir, arm, {})  # 빈 dict = 고정 균등 baseline
+    else:
+        dyn = combined_index_rebalanced(state_dir, arm, weights_by_day, cadence, band)
+        fixed = combined_index_rebalanced(state_dir, arm, {}, cadence, band)
     if dyn is None or fixed is None:
         return None
     return rolling_delta(_curve_hist(dyn), _curve_hist(fixed), k)

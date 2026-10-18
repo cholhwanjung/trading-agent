@@ -104,24 +104,46 @@ def main() -> int:
         if meta["llm"] and meta["bh"]:
             print(f"meta_alpha_vs_bh_pct={meta['llm']['ret_pct'] - meta['bh']['ret_pct']:+.4f}")
 
-    # 동적 메타 배분 vs 고정 균등 — shadow 검증. 같은 리밸런싱법으로 배분 스킬만 분리.
+    # 동적 메타 배분 vs 고정 균등 — shadow 검증. 같은 리밸런싱법·같은 cadence 로 배분 스킬만
+    # 분리. 원장 둘(결정론 국면 틸트 · LLM 주간 제안)을 같은 채점기에 통과시킨다. 승격 근거는
+    # 집행할 cadence(band 5%p)의 값이고, daily 는 제안 품질 그 자체를 본다.
     from eval.meta import load_meta_shadow
     from eval.rolling import ROLLING_K, meta_shadow_delta
 
-    weights_by_day = load_meta_shadow(ROOT / "data" / "state" / "meta_shadow.json")
-    if weights_by_day:
-        print(f"\n=== META SHADOW (동적 vs 고정균등 리밸런싱, 제안 {len(weights_by_day)}일) ===")
-        for arm in ("llm", "bh"):
-            r = meta_shadow_delta(STATE, arm, weights_by_day)
-            if r is None:
-                print(f"arm={arm} status=insufficient need_days>={ROLLING_K + 1}")
-                continue
-            p = f"{r['p_value']:.4f}" if r["p_value"] is not None else f"n/a(청크 {r['n_chunks']}<5)"
-            print(
-                f"arm={arm} k={r['k']} win_rate={r['win_rate']:.2f}"
-                f" mean={r['mean_delta_pct']:+.3f}% latest={r['latest_delta_pct']:+.3f}%"
-                f" sign_p={p}  # dynamic−equal 비중첩 {r['n_chunks']}청크 양성 {r['chunks_positive']}"
-            )
+    ledgers = {
+        "oneil": ROOT / "data" / "state" / "meta_shadow.json",
+        "llm": ROOT / "data" / "state" / "meta_shadow_llm.json",
+    }
+    for rule, path in ledgers.items():
+        weights_by_day = load_meta_shadow(path)
+        if not weights_by_day:
+            print(f"\n=== META SHADOW rule={rule} status=no_data")
+            continue
+        print(f"\n=== META SHADOW rule={rule} (동적 vs 고정균등, 제안 {len(weights_by_day)}건) ===")
+        for cadence in ("daily", "band"):
+            for arm in ("llm", "bh"):
+                r = meta_shadow_delta(STATE, arm, weights_by_day, cadence=cadence)
+                if r is None:
+                    print(f"cadence={cadence} arm={arm} status=insufficient need_days>={ROLLING_K + 1}")
+                    continue
+                p = f"{r['p_value']:.4f}" if r["p_value"] is not None else f"n/a(청크 {r['n_chunks']}<5)"
+                print(
+                    f"cadence={cadence} arm={arm} k={r['k']} win_rate={r['win_rate']:.2f}"
+                    f" mean={r['mean_delta_pct']:+.3f}% latest={r['latest_delta_pct']:+.3f}%"
+                    f" sign_p={p}  # dynamic−equal 비중첩 {r['n_chunks']}청크 양성 {r['chunks_positive']}"
+                )
+    # LLM 제안 단위 결과 — 지평 4주 뒤 anchor 대비 실현 델타·인용 신호 유형별 적중
+    from meta.ledger import load_llm_ledger
+    from meta.outcomes import signal_reliability
+
+    scored = [h for h in load_llm_ledger(ledgers["llm"]) if h.get("outcome")]
+    if scored:
+        deltas = [h["outcome"]["delta_vs_anchor"] for h in scored]
+        rel = signal_reliability(ledgers["llm"])
+        print(f"meta_llm_outcomes n={len(scored)} mean_delta={sum(deltas) / len(deltas) * 100:+.3f}%"
+              f" positive={sum(1 for d in deltas if d > 0)}/{len(deltas)}")
+        for t, row in sorted(rel["by_type"].items()):
+            print(f"  signal_type={t} cited={row['n']} hits={row['hits']}")
     # 국면 신호 비교 — 룰 기반 FSM vs jump model. 판정 기준은 사전 확정(사후 지표 추가 금지).
     from eval.regime_eval import MARKET_ARM, MIN_DAYS, compare_regimes
 

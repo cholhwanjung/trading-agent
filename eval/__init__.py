@@ -17,6 +17,7 @@ from eval.index_bench import (
 from eval.meta import (
     combined_index,
     combined_index_dynamic,
+    combined_index_rebalanced,
     load_arm_history,
     load_meta_shadow,
     max_drawdown,
@@ -35,6 +36,7 @@ __all__ = [
     "compare_regimes",
     "combined_index",
     "combined_index_dynamic",
+    "combined_index_rebalanced",
     "daily_returns",
     "exposure_summary",
     "meta_alpha_decomposition",

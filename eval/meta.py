@@ -158,6 +158,87 @@ def combined_index_dynamic(
     }
 
 
+def combined_index_rebalanced(
+    state_dir: Path | str,
+    arm: str,
+    weights_by_day: dict[str, dict[str, float]],
+    cadence: str = "daily",
+    band: float = 0.05,
+) -> dict | None:
+    """동적 제안을 **집행 cadence** 로 적용한 결합 지수 — 제안 품질과 집행 빈도를 분리해 잰다.
+
+    cadence:
+        daily    매일 목표로 재조정 (`combined_index_dynamic` 과 같은 값)
+        monthly  매월 첫 날짜에만 재조정, 그 사이 비중은 수익률대로 표류
+        band     어떤 시장이든 |현재 비중 − 목표| > band 인 날만 재조정 (수동 이체 현실)
+    빈 weights_by_day 는 같은 cadence 의 균등 baseline. 거래비용은 없다(shadow 채점 — 비용은
+    집행 설계가 따로 센다). 첫날 지수는 1.0 이고 첫날 수익률은 적용하지 않는다.
+    """
+    if cadence not in ("daily", "monthly", "band"):
+        raise ValueError(f"알 수 없는 cadence={cadence}")
+    state_dir = Path(state_dir)
+    markets = sorted({m for w in weights_by_day.values() for m in w})
+    if not markets:
+        markets = [m for m in MARKET_CAPITAL_WEIGHTS if load_arm_history(state_dir, m, arm)]
+    histories = {m: h for m in markets if (h := load_arm_history(state_dir, m, arm))}
+    if not histories:
+        return None
+
+    days = sorted({p["day"] for h in histories.values() for p in h})
+    prop_days = sorted(weights_by_day)
+
+    def weights_for(day: str) -> dict[str, float]:
+        applicable = [pd for pd in prop_days if pd <= day]
+        if applicable:
+            return weights_by_day[applicable[-1]]
+        return {m: 1.0 / len(histories) for m in histories}
+
+    holdings = {m: 0.0 for m in histories}
+    cash = 1.0
+    curve: list[dict] = []
+    prev_month = None
+    rebalances = 0
+    # 하루의 순서: 그날의 목표로 재조정 → 그날 수익률 적용. `combined_index_dynamic` 과 같은
+    # 규약이다 — 제안은 t−1 정보로 만들어져 그날 아침에 존재하고, 그날 수익률을 번다.
+    for prev_day, day in zip([None, *days], days):
+        wealth = cash + sum(holdings.values())
+        target = weights_for(day)
+        current = {m: holdings[m] / wealth for m in histories}
+        month = day[:7]
+        if cadence == "daily" or prev_day is None:
+            rebalance = True
+        elif cadence == "monthly":
+            rebalance = month != prev_month
+        else:
+            rebalance = any(abs(current[m] - target.get(m, 0.0)) > band for m in histories)
+        if rebalance:
+            rebalances += 1
+            holdings = {m: wealth * target.get(m, 0.0) for m in histories}
+            cash = wealth * max(0.0, 1.0 - sum(target.get(m, 0.0) for m in histories))
+        if prev_day is not None:
+            for m, h in histories.items():
+                e0, e1 = _eq_at(h, prev_day), _eq_at(h, day)
+                if e0 and e1 and e0 > 0:
+                    holdings[m] *= e1 / e0
+        prev_month = month
+        curve.append({"day": day, "index": round(cash + sum(holdings.values()), 6)})
+
+    mdd = max_drawdown([p["index"] for p in curve])
+    return {
+        "arm": arm,
+        "cadence": cadence,
+        "days": len(curve),
+        "markets": sorted(histories),
+        "first_day": curve[0]["day"],
+        "last_day": curve[-1]["day"],
+        "index": curve[-1]["index"],
+        "ret_pct": (curve[-1]["index"] - 1) * 100,
+        "mdd_pct": mdd * 100,
+        "rebalances": rebalances,
+        "curve": curve,
+    }
+
+
 # ── 메타 shadow 배분 로그 ────────────────────────────────────────────────────
 # propose_meta_weights 의 일별 제안을 누적 — combined_index_dynamic/meta_shadow_delta
 # 의 weights_by_day 입력원. 집행 없이 로깅만 — 검증 전에는 결정에 개입하지 않는다.

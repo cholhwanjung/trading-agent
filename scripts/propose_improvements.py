@@ -43,6 +43,33 @@ def gather_evidence(memory: MemoryStore) -> dict:
             if e.data.get("kind") == "weekly_reflection"
         ][-4:]
         evidence["markets"][market] = {"lessons": lessons, "weekly_reports": weeklies}
+    # 시장 간 메타 배분(META 네임스페이스) — 승격 교훈·제안 결과·감사 플래그·신호 신뢰도.
+    # 제안서는 [meta] 절 블록(meta_role.md)의 개정안을 낼 수 있고, 적용은 여기서도 사용자 몫이다.
+    from collections import Counter
+
+    from meta.ledger import load_llm_ledger
+    from meta.outcomes import signal_reliability
+
+    ledger_path = ROOT / "data" / "state" / "meta_shadow_llm.json"
+    proposals = load_llm_ledger(ledger_path)
+    scored = [h for h in proposals if h.get("outcome")]
+    evidence["meta"] = {
+        "lessons": [
+            {"content": e.content, "importance": e.importance, "status": e.status}
+            for store_name in ("semantic", "procedural")
+            for e in memory.query("META", store=store_name)
+            if e.status in ("active", "probation")
+        ],
+        "proposals": len(proposals),
+        "scored": len(scored),
+        "mean_delta_vs_anchor": (
+            round(sum(h["outcome"]["delta_vs_anchor"] for h in scored) / len(scored), 5) if scored else None
+        ),
+        "audit_flag_counts": dict(Counter(
+            f for h in proposals for f in (h.get("audit") or {}).get("flags", [])
+        )),
+        "signal_reliability": signal_reliability(ledger_path)["by_type"] if scored else {},
+    }
     lib_path = ROOT / "data" / "state" / "alpha_library_CRYPTO.json"
     if lib_path.exists():
         lib = json.loads(lib_path.read_text(encoding="utf-8"))
@@ -63,7 +90,8 @@ async def main() -> int:
         evidence = gather_evidence(memory)
         n_lessons = sum(len(m["lessons"]) for m in evidence["markets"].values())
         n_weekly = sum(len(m["weekly_reports"]) for m in evidence["markets"].values())
-        if n_lessons == 0 and n_weekly == 0:
+        n_meta = len(evidence["meta"]["lessons"]) + evidence["meta"]["scored"]
+        if n_lessons == 0 and n_weekly == 0 and n_meta == 0:
             print("status=skip detail=증거 없음 (승격 교훈·주간 리포트 0건) — 제안할 근거가 없다")
             return 0
 
@@ -81,7 +109,9 @@ async def main() -> int:
                     "content": (
                         f"{month} 월간 증거:\n" + json.dumps(evidence, ensure_ascii=False, indent=1)
                         + "\n\n결정 프롬프트(trader/prompts/manifest.toml 이 조립하는 blocks/*.md)·Risk limits·"
-                        "관측 구성에 대한 개선 제안서를 작성하라."
+                        "관측 구성, 그리고 시장 간 메타 배분 프롬프트([meta] 절 — meta_role.md)에 대한 "
+                        "개선 제안서를 작성하라. 메타 배분은 anchor·max_tilt·밴드를 바꾸는 제안을 하지 마라 "
+                        "— 그것은 실험 설계이지 프롬프트가 아니다."
                     ),
                 }
             ],
@@ -94,7 +124,7 @@ async def main() -> int:
             "> 반영 시 변경 로그에 기록할 것. 정책 변경의 최종 판정은 라이브 A/B.\n\n"
         )
         out_path.write_text(header + resp.text, encoding="utf-8")
-        print(f"status=ok proposal={out_path} lessons={n_lessons} weekly={n_weekly}")
+        print(f"status=ok proposal={out_path} lessons={n_lessons} weekly={n_weekly} meta={n_meta}")
         return 0
     finally:
         memory.close()

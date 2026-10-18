@@ -15,6 +15,7 @@ COPY harness/ harness/
 COPY interaction/ interaction/
 COPY llm/ llm/
 COPY memory/ memory/
+COPY meta/ meta/
 COPY reflection/ reflection/
 COPY regime/ regime/
 COPY risk/ risk/

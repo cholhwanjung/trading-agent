@@ -82,24 +82,34 @@ def load_manifest(path: Path | str = MANIFEST_PATH) -> dict:
     return tomllib.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def assemble(manifest: dict | None = None) -> PromptSpec:
-    """매니페스트 → 결정 프롬프트. 포맷 치환은 소비 시점에 `render` 가 한다."""
-    manifest = manifest if manifest is not None else load_manifest()
-    decision = manifest.get("decision")
-    if not decision:
-        raise PromptAssemblyError("manifest 에 [decision] 절이 없다")
+def assemble_section(section: str, manifest: dict | None = None) -> PromptSpec:
+    """매니페스트의 한 절(`[decision]`·`[meta]`…) → 조립 결과. 포맷 치환은 `render` 가 한다.
 
-    entries = decision.get("blocks") or []
+    절마다 독립된 판본 지문을 갖는다 — 메타 배분 프롬프트를 고쳐도 결정 프롬프트의
+    `rev` 는 움직이지 않아야 판본별 성과 비교가 경로별로 성립한다. `trigger` 하위절이
+    없는 절은 trigger_text == text.
+    """
+    manifest = manifest if manifest is not None else load_manifest()
+    spec = manifest.get(section)
+    if not spec:
+        raise PromptAssemblyError(f"manifest 에 [{section}] 절이 없다")
+
+    entries = spec.get("blocks") or []
     text, names = _join(entries)
-    trigger_entries = (decision.get("trigger") or {}).get("blocks") or []
+    trigger_entries = (spec.get("trigger") or {}).get("blocks") or []
     trigger_text, trigger_names = _join(trigger_entries, start=text)
     return PromptSpec(
         text=text,
         trigger_text=trigger_text,
         blocks=names,
         trigger_blocks=trigger_names,
-        tier=decision.get("tier", "smart"),
+        tier=spec.get("tier", "smart"),
     )
+
+
+def assemble(manifest: dict | None = None) -> PromptSpec:
+    """매니페스트 → 결정 프롬프트. `assemble_section("decision")` 과 같다."""
+    return assemble_section("decision", manifest)
 
 
 def _formatted(entries: list[dict]) -> set[str]:
