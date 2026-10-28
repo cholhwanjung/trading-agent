@@ -240,7 +240,7 @@ async def run(today: date, force: bool, dry_run: bool) -> int:
             print(f"prompt_rev={spec_meta.rev} 신규 판본 기록 blocks={','.join(spec_meta.blocks)}")
 
         # 3. 뉴스 다이제스트
-        digest = await digest_news(router, spec_digest, by_market)
+        digest, digest_info = await digest_news(router, spec_digest, by_market)
         news_ids = {m: sorted({i for ln in digest[m] for i in ln["ids"]}) for m in MARKETS}
         logger.log(
             "META",
@@ -251,11 +251,28 @@ async def run(today: date, force: bool, dry_run: bool) -> int:
                 "headlines": {m: len(v) for m, v in by_market.items()},
                 "lines": {m: len(v) for m, v in digest.items()},
                 "news_ids_injected": news_ids,
+                "attempts": digest_info["attempts"],
             },
         )
+        if digest_info["empty"] and any(by_market.values()):
+            # 헤드라인은 있는데 서사가 0줄 — 모델 출력이 형식을 벗어난 것. 원문 머리를 남겨야
+            # 다음에 원인을 본다(2026-10-19 런은 이 기록이 없어 원인 불명으로 남았다).
+            logger.log(
+                "META",
+                "meta_digest_empty",
+                {
+                    "day": today.isoformat(),
+                    "week": week,
+                    "attempts": digest_info["attempts"],
+                    "raw_head": digest_info["raw_head"],
+                },
+            )
         for m in MARKETS:
             if not news_ids[m]:
-                print(f"news_injected=0 market={m} headlines={len(by_market[m])}")
+                print(
+                    f"news_injected=0 market={m} headlines={len(by_market[m])}"
+                    f" attempts={digest_info['attempts']}"
+                )
 
         # 4. 제안 — 승격 교훈이 있으면 base(교훈 없음)·mem(교훈 포함) 두 번 → confidence 잔차 블렌드
         lessons = meta_lessons(memory, today)

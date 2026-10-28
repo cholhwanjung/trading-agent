@@ -118,18 +118,34 @@ async def digest_news(
     spec: PromptSpec,
     by_market: dict[str, list[dict]],
     purpose: str = "meta_digest",
-) -> dict[str, list[dict]]:
-    """시장별 id 부착 헤드라인 → 서사 줄. 헤드라인이 전혀 없으면 호출 없이 빈 결과."""
+    retries: int = 1,
+) -> tuple[dict[str, list[dict]], dict]:
+    """시장별 id 부착 헤드라인 → (서사 줄, 진단). 헤드라인이 전혀 없으면 호출 없이 빈 결과.
+
+    모델 출력이 JSON 형식을 벗어나면 파싱이 전 시장 0줄로 조용히 떨어진다 — 2026-10-19 런이
+    그랬고 원문이 남지 않아 원인을 볼 수 없었다. 그래서 전 시장이 비면 한 번 다시 묻고, 그래도
+    비면 진단에 응답 머리를 담아 호출부가 로그로 남기게 한다. 진단: attempts · raw_head · empty.
+    """
     markets = tuple(by_market)
     if not any(by_market.values()):
-        return {m: [] for m in markets}
-    resp = await router.complete(
-        spec.tier,
-        purpose=purpose,
-        system=spec.text,
-        messages=[{"role": "user", "content": digest_prompt(by_market)}],
-        json_mode=True,
-        temperature=0.0,
-    )
+        return {m: [] for m in markets}, {"attempts": 0, "raw_head": "", "empty": True}
     valid = {it["id"] for items in by_market.values() for it in items}
-    return parse_digest(resp.text, valid, markets)
+    prompt = digest_prompt(by_market)
+    digest: dict[str, list[dict]] = {m: [] for m in markets}
+    raw_head = ""
+    attempts = 0
+    for attempts in range(1, retries + 2):
+        resp = await router.complete(
+            spec.tier,
+            purpose=purpose,
+            system=spec.text,
+            messages=[{"role": "user", "content": prompt}],
+            json_mode=True,
+            temperature=0.0,
+        )
+        raw_head = resp.text[:300]
+        digest = parse_digest(resp.text, valid, markets)
+        if any(digest.values()):
+            break
+    empty = not any(digest.values())
+    return digest, {"attempts": attempts, "raw_head": raw_head if empty else "", "empty": empty}
