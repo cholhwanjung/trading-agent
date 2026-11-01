@@ -15,8 +15,16 @@ k-means 목적함수에 **전환당 고정비용(점프 페널티 λ)** 을 더�
 있고, 그게 정직한 비교의 대가다.
 
 **라벨 고정이 이 모델의 최대 함정이다.** 군집 번호(0/1)는 임의라 재적합마다 뒤집힐 수
-있다. 훈련 구간 누적수익이 높은 쪽을 bull 로 정해 상태 파일에 함께 저장한다 — 저장하지
-않으면 시계열이 중간에 부호 반전되고, 값은 계속 나오므로 로그만 봐서는 드러나지 않는다.
+있다. 라벨은 중심점의 기하로 정한다 — 하방편차가 낮은 군집이 bull. 상태 파일에 함께
+저장해야 시계열이 중간에 부호 반전되지 않는다(값은 계속 나오므로 로그만 봐서는 안 드러난다).
+
+**군집이 bull/bear 로 식별되지 않으면 판정을 보류한다.** k=2 k-means 는 훈련창에서 분산이
+가장 큰 축으로 가른다. 그 축이 상승/하락이 아니라 "저변동 횡보 vs 고변동 급등" 이면
+(한국 2026 상반기, 포물선 랠리 뒤의 크립토) 두 군집 어느 쪽도 bear 가 아닌데, 누적수익으로
+라벨을 붙이면 고변동 군집이 bull 을 가져가고 그 뒤의 고변동 급락이 bull 로 읽힌다. 식별
+조건은 원래 단위에서 bull 중심점이 하방편차가 낮고 두 Sortino 가 모두 양수이며, bear
+중심점의 두 Sortino 가 모두 음수인 것 — 라벨의 뜻(양/음의 위험조정수익)과 부호가 맞아야
+한다. 미식별 모델은 저장은 되지만 `infer` 가 None 을 돌려 "모른다"를 기록한다.
 
 표준화 파라미터(평균·표준편차)도 훈련창의 것을 저장해 추론에 그대로 쓴다. 매일 그날
 창으로 다시 표준화하면 같은 시장 상태가 날마다 다른 좌표에 찍힌다.
@@ -44,10 +52,11 @@ class JumpModel:
     centroids: list[list[float]]  # k × d, 표준화 좌표
     mean: list[float]  # 훈련창 피처 평균 (추론에 재사용)
     std: list[float]  # 훈련창 피처 표준편차
-    bull_index: int  # 어느 군집이 bull 인가 (누적수익 기준, 재적합 간 부호 고정)
+    bull_index: int  # 어느 군집이 bull 인가 (하방편차가 낮은 쪽, 재적합 간 부호 고정)
     penalty: float
     n_train: int
     trained_through: str  # ISO 날짜 — 재적합 시점 판단
+    identified: bool  # 중심점이 bull/bear 로 식별되는가 — False 면 infer 는 None
 
 
 def _sq_dist(row: list[float], centroid: list[float]) -> float:
@@ -120,19 +129,34 @@ def _update_centroids(
     return out
 
 
+def label_clusters(
+    centroids: list[list[float]], mean: list[float], std: list[float]
+) -> tuple[int, bool]:
+    """(bull_index, identified) — 중심점을 원래 단위로 되돌려 라벨과 식별 여부를 정한다.
+
+    bull = 하방편차(첫 열)가 낮은 군집. identified = bull 의 Sortino 두 개가 양수이고 bear 의
+    Sortino 두 개가 음수이며 bull 의 Sortino 가 둘 다 bear 보다 높다. 부호가 어긋나면 두 군집은
+    상승/하락이 아니라 다른 축(변동성 수준·과열 여부)으로 갈린 것이라 bull/bear 라벨이 거짓이다.
+    """
+    raw = [[m + c * s for c, m, s in zip(centroid, mean, std)] for centroid in centroids]
+    bull = min(range(len(raw)), key=lambda k: raw[k][0])
+    bear = 1 - bull
+    identified = all(raw[bull][j] > 0 > raw[bear][j] for j in range(1, len(mean)))
+    return bull, identified
+
+
 def fit(
     rows: list[list[float]],
-    returns: list[float],
     trained_through: date,
     penalty: float = JUMP_PENALTY,
     restarts: int = N_RESTARTS,
     seed: int = 0,
 ) -> JumpModel | None:
-    """피처 행렬 + 같은 날 수익률 → 적합된 모델. 표본 부족이면 None.
+    """피처 행렬 → 적합된 모델. 표본 부족이면 None.
 
     seed 고정이라 같은 입력이면 같은 모델이 나온다 — 재현 불가능한 적합은 감사할 수 없다.
     """
-    if len(rows) < MIN_TRAIN_BARS or len(rows) != len(returns):
+    if len(rows) < MIN_TRAIN_BARS:
         return None
 
     std_rows, mean, std = standardize(rows)
@@ -154,29 +178,28 @@ def fit(
 
     if best is None:  # restarts=0 로 부른 경우
         return None
-    _, states, centroids = best
-    # 누적수익이 높은 군집이 bull — 군집 번호는 임의라 이 배정을 저장해야 부호가 고정된다
-    totals = [
-        sum(r for r, s in zip(returns, states) if s == k) for k in range(K_STATES)
-    ]
+    _, _, centroids = best
+    # 군집 번호는 임의라 라벨 배정을 저장해야 재적합 사이에 부호가 고정된다
+    bull_index, identified = label_clusters(centroids, mean, std)
     return JumpModel(
         centroids=[[round(v, 6) for v in c] for c in centroids],
         mean=[round(v, 6) for v in mean],
         std=[round(v, 6) for v in std],
-        bull_index=max(range(K_STATES), key=lambda k: totals[k]),
+        bull_index=bull_index,
         penalty=penalty,
         n_train=len(rows),
         trained_through=trained_through.isoformat(),
+        identified=identified,
     )
 
 
 def infer(rows: list[list[float]], model: JumpModel) -> str | None:
-    """최근 창의 마지막 상태 라벨(bull/bear). 행이 없으면 None.
+    """최근 창의 마지막 상태 라벨(bull/bear). 행이 없거나 모델이 미식별이면 None.
 
     최근접 중심점을 그냥 고르지 않고 창 전체에 DP 를 돌린 뒤 마지막 상태를 취한다 —
     페널티가 반영돼야 추론 상태열도 훈련만큼 끈적해진다.
     """
-    if not rows:
+    if not rows or not model.identified:
         return None
     std_rows = apply_standardize(rows, model.mean, model.std)
     states, _ = assign_states(std_rows, model.centroids, model.penalty)

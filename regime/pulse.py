@@ -16,7 +16,13 @@ I/O·클럭·네트워크 없음 → 단위 테스트 가능). prism-insight `co
     | CORRECTION 진입   | DD ≥ 6, 또는 피크 대비 −10%   | IBD "market in correction"
     | UNDER_PRESSURE    | DD ∈ {4, 5}                   | IBD
     | Follow-Through Day| 랠리 4일차+ & +1.25% & 거래량↑| O'Neil HTMMIS
+    | FTD 실패          | 탈출 뒤 랠리 저점 하향 이탈   | IBD (사전-조정 피크 회복 전까지 감시)
     | 회복 탈출         | 종가 > 사전-조정 피크         | O'Neil (신고가 = 정의상 상승)
+
+FTD 실패 규칙이 없으면 약세장 반등이 곧 탈출 신호가 된다 — 약세장에서 가장 큰 양봉이 FTD
+조건을 채우고, 탈출하며 피크가 그날 종가로 리셋되므로 다음 날 급락해도 낙폭 기준으로는
+재진입이 안 된다. IBD 는 FTD 뒤 지수가 랠리 저점을 깨면 그 FTD 를 실패로 보고 조정으로
+되돌린다. 실패 시 피크는 사전-조정 피크로 복원해 낙폭이 진짜 고점에서 측정되게 한다.
 """
 
 from __future__ import annotations
@@ -71,9 +77,19 @@ def classify_regime(bars: list[Bar]) -> RegimeResult | None:
     state = UPTREND
     rally_day = 0  # CORRECTION 중 랠리 시도 경과일 (0 = 시도 없음)
     rally_low = 0.0
+    ftd_low: float | None = None  # FTD 로 탈출한 뒤 감시하는 랠리 저점 (None = 감시 없음)
+    prior_peak = 0.0  # FTD 탈출 시점의 사전-조정 피크 — 실패 시 복원
 
     for t in range(1, len(bars)):
         bar, prev = bars[t], bars[t - 1]
+
+        # FTD 실패 감시 — 사전-조정 피크를 회복하면 확정, 랠리 저점을 깨면 CORRECTION 복귀
+        if state != CORRECTION and ftd_low is not None:
+            if bar.close > prior_peak:
+                ftd_low = None
+            elif bar.low < ftd_low:
+                state, peak = CORRECTION, prior_peak
+                rally_day, rally_low, ftd_low = 0, bar.low, None
 
         # 분산일 만료(25세션 경과 또는 +5% 회복) 후 신규 분산일 추가
         active_dd = [
@@ -109,6 +125,8 @@ def classify_regime(bars: list[Bar]) -> RegimeResult | None:
             vol_up = prev.volume > 0 and bar.volume > prev.volume
             ftd = rally_day >= FTD_MIN_DAY and gain >= FTD_MIN_GAIN and vol_up
             if ftd or bar.close > peak:  # FTD 또는 사전-조정 피크 회복 → 탈출
+                if bar.close <= peak:  # FTD 탈출 — 피크 미회복이라 실패 감시를 건다
+                    ftd_low, prior_peak = rally_low, peak
                 state = UPTREND
                 peak = bar.close  # 피크 리셋(edge-trigger) — 다음 피크는 새로 형성
 

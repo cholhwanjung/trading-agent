@@ -119,24 +119,50 @@ def score(model: str, states: dict[date, bool], fwd: dict[date, float]) -> Regim
     )
 
 
+def count_abstentions(log_root: Path | str, market: str, event: str) -> int:
+    """state 가 None 인 국면 기록 수 — 모델이 "모른다"를 기록한 날(미식별 jump model)."""
+    return sum(1 for r in iter_events(log_root, market, event) if r.get("state") is None)
+
+
+def _degenerate(s: RegimeScore) -> bool:
+    """표본은 충분한데 한쪽 무리가 비었다 — 표본 부족이 아니라 전환하지 않는 모델의 결함."""
+    return s.n_days >= MIN_DAYS and (s.n_risk_on == 0 or s.n_risk_off == 0)
+
+
 def compare_regimes(
     log_root: Path | str, virtual_dir: Path | str, market: str, arm: str = MARKET_ARM
 ) -> dict:
     """시장 1곳의 FSM vs JM 채점 + 사전 확정 기준에 따른 판정.
 
-    verdict: no_jm(모델 미배선) · insufficient(표본 부족) · jm_promotable · hold
+    verdict: no_jm(모델 미배선) · jm_unidentified(모델이 판정 보류) · jm_degenerate /
+    fsm_degenerate(표본은 충분한데 한 상태로 고정) · insufficient(표본 부족) · jm_promotable · hold.
+    degenerate 는 insufficient 에서 갈라낸 것 — 둘을 합쳐 두면 "기다리면 풀린다"로 읽히는데,
+    전환하지 않는 모델은 기다려도 표본이 안 생긴다.
     """
     fwd = forward_returns(virtual_dir, market, arm)
     fsm = score("fsm", load_states(log_root, market, FSM_EVENT, FSM_RISK_ON), fwd)
     jm = score("jm", load_states(log_root, market, JM_EVENT, JM_RISK_ON), fwd)
+    n_abstain = count_abstentions(log_root, market, JM_EVENT)
 
     reasons: list[str] = []
     if fsm is None:
         verdict = "insufficient"
         reasons.append("fsm 상태 또는 수익률 없음")
+    elif jm is None and n_abstain:
+        verdict = "jm_unidentified"
+        reasons.append(
+            f"{JM_EVENT} {n_abstain}건 전부 state=None — 군집이 bull/bear 로 식별되지 않음"
+        )
     elif jm is None:
         verdict = "no_jm"
         reasons.append(f"{JM_EVENT} 로그 없음 — 모델 미배선")
+    elif _degenerate(jm) or _degenerate(fsm):
+        verdict = "jm_degenerate" if _degenerate(jm) else "fsm_degenerate"
+        s = jm if _degenerate(jm) else fsm
+        reasons.append(
+            f"{s.model} n={s.n_days} on/off={s.n_risk_on}/{s.n_risk_off} 전환={s.switches}"
+            " — 한 상태로 고정, 표본이 쌓여도 판정 불가"
+        )
     elif fsm.insufficient or jm.insufficient:
         verdict = "insufficient"
         reasons.append(f"표본 부족 (fsm n={fsm.n_days} · jm n={jm.n_days} · 하한 {MIN_DAYS})")
@@ -157,6 +183,7 @@ def compare_regimes(
         "n_return_days": len(fwd),
         "fsm": asdict(fsm) if fsm else None,
         "jm": asdict(jm) if jm else None,
+        "n_jm_abstain": n_abstain,
         "verdict": verdict,
         "reasons": reasons,
     }

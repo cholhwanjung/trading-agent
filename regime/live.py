@@ -82,7 +82,7 @@ async def compute_jm_regime(
         return None
     try:
         bars = await adapter.get_ohlcv_history([proxy], asof_day, lookback_days=JM_TRAIN_DAYS)
-        rows, returns = feature_matrix([b.close for b in bars.get(proxy, [])])
+        rows, _ = feature_matrix([b.close for b in bars.get(proxy, [])])
     except Exception:
         return None
     if not rows:
@@ -91,7 +91,7 @@ async def compute_jm_regime(
     model = load_model(model_path)
     refit = needs_refit(model, asof_day)
     if refit:
-        fitted = fit(rows, returns, trained_through=asof_day)
+        fitted = fit(rows, trained_through=asof_day)
         if fitted is None:  # 학습 표본 부족 — 기존 모델이 있으면 그것으로 계속 간다
             if model is None:
                 return None
@@ -99,11 +99,10 @@ async def compute_jm_regime(
             model = fitted
             save_model(model_path, model)
 
-    state = infer(rows, model)
-    if state is None:
-        return None
+    # 미식별 모델이면 state=None 으로 기록한다 — "모른다"도 채점기가 읽어야 하는 산출물이다
     return {
-        "state": state,
+        "state": infer(rows, model),
+        "identified": model.identified,
         "n_infer": len(rows),
         "n_train": model.n_train,
         "trained_through": model.trained_through,
