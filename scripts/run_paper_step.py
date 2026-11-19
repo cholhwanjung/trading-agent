@@ -47,6 +47,7 @@ from harness import (  # noqa: E402
     wait_for_network,
     with_deadline,
 )
+from harness.session_gate import resolve_session, wait_for_open_offset  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 from memory import (  # noqa: E402
     MemoryStore,
@@ -74,6 +75,7 @@ from adapters import (  # noqa: E402
     is_market_weekend,
 )
 from adapters.ledger import AccountLedger  # noqa: E402
+from adapters.session import local_day  # noqa: E402
 from adapters.universe import ETF, asset_class  # noqa: E402
 from risk import (  # noqa: E402
     RiskEngine,
@@ -1160,7 +1162,67 @@ async def main() -> int:
             lock.close()
 
 
-if __name__ == "__main__":
+async def session_open_gate(args: argparse.Namespace) -> None:
+    """정규장이 있는 시장의 스텝을 그날의 실제 개장에 맞춘다 — 평소에는 기다림이 0 이다.
+
+    잡은 벽시계 고정 시각에 뜨지만 겨냥하는 것은 '개장 직후 변동 구간을 지난 시점'이다.
+    개장이 밀리는 날에는 같은 시각이 개장 직후가 되므로, 그만큼 여기서 기다린다.
+
+    락을 잡기 전에 한다 — 기다리는 동안 계좌 락을 쥐고 있으면 그 시간의 장중 감시가
+    전부 양보해 버린다. 그래서 어댑터를 여기서 한 번 만들어 조회에만 쓰고 닫는다.
+    주문·잔고는 건드리지 않는다.
+
+    게이트는 늦출 뿐 막지 않는다. 여기서 무엇이 실패해도 스텝은 종전대로 돈다.
+    """
+    if args.dry_run:
+        return
+    now = datetime.now(timezone.utc)
+    markets = sorted(args.markets) if args.markets else sorted(_VALID_MARKETS)
+    markets = [m for m in markets if local_day(m, now) and m not in weekend_markets([m], now)]
+    if not markets:
+        return
+    env = load_env(ROOT / ".env")
+    adapters = build_adapters(env)
+    try:
+        for market in markets:
+            adapter = adapters.get(market, (None,))[0]
+            if not hasattr(adapter, "trading_session"):
+                continue  # 운영 시각을 물어볼 수 없는 시장 — 고정 시각표 그대로
+            if not await wait_for_network():
+                return  # 본 런이 같은 사유로 실패를 보고한다
+            session = await resolve_session(adapter, market, STATE_DIR, now)
+            record = await wait_for_open_offset(adapter, session)
+            JsonlLogger(ROOT / "data" / "logs").log(market, "session_gate", record)
+            print(
+                f"market={market} event=session_gate status={record['status']}"
+                f" open={record['open']} close={record['close']} source={record['source']}"
+                f" basis={record.get('basis')} first_print={record.get('first_print')}"
+                f" target={record.get('target')} waited_s={record['waited_s']}"
+            )
+            if session.shifted and getattr(adapter, "mode", None) == "real":
+                await notify(
+                    env,
+                    f"{market} 장 시간 변경",
+                    f"정규장 {record['open']}~{record['close']} ({record['source']})"
+                    f" · 스텝 실행 {record.get('target')} · 대기 {record['waited_s']}초",
+                )
+    except Exception as e:
+        print(f"status=warn event=session_gate_error error={type(e).__name__}: {e}")
+    finally:
+        for adapter, _ in adapters.values():
+            close = getattr(adapter, "close", None)
+            if close:
+                await close()
+
+
+async def _run() -> int:
+    # 개장 게이트는 데드라인 밖이다 — 개장이 밀린 날의 대기는 길어야 정상인 시간이고,
+    # 상한은 게이트가 따로 갖는다.
+    await session_open_gate(_parse_args())
     # 런 전체 데드라인 — per-call timeout 이 못 막는 총량 지연(무한대기·느린 LLM 누적)을
     # 상한으로 차단. 초과 시 취소→finally 정리→exit 1 로 락을 확실히 해제한다.
-    sys.exit(asyncio.run(with_deadline(main(), label="paper_step")))
+    return await with_deadline(main(), label="paper_step")
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(_run()))

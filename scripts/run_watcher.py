@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from adapters import configure_observation  # noqa: E402
+from adapters.session import DEFAULT_SOURCE, load_session, local_day  # noqa: E402
 from harness import (  # noqa: E402
     JsonlLogger,
     decide_and_submit,
@@ -39,6 +40,7 @@ from harness import (  # noqa: E402
     market_locks,
     notify,
 )
+from harness.session_gate import resolve_session, session_path  # noqa: E402
 from llm import LLMRouter  # noqa: E402
 from scripts.run_paper_step import (  # noqa: E402
     STATE_DIR,
@@ -81,7 +83,13 @@ async def main() -> int:
     config = config_for(market)  # 미지원 시장은 KeyError (지원 목록은 watcher.DEFAULTS)
 
     # 장외엔 아무것도 하지 않는다 — 시장가 미체결 시간대의 트리거·주문 차단(15분 틱 조기 종료).
-    if not in_session(config, datetime.now(timezone.utc)):
+    # 그날의 정규장을 이미 조회해 뒀으면 그것으로, 아니면 고정 시각표로 가른다. 개장이
+    # 밀린 날 고정 시각표는 열리지 않은 장을 감시하고 마지막 1시간을 비운다.
+    started = datetime.now(timezone.utc)
+    day = local_day(market, started)
+    session = load_session(session_path(STATE_DIR, market), market, day) if day else None
+    in_hours = session.contains(started) if session else in_session(config, started)
+    if not in_hours:
         print(f"market={market} status=closed detail=장외 게이팅 스킵")
         return 0
 
@@ -111,6 +119,16 @@ async def main() -> int:
     router = LLMRouter(env, usage_sink=make_usage_sink(ROOT))
     try:
         now = datetime.now(timezone.utc)
+        # 오늘의 정규장을 아직 모르면 여기서 한 번 물어 저장한다(그날 첫 틱). 고정 시각표로는
+        # 장중이었지만 실제로는 아직 열리지 않았으면 여기서 물러난다. 조회가 안 돼 고정
+        # 시각표가 돌아왔으면 위에서 이미 같은 표로 통과한 것이라 다시 가르지 않는다.
+        if session is None and day is not None:
+            session = await resolve_session(adapter, market, STATE_DIR, now)
+            if session.source != DEFAULT_SOURCE and not session.contains(now):
+                print(f"market={market} status=closed detail=장외 게이팅 스킵"
+                      f" open={session.open:%H:%M} close={session.close:%H:%M}"
+                      f" source={session.source}")
+                return 0
         # 급변은 **매매할 수 있는 종목**으로만 판정한다. 관측 전용 종목까지 보면 계좌가
         # 들 수 없는 종목 하나의 변동성이 재결정과 주문을 끌고 다닌다 — 움직인 건 그 종목인데
         # 사고파는 건 지수 ETF 다. 관측 전용 종목은 결정의 근거로만 남는다(t-1 관측).

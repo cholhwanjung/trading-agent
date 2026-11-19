@@ -20,6 +20,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -42,6 +43,7 @@ from adapters.base import (
     price_outliers,
 )
 from adapters.retry import with_retry
+from adapters.session import TradingSession, first_print_time, kr_session_from_market_time
 from adapters.universe import ETF, asset_class
 
 if TYPE_CHECKING:  # 런타임 임포트는 순환(risk → adapters.allocation)을 만든다
@@ -606,6 +608,34 @@ class KISDomesticAdapter(MarketAdapter):
 
     async def _current_price(self, symbol: str) -> float:
         return (await self._quote(symbol)).price
+
+    # ── 오늘의 정규장 (실행 시각 결정용 — 관측에는 들어가지 않는다) ──
+
+    async def trading_session(self, day: date) -> TradingSession | None:
+        """브로커가 알려 주는 그날의 정규장. 응답을 해석할 수 없으면 None."""
+        data = await self.session.get(
+            "/uapi/domestic-stock/v1/quotations/market-time", tr_id="HHMCM000002C0", params={}
+        )
+        return kr_session_from_market_time(data.get("output1") or {}, day)
+
+    async def first_trade_time(self, day: date) -> dt_time | None:
+        """그날 종합지수의 첫 체결 시각(10분 단위 내림). 아직 체결이 없으면 None.
+
+        10분봉이면 하루치(약 40행)가 한 응답에 들어와 첫 봉이 잘리지 않는다. 더 잘게
+        받으면 응답이 최근 100행에서 끊겨 개장 시각이 보이지 않는다.
+        """
+        data = await self.session.get(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-indexchartprice",
+            tr_id="FHKUP03500200",
+            params={
+                "FID_COND_MRKT_DIV_CODE": "U",
+                "FID_ETC_CLS_CODE": "0",
+                "FID_INPUT_ISCD": "0001",  # 종합(코스피)
+                "FID_INPUT_HOUR_1": "600",
+                "FID_PW_DATA_INCU_YN": "N",  # 당일만
+            },
+        )
+        return first_print_time(data.get("output2") or [], day)
 
     async def _post_order(self, side: str, symbol: str, qty: int) -> dict:
         """시장가 현금주문. EGW00201(초당 제한)은 게이트웨이 선차단 = 주문 미접수라
