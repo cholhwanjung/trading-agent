@@ -4,6 +4,10 @@
 참조가는 롤링 윈도우 — 트리거 발동 또는 ref TTL 경과 시 현재가로 갱신되어
 "최근 N시간 내 급변"을 의미한다. 뉴스·regime 트리거는 v2.
 
+정규장이 있는 시장은 장이 닫힌 동안 판정이 돌지 않아 참조가가 전날 오후 값으로 남는다.
+그대로 비교하면 그날 첫 틱이 밤사이 갭을 장중 급변으로 읽으므로, 개장 전에 잡힌 참조가는
+발동 없이 현재가로 다시 잡는다(`carried_over`).
+
 상주 데몬이 아니라 주기 check-once 로 호출된다(scripts/run_watcher.py). 상태는
 JSON 파일에 영속 — 이 모듈은 (state, prices, now) → (trigger?, new_state) 순수 함수.
 """
@@ -72,13 +76,26 @@ def max_drift(current: dict[str, float], ref: dict[str, float]) -> float:
     return max((abs(m) for m in moves.values()), default=0.0)
 
 
+def carried_over(state: dict, session_open: datetime | None) -> bool:
+    """참조가가 오늘 개장 전에 잡힌 것인가. 정규장이 없는 시장(session_open=None)은 항상 False."""
+    if session_open is None or not state.get("ref"):
+        return False
+    ref_at = _parse(state.get("ref_at"))
+    return ref_at is None or ref_at < session_open
+
+
 def evaluate(
-    state: dict, current: dict[str, float], now: datetime, config: TriggerConfig
+    state: dict,
+    current: dict[str, float],
+    now: datetime,
+    config: TriggerConfig,
+    session_open: datetime | None = None,
 ) -> tuple[dict | None, dict]:
     """(트리거 payload | None, 새 state) 반환. 순수 함수 — I/O 없음.
 
     state: {"ref": {sym: px}, "ref_at": iso, "last_fire_at": iso|null}
     트리거 payload 는 부호 있는 moves 를 담아 LLM 이 방향(급락/급등)을 알 수 있게 한다.
+    session_open: 오늘 정규장의 개장 시각(tz-aware). 24/7 시장은 None.
     """
     now = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
     ref = dict(state.get("ref") or {})
@@ -87,6 +104,12 @@ def evaluate(
 
     # 최초 실행(참조가 없음) → 시드만 하고 발동 안 함
     if not ref:
+        return None, {"ref": dict(current), "ref_at": now.isoformat(), "last_fire_at": last_fire_iso}
+
+    # 개장 전에 잡힌 참조가 → 발동 없이 다시 잡는다. 전날 값과의 차이는 밤사이 갭이지
+    # 이 감시가 재려는 것(최근 몇 시간 안의 변동)이 아니다. 임계를 넘는지는 보지 않는다 —
+    # 넘는 날이 바로 막으려는 경우다.
+    if carried_over(state, session_open):
         return None, {"ref": dict(current), "ref_at": now.isoformat(), "last_fire_at": last_fire_iso}
 
     moves = _moves(current, ref)

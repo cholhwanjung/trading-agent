@@ -12,6 +12,10 @@ reflection)을 호출하지 않는다 — 당일 정보 기반 결정을 admissi
 유니버스·어댑터·정책 조립·집행 게이트는 일간 스텝의 것을 그대로 쓴다 — 주문으로 가는
 길이 둘이면 한쪽에만 게이트가 붙는다.
 
+**정규장이 있는 시장은 그날의 일간 결정 이후만 본다**: 일간 스텝이 기록을 남기기 전에는
+판정도 주문도 하지 않고, 스텝 뒤 첫 틱은 참조가만 다시 잡는다. 스텝 직전에 워처가 판 것을
+스텝이 전일 관측만 보고 되사는 왕복 매매를 막는다 — 두 결정은 서로의 근거를 모른다.
+
 사용법:
     uv run python scripts/run_watcher.py                 # CRYPTO 1회 점검(+발동 시 주문)
     uv run python scripts/run_watcher.py --market KR     # KR 은 장중(09:00~15:30 KST)만 동작
@@ -50,7 +54,7 @@ from scripts.run_paper_step import (  # noqa: E402
     close_unselected,
     log_ledger_activity,
 )
-from watcher import config_for, evaluate, in_session, max_drift  # noqa: E402
+from watcher import carried_over, config_for, evaluate, in_session, max_drift  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -68,6 +72,29 @@ def _load_watch_state(path: Path) -> dict:
 def _save_watch_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _daily_step_ran(log_root: Path, market: str, since: datetime, now: datetime) -> bool:
+    """since 이후에 그 시장의 일간 스텝이 기록을 남겼는가 — 결정했거나, 건너뛴다고 적었거나.
+
+    일간 스텝을 건드리지 않고 그 스텝이 이미 쓰는 기록을 읽는다. 로그 파일은 기록 시각의
+    UTC 날짜로 나뉘므로 since 와 now 의 날짜를 둘 다 본다.
+    """
+    days = {since.astimezone(timezone.utc).date(), now.astimezone(timezone.utc).date()}
+    for day in sorted(days):
+        path = log_root / market / f"{day.isoformat()}.jsonl"
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+                if record["event"] not in ("daily_step", "daily_skip"):
+                    continue
+                if datetime.fromisoformat(record["ts"]) >= since:
+                    return True
+            except (ValueError, KeyError, TypeError):
+                continue
+    return False
 
 
 async def _close(adapter) -> None:
@@ -129,17 +156,27 @@ async def main() -> int:
                       f" open={session.open:%H:%M} close={session.close:%H:%M}"
                       f" source={session.source}")
                 return 0
+        # 그날의 일간 결정이 나기 전에는 보지 않는다. 스텝은 개장 뒤 한참 지나 돌고 전일
+        # 관측만 보므로, 그 사이에 워처가 줄여 놓은 배분을 이유를 모른 채 되돌린다 —
+        # 같은 종목을 팔았다 되사는 왕복이 된다. 스텝이 실패해 기록이 없는 날은 종일
+        # 보류되며, 그 사실은 틱마다 status=held 로 남는다.
+        session_open = session.open_at if session else None
+        if session_open and not _daily_step_ran(ROOT / "data" / "logs", market, session_open, now):
+            print(f"market={market} status=held detail=일간 스텝 전 — 판정·주문 보류")
+            return 0
         # 급변은 **매매할 수 있는 종목**으로만 판정한다. 관측 전용 종목까지 보면 계좌가
         # 들 수 없는 종목 하나의 변동성이 재결정과 주문을 끌고 다닌다 — 움직인 건 그 종목인데
         # 사고파는 건 지수 ETF 다. 관측 전용 종목은 결정의 근거로만 남는다(t-1 관측).
         current = await adapter.get_current_prices(TRADABLE[market])
         state = _load_watch_state(watch_path)
-        trigger, new_state = evaluate(state, current, now, config)
+        trigger, new_state = evaluate(state, current, now, config, session_open=session_open)
 
         if trigger is None:
             drift = max_drift(current, state.get("ref") or current)
+            # 개장 전 참조가를 다시 잡은 틱은 따로 적는다 — 이때의 drift 는 밤사이 갭이다.
+            status = "reseed" if carried_over(state, session_open) else "no_trigger"
             print(
-                f"market={market} status=no_trigger drift={drift:.4f}"
+                f"market={market} status={status} drift={drift:.4f}"
                 f" threshold={config.move_threshold} prices={current}"
             )
             if not dry_run:
