@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import altair as alt
@@ -38,11 +38,22 @@ from eval.rolling import (  # noqa: E402
     rolling_report,
 )
 from gui.panels import (  # noqa: E402
+    CHANNELS,
+    FRESH_MAX_AGE,
+    RUN_BAD,
+    RUN_WARN,
     admission_progress,
+    change_markers,
+    channel_grid,
+    citation_check,
     counterfactual_ledger,
+    dead_channels,
     decision_for_day,
     episodic_ledger,
+    eval_runs,
+    execution_chain,
     exposure_turnover,
+    freshness,
     kill_switch_active,
     latest_budget,
     latest_meta_event,
@@ -53,21 +64,30 @@ from gui.panels import (  # noqa: E402
     load_market_allocation,
     load_observation,
     load_regime,
+    load_stall,
     market_health,
+    memory_ladder,
     monthly_proposals,
     promoted_memories,
     read_recent_decisions,
+    revision_spans,
+    risk_interventions,
+    risk_summary,
+    run_ledger,
+    run_summary,
     running_jobs,
     scenario_outcomes,
+    scorecard,
     session_draft_diff,
     session_proposals,
+    stage_moves,
     universe_rows,
+    usage_breakdown,
     usage_report,
     veto_rows,
     weekly_reflections,
 )
 from harness.env import load_env  # noqa: E402
-from risk.engine import RiskLimits  # noqa: E402
 from risk.limits_config import load_limits  # noqa: E402
 from scripts.run_paper_step import (  # noqa: E402
     CRYPTO_UNIVERSE,
@@ -186,6 +206,197 @@ def pie(data: dict[str, float], title: str, domain: list[str] | None = None) -> 
     st.altair_chart(chart, width="stretch")
 
 
+# ── 에이전트 건강 (성과와 별개로 시스템이 제대로 돌았는가) ──
+
+HEALTH_LEDGER_DAYS = 30  # 런 원장 창(달력일)
+HEALTH_WINDOW = 60  # 개입·체결·인용 요약 창(최근 결정 수)
+HEALTH_GRID_RUNS = 14  # 채널 격자 창(최근 결정 수)
+DRIFT_NOTE = 0.05  # 체결 괴리 참고선 — 판정 임계가 아니라 눈금
+SERIES_COLOR = "#2a78d6"
+MUTED_INK = "#898781"
+# 상태 → (색, 칸 글리프, 표기). 색만으로 뜻을 싣지 않는다 — 실패 계열 셋은 같은 색이고
+# 글리프·툴팁·아래 표가 구분을 맡는다.
+RUN_STATUS_STYLE = {
+    "ok": ("#0ca30c", "", "정상"),
+    "closed": ("#c3c2b7", "", "휴장"),
+    "stalled": ("#fab219", "S", "집행 정지"),
+    "late": ("#fab219", "L", "지연 실행"),
+    "degraded": ("#ec835a", "D", "계좌 조회 실패"),
+    "rejected": ("#d03b3b", "R", "주문 거부"),
+    "error": ("#d03b3b", "E", "스텝 예외"),
+    "missing": ("#d03b3b", "✕", "기록 없음"),
+    "pending": ("#e1e0d9", "", "오늘(미판정)"),
+}
+# 단계 → (색, 표기). 순서 고정 — 결정이 실제로 지나는 순서다.
+STAGE_STYLE = {
+    "memory": ("#2a78d6", "교훈 블렌딩"),
+    "debate": ("#eb6834", "토론 재결정"),
+    "risk": ("#1baf7a", "리스크 적용"),
+}
+CHANNEL_LABELS = {
+    "bars": "봉(종목 수)", "features": "feature(종목 수)", "news": "뉴스 수집",
+    "disclosures": "공시 수집", "news_injected": "뉴스 → 프롬프트",
+    "disclosures_injected": "공시 → 프롬프트", "fundamentals": "재무(종목 수)",
+    "index_valuation": "지수 밸류에이션", "etf_premium": "ETF 괴리(종목 수)",
+    "alpha_signals": "알파 신호", "budget": "계좌 예산", "lessons": "교훈(회수)",
+    "upcoming_events": "예정 일정",
+}
+
+
+@st.cache_data(ttl=60)
+def load_health(market: str, today_iso: str) -> dict:
+    """한 시장의 건강 지표 묶음. 로그를 여러 번 훑으므로 60초 캐시한다."""
+    today = date.fromisoformat(today_iso)
+    history = read_recent_decisions(LOG_DIR, market, limit=10**6)
+    recent = history[-HEALTH_WINDOW:]
+    ledger = run_ledger(LOG_DIR, market, today, days=HEALTH_LEDGER_DAYS)
+    risk_rows = risk_interventions(recent)
+    grid = channel_grid(LOG_DIR, OBS_DIR, market, days=HEALTH_GRID_RUNS)
+    spans = revision_spans(history)
+    citations = citation_check(recent)
+    dead = dead_channels(grid, market)
+    store: dict[str, int] = {}
+    for mem in promoted_memories(ROOT / "data" / "memory.sqlite", market):
+        store[mem["status"]] = store.get(mem["status"], 0) + 1
+    return {
+        "score": scorecard(ledger, recent, risk_rows, grid, dead, citations),
+        "moves": stage_moves(recent),
+        "ladder": memory_ladder(recent),
+        "store": store,
+        "ledger": ledger,
+        "run": run_summary(ledger, today),
+        "risk_rows": risk_rows,
+        "risk": risk_summary(risk_rows),
+        "mdd": recent[-1].get("mdd") if recent else None,
+        "chain": execution_chain(LOG_DIR, market)[-HEALTH_WINDOW:],
+        "stall": load_stall(STATE, market),
+        "citations": citations,
+        "spans": spans,
+        "marks": change_markers(spans),
+        "grid": grid,
+        "dead": dead,
+        "fresh": freshness(STATE, OBS_DIR, LOG_DIR, market, today),
+    }
+
+
+def run_strip(rows: list[dict]) -> None:
+    """런 원장 띠 — 하루 한 칸(시장 × 날짜), 상태를 색 + 글리프로."""
+    df = pd.DataFrame(rows)
+    df["label"] = df["status"].map(lambda s: RUN_STATUS_STYLE[s][2])
+    df["glyph"] = df["status"].map(lambda s: RUN_STATUS_STYLE[s][1])
+    shown = [s for s in RUN_STATUS_STYLE if s in set(df["status"])]
+    base = alt.Chart(df).encode(
+        x=alt.X(
+            "day:O",
+            title=None,
+            scale=alt.Scale(paddingInner=0.12),
+            axis=alt.Axis(labelExpr="slice(datum.value, 5)", labelAngle=-90),
+        ),
+        y=alt.Y(
+            "market:N", title=None, sort=list(MARKETS),
+            scale=alt.Scale(paddingInner=0.2), axis=alt.Axis(labelOverlap=False),
+        ),
+    )
+    cells = base.mark_rect(cornerRadius=2).encode(
+        color=alt.Color(
+            "label:N",
+            scale=alt.Scale(
+                domain=[RUN_STATUS_STYLE[s][2] for s in shown],
+                range=[RUN_STATUS_STYLE[s][0] for s in shown],
+            ),
+            legend=alt.Legend(title=None, orient="bottom"),
+        ),
+        tooltip=[
+            alt.Tooltip("market:N", title="시장"), alt.Tooltip("day:O", title="날짜(UTC)"),
+            alt.Tooltip("label:N", title="상태"), alt.Tooltip("detail:N", title="상세"),
+        ],
+    )
+    glyphs = base.mark_text(fontWeight="bold").encode(
+        text="glyph:N",
+        color=alt.condition(
+            "datum.status == 'stalled' || datum.status == 'late'",
+            alt.value("#0b0b0b"), alt.value("#ffffff"),
+        ),
+    )
+    # 높이는 축 라벨·범례를 포함한 전체다 — 세 줄이 눌리지 않게 넉넉히 잡는다.
+    st.altair_chart((cells + glyphs).properties(height=240), width="stretch")
+
+
+def marks_within(marks: list[dict], df: pd.DataFrame) -> list[dict]:
+    """차트의 날짜 범위 안에 드는 변경 표식만."""
+    return [m for m in marks if df["day"].min() <= m["day"] <= df["day"].max()]
+
+
+def mark_rules(inside: list[dict]) -> alt.Chart:
+    """변경 표식 층 — 세로 점선 + 툴팁."""
+    return alt.Chart(pd.DataFrame(inside)).mark_rule(color=MUTED_INK, strokeDash=[4, 3]).encode(
+        x="day:T",
+        tooltip=[alt.Tooltip("day:T", title="변경일"), alt.Tooltip("label:N", title="바뀐 것")],
+    )
+
+
+def stage_chart(rows: list[dict], marks: list[dict]) -> None:
+    """단계별 이동량 — 결정마다 교훈·토론·리스크가 배분을 옮긴 크기를 쌓아 그린다."""
+    long = [
+        {"day": r["day"], "stage": STAGE_STYLE[k][1], "order": i, "l1": r[k]}
+        for r in rows for i, k in enumerate(STAGE_STYLE) if r[k]
+    ]
+    if not long:
+        st.caption("단계별 이동: 이 창에서 배분을 옮긴 단계가 없다.")
+        return
+    df = pd.DataFrame(long)
+    bars = alt.Chart(df).mark_bar().encode(
+        x=alt.X("day:T", title=None),
+        y=alt.Y("l1:Q", title="단계별 이동 L1"),
+        color=alt.Color(
+            "stage:N",
+            scale=alt.Scale(
+                domain=[v[1] for v in STAGE_STYLE.values()],
+                range=[v[0] for v in STAGE_STYLE.values()],
+            ),
+            legend=alt.Legend(title=None, orient="bottom"),
+        ),
+        order=alt.Order("order:Q"),
+        tooltip=[
+            alt.Tooltip("day:T", title="날짜"), alt.Tooltip("stage:N", title="단계"),
+            alt.Tooltip("l1:Q", title="이동 L1", format=".3f"),
+        ],
+    )
+    inside = marks_within(marks, df)
+    layers = [bars, mark_rules(inside)] if inside else [bars]
+    st.altair_chart(alt.layer(*layers).properties(height=260), width="stretch")
+
+
+def marked_chart(
+    rows: list[dict], field: str, title: str, marks: list[dict],
+    kind: str = "bar", ref: float | None = None,
+) -> None:
+    """한 계열 시계열 + 변경 표식(세로 점선). 판본·설정·서킷 경계를 같은 축에 얹는다."""
+    df = pd.DataFrame([r for r in rows if r.get(field) is not None])
+    if df.empty:
+        st.caption(f"{title}: 기록 없음")
+        return
+    base = alt.Chart(df).encode(
+        x=alt.X("day:T", title=None),
+        y=alt.Y(f"{field}:Q", title=title),
+        tooltip=[alt.Tooltip("day:T", title="날짜"), alt.Tooltip(f"{field}:Q", title=title, format=".3f")],
+    )
+    layers = [
+        base.mark_bar(color=SERIES_COLOR, cornerRadiusEnd=3) if kind == "bar"
+        else base.mark_line(color=SERIES_COLOR, strokeWidth=2, point=alt.OverlayMarkDef(size=40))
+    ]
+    inside = marks_within(marks, df)
+    if inside:
+        layers.append(mark_rules(inside))
+    if ref is not None:
+        layers.append(
+            alt.Chart(pd.DataFrame({"ref": [ref]})).mark_rule(color=MUTED_INK, strokeWidth=1).encode(y="ref:Q")
+        )
+    st.altair_chart(alt.layer(*layers).properties(height=220), width="stretch")
+    if inside:
+        st.caption("변경 표식(점선): " + " · ".join(f"{m['day']} {m['label']}" for m in inside))
+
+
 @st.fragment(run_every=10)
 def running_banner() -> None:
     """실행 중인 잡을 최상단에 계속 표시 — 탭과 무관하게 보이도록 tabs 앞에 둔다.
@@ -210,9 +421,12 @@ def running_banner() -> None:
 
 running_banner()
 
-tab_dash, tab_obs, tab_mem, tab_chat, tab_ops = st.tabs(
-    ["📊 대시보드", "🔭 관측", "📓 메모리", "💬 챗", "🔧 운영"]
+tab_dash, tab_health, tab_obs, tab_mem, tab_chat, tab_ops = st.tabs(
+    ["📊 대시보드", "🩺 건강", "🔭 관측", "📓 메모리", "💬 챗", "🔧 운영"]
 )
+# 런 원장의 날짜 축은 기록 시각(UTC)의 날짜다 — '오늘'도 같은 축으로 잡아야 아직 돌 차례가
+# 아닌 런을 누락으로 세지 않는다.
+UTC_TODAY = datetime.now(timezone.utc).date()
 
 
 # ── 대시보드 ──
@@ -226,7 +440,8 @@ with tab_dash:
     # ── 안전·헬스 배너 (자율 운용 최상단 요소) ──
     if kill_switch_active(STATE):
         st.error("🛑 KILL_SWITCH 활성 — 실주문 정지 중. 해제: `rm data/state/KILL_SWITCH`")
-    mdd_circuit = RiskLimits().mdd_circuit
+    # 서킷 임계는 시장마다 다르다 — 화면을 그릴 때마다 운용 중인 값을 읽는다.
+    banner_limits = load_limits(ROOT, TRADABLE).limits
     today = date.today()
     health_cols = st.columns(len(MARKETS))
     for col, market in zip(health_cols, MARKETS):
@@ -237,17 +452,27 @@ with tab_dash:
                 continue
             # 경고는 잡이 마지막으로 돈 날 기준 — 주말에는 돌아도 결정을 내리지 않는다
             stale = h["days_since_run"] is not None and h["days_since_run"] > STALE_DAYS
+            mdd_circuit = banner_limits[market].mdd_circuit
             tripped = h["mdd"] is not None and h["mdd"] >= mdd_circuit
             age = f"{h['days_stale']}일 전" if h["days_stale"] is not None else h["last_day"]
             line = f"**{market}** · 최근 결정 {age}"
             if h["skipped_since"]:
                 line += " · 주말 스킵"
             if h["mdd"]:
-                line += f" · MDD {h['mdd']:.1%}"
+                line += f" · MDD {h['mdd']:.1%} / 한도 {mdd_circuit:.0%}"
+            # 마지막으로 판정된 런 — 결정이 최근이어도 그 런이 실패·정지로 끝났을 수 있다.
+            last_run = load_health(market, UTC_TODAY.isoformat())["run"]["last"]
+            run_state = last_run["status"] if last_run else None
+            if run_state in RUN_BAD or run_state in RUN_WARN:
+                line += f" · 마지막 런 {RUN_STATUS_STYLE[run_state][2]}({last_run['day']})"
             if tripped:
                 st.error(line + " · 🛑 서킷")
+            elif run_state in RUN_BAD:
+                st.error(line + " · ⚠️ 런 실패")
             elif stale:
                 st.warning(line + " · ⏳ stale")
+            elif run_state in RUN_WARN:
+                st.warning(line)
             else:
                 st.success(line)
             if h["violation_days"]:
@@ -483,6 +708,346 @@ with tab_dash:
 
     st.subheader("오늘 브리핑")
     st.markdown(build_briefing(ROOT))
+
+
+# ── 건강 (성과와 별개로 시스템이 제대로 돌았는가 · 읽기 전용) ──
+
+with tab_health:
+    st.caption(
+        "성과가 아니라 **시스템 자체**를 본다 — 런이 돌았는가, 리스크 엔진이 배분을 얼마나 "
+        "바꿨는가, 목표가 계좌에 닿았는가, 입력이 비지 않았는가, 근거가 실재하는가. 하루 한 번 "
+        "결정하는 시스템이라 비율·백분위 대신 **있어야 할 것이 있는지**를 센다. 전부 이미 남은 "
+        "로그·상태 파일에서 계산하며(60초 캐시), 날짜는 기록 시각(UTC) 기준이다."
+    )
+    health = {m: load_health(m, UTC_TODAY.isoformat()) for m in MARKETS}
+
+    st.subheader("점검표")
+    st.caption(
+        "규칙만으로 판정하는 일곱 점검 — 칸은 `위반 / 판정 대상`, 위반이 있으면 가장 최근 날짜. "
+        "비율이 아니라 건수다: 하루 한 건짜리 표본에서 비율은 한 번의 실패로 크게 흔들린다. "
+        f"창은 점검마다 다르다(런 {HEALTH_LEDGER_DAYS}일 · 채널 {HEALTH_GRID_RUNS}결정 · "
+        f"나머지 {HEALTH_WINDOW}결정). 서킷이 열린 날은 원안의 한도 점검에서 뺀다."
+    )
+
+    def score_cell(row: dict) -> str:
+        if not row["total"]:
+            return "— 대상 없음"
+        if not row["bad"]:
+            return f"✓ 0 / {row['total']}"
+        return f"⚠ {row['bad']} / {row['total']} · 최근 {row['last_bad'][5:]}"
+
+    checks = [r["check"] for r in health[MARKETS[0]]["score"]]
+    st.dataframe(
+        pd.DataFrame(
+            {m: [score_cell(r) for r in health[m]["score"]] for m in MARKETS}, index=checks
+        )
+    )
+
+    st.subheader(f"런 원장 — 최근 {HEALTH_LEDGER_DAYS}일")
+    st.caption(
+        "하루 한 칸. 주말·휴장일에도 잡은 돌아서 건너뛴 사실을 남기므로, **한 줄도 없는 날은 "
+        "잡이 돌지 않은 날**이다. 집행 정지는 결정은 수리됐으나 주문을 한 건도 못 낸 날(예산·"
+        "거래단위), 지연 실행은 그날 몫의 결정이 날짜를 넘겨 뒤늦게 난 날. 오늘 칸은 그 날짜(UTC)가 "
+        "끝나기 전까지 판정하지 않는다."
+    )
+    strip = [{"market": m, **r} for m in MARKETS for r in health[m]["ledger"]]
+    if strip:
+        run_strip(strip)
+        run_table = []
+        for m in MARKETS:
+            run, counts = health[m]["run"], health[m]["run"]["counts"]
+            last = run["last"]
+            run_table.append({
+                "시장": m,
+                "마지막 런": f"{last['day']} {RUN_STATUS_STYLE[last['status']][2]}" if last else "—",
+                "마지막 정상 런": run["last_ok_day"] or f"{HEALTH_LEDGER_DAYS}일 내 없음",
+                "정상": counts.get("ok", 0),
+                "집행 정지": counts.get("stalled", 0),
+                "지연 실행": counts.get("late", 0),
+                "휴장": counts.get("closed", 0),
+                "실패": sum(counts.get(s, 0) for s in ("degraded", "rejected", "error")),
+                "기록 없음": counts.get("missing", 0),
+            })
+        st.dataframe(pd.DataFrame(run_table), hide_index=True)
+        trouble = [
+            {"날짜": r["day"], "시장": r["market"], "상태": RUN_STATUS_STYLE[r["status"]][2],
+             "상세": r["detail"]}
+            for r in strip if r["status"] in RUN_BAD or r["status"] in RUN_WARN
+        ]
+        if trouble:
+            with st.expander(f"정상·휴장이 아닌 날 {len(trouble)}건"):
+                st.dataframe(
+                    pd.DataFrame(sorted(trouble, key=lambda r: r["날짜"], reverse=True)),
+                    hide_index=True,
+                )
+    else:
+        st.caption("런 기록 없음.")
+
+    st.divider()
+    st.subheader(f"리스크 엔진 개입 — 최근 {HEALTH_WINDOW}결정")
+    st.caption(
+        "LLM 원안과 리스크 엔진을 지난 최종 배분의 거리. L1 은 비중 절대차의 합이다(나누지 "
+        "않음 — 전액을 옮기면 2.0). 개입이 잦다는 것은 LLM 이 한도 밖을 자주 낸다는 뜻이고, "
+        "서킷이 열린 날은 엔진이 배분을 대신 정한 날이다."
+    )
+    limits_now = load_limits(ROOT, TRADABLE).limits
+    risk_table = []
+    for m in MARKETS:
+        rs, mdd, limit = health[m]["risk"], health[m]["mdd"], limits_now[m].mdd_circuit
+        risk_table.append({
+            "시장": m,
+            "원안 기록 결정": rs["n"],
+            "개입 일수": rs["n_changed"],
+            "평균 L1": cell(rs["mean_l1"], ".3f"),
+            "최대 L1": cell(rs["max_l1"], ".3f"),
+            "사유별 일수": ", ".join(f"{k} {v}" for k, v in sorted(rs["by_rule"].items())) or "—",
+            "MDD(최근 결정)": cell(mdd, ".1%"),
+            "서킷 한도": f"{limit:.0%}",
+            "한도까지": cell(limit - mdd if mdd is not None else None, ".1%"),
+        })
+    st.dataframe(pd.DataFrame(risk_table), hide_index=True)
+
+    st.subheader(f"목표 → 체결 — 최근 {HEALTH_WINDOW}런")
+    st.caption(
+        "최종 목표 배분과 체결 뒤 실보유의 거리(같은 L1). 소액 계좌에서는 1주 단위 때문에 "
+        f"생기는 괴리가 대부분이라 사유를 함께 본다. {DRIFT_NOTE} 는 참고 눈금이지 판정 임계가 아니다."
+    )
+    chain_table = []
+    for m in MARKETS:
+        chain = health[m]["chain"]
+        drifts = [r["drift_l1"] for r in chain if r["drift_l1"] is not None]
+        reasons: dict[str, int] = {}
+        for r in chain:
+            for reason in r["dropped"].values():
+                reasons[reason] = reasons.get(reason, 0) + 1
+        stall = health[m]["stall"] or {}
+        chain_table.append({
+            "시장": m,
+            "대사 기록 런": len(drifts),
+            "평균 괴리": cell(sum(drifts) / len(drifts) if drifts else None, ".3f"),
+            f"{DRIFT_NOTE} 초과 런": sum(1 for d in drifts if d > DRIFT_NOTE),
+            "집행 정지 런": sum(1 for r in chain if r["stall"]),
+            "지금 정지": f"{stall['reason']} ({stall.get('since')}~)" if stall.get("reason") else "아님",
+            "목표 미달 사유(종목·런)": ", ".join(f"{k} {v}" for k, v in sorted(reasons.items())) or "—",
+        })
+    st.dataframe(pd.DataFrame(chain_table), hide_index=True)
+
+    st.subheader(f"인용 실재 — 최근 {HEALTH_WINDOW}결정")
+    st.caption(
+        "근거로 든 신호·교훈 ID 가 그날 실제로 제공된 목록 안에 있는가. 인용률은 **인용할 "
+        "재료가 있던 날** 기준이다 — 신호 라이브러리가 없는 시장은 인용할 것이 없어서 0 이다."
+    )
+    cite_table = []
+    for m in MARKETS:
+        tally: dict[str, int] = {}
+        for r in health[m]["citations"]:
+            tally[r["status"]] = tally.get(r["status"], 0) + 1
+        with_material = sum(tally.get(s, 0) for s in ("cited", "unknown", "uncited"))
+        cite_table.append({
+            "시장": m,
+            "인용 정상": tally.get("cited", 0),
+            "목록 밖 인용": tally.get("unknown", 0),
+            "재료 있으나 미인용": tally.get("uncited", 0),
+            "재료 없음": tally.get("no_material", 0),
+            "대조 불가(기록 전)": tally.get("unrecorded", 0),
+            "인용률(재료 있던 날)": cell(
+                tally.get("cited", 0) / with_material if with_material else None, ".0%"
+            ),
+        })
+    st.dataframe(pd.DataFrame(cite_table), hide_index=True)
+    outside = [
+        f"{m} {r['day']}: {', '.join(r['outside'])}"
+        for m in MARKETS for r in health[m]["citations"] if r["outside"]
+    ]
+    if outside:
+        st.warning("제공 목록 밖 ID 를 인용한 결정 — " + " / ".join(outside))
+
+    st.subheader(f"교훈 사다리 — 최근 {HEALTH_WINDOW}결정")
+    st.caption(
+        "교훈이 결정에 닿는 단계별 결정 수: 회수됨 → 배분에 반영됨 → 근거로 인용됨. 어느 "
+        "단에서 끊기는지를 본다 — 회수가 0 이면 쓸 교훈이 없는 것이고, 회수는 되는데 반영이 "
+        "0 이면 신뢰도 게이트가 막은 것이다. **개입의 빈도이지 효과가 아니다** — 교훈이 성과를 "
+        "개선했는지는 여기서 판정하지 않는다."
+    )
+    st.dataframe(
+        pd.DataFrame([
+            {
+                "시장": m,
+                "결정 수": health[m]["ladder"]["n"],
+                "교훈 회수": health[m]["ladder"]["retrieved"],
+                "배분 반영": health[m]["ladder"]["applied"],
+                "교훈 인용": health[m]["ladder"]["cited"],
+                "지금 active": health[m]["store"].get("active", 0),
+                "probation": health[m]["store"].get("probation", 0),
+                "retired": health[m]["store"].get("retired", 0),
+            }
+            for m in MARKETS
+        ]),
+        hide_index=True,
+    )
+
+    st.divider()
+    focus = st.radio("시장 상세", MARKETS, horizontal=True, key="health_market")
+    detail = health[focus]
+
+    hc = st.columns(2)
+    with hc[0]:
+        marked_chart(detail["risk_rows"], "l1", "리스크 개입 L1", detail["marks"], kind="bar")
+    with hc[1]:
+        marked_chart(
+            detail["chain"], "drift_l1", "체결 괴리 L1", detail["marks"], kind="line", ref=DRIFT_NOTE
+        )
+
+    sc = st.columns(2)
+    with sc[0]:
+        stage_chart(detail["moves"], detail["marks"])
+        debated = sum(1 for r in detail["moves"] if r["debated"])
+        st.caption(
+            f"토론 소집 {debated} / {len(detail['moves'])}결정. 쌓인 높이는 세 단계가 각각 옮긴 "
+            "크기의 합이지 순이동이 아니다(서로 되돌릴 수 있다)."
+        )
+    with sc[1]:
+        marked_chart(detail["moves"], "tokens_in", "결정당 입력 토큰", detail["marks"], kind="line")
+        st.caption(
+            "한 결정에 든 입력 토큰 합(1차 + 교훈 재결정 + 토론 재결정). 계단식 변화는 "
+            "프롬프트에 들어가는 것이 달라졌다는 뜻이다."
+        )
+
+    latest = next((r for r in reversed(detail["chain"]) if r["intended"] and r["executed"]), None)
+    if latest:
+        st.caption(f"가장 최근 대사 — {latest['day']} (괴리 L1 {latest['drift_l1']:.3f})")
+        symbols = sorted(set(latest["intended"]) | set(latest["executed"]))
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "종목": display_name(s),
+                    "목표": f"{latest['intended'].get(s, 0.0):.1%}",
+                    "체결 후": f"{latest['executed'].get(s, 0.0):.1%}",
+                    "차이": f"{latest['executed'].get(s, 0.0) - latest['intended'].get(s, 0.0):+.1%}",
+                    "사유": latest["dropped"].get(s, ""),
+                }
+                for s in symbols
+            ]),
+            hide_index=True,
+        )
+
+    st.subheader(f"입력 채널 도달 — 최근 {HEALTH_GRID_RUNS}결정")
+    st.caption(
+        "결정마다 각 채널이 몇 건 들어갔는가. `∅` = 0건, `·` = 그 결정에는 기록이 없다. "
+        "**수집과 프롬프트 주입은 다른 칸이다** — 프롬프트는 건수 상한에서 자르므로 수집됐다고 "
+        "실린 것이 아니다. `⚠` 는 매 런 채워져 있어야 하는 채널이 빈 칸."
+    )
+    if detail["grid"]:
+        dead = {(d["day"], d["channel"]) for d in detail["dead"]}
+
+        def grid_cell(row: dict, channel: str) -> str:
+            value = row.get(channel)
+            if value is None:
+                return "·"
+            if value == 0:
+                return "∅ ⚠" if (row["day"], channel) in dead else "∅"
+            return str(value)
+
+        st.dataframe(
+            pd.DataFrame(
+                {row["day"][5:]: [grid_cell(row, ch) for ch in CHANNELS] for row in detail["grid"]},
+                index=[CHANNEL_LABELS[ch] for ch in CHANNELS],
+            )
+        )
+        if detail["dead"]:
+            st.warning(
+                "채워져 있어야 하는데 빈 채널 — "
+                + ", ".join(f"{d['day']} {CHANNEL_LABELS[d['channel']]}" for d in detail["dead"])
+            )
+        if all(row.get("news_injected") is None for row in detail["grid"]):
+            st.caption(
+                "뉴스·공시의 프롬프트 주입 건수는 아직 기록되지 않는다 — 수집 건수로 대신 "
+                "채우지 않고 비워 둔다."
+            )
+    else:
+        st.caption("결정 기록 없음.")
+
+    fc = st.columns(2)
+    with fc[0]:
+        st.subheader("채널 신선도")
+        st.caption(
+            f"최신 관측이 며칠 묵었는가. 매 런 갱신되는 채널만 판정한다({focus}: "
+            f"{FRESH_MAX_AGE[focus]}일 초과 시 표시) — 나머지는 주기가 달라 나이만 적는다."
+        )
+        if detail["fresh"]:
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "채널": r["channel"],
+                        "기준일": r["asof"] or "—",
+                        "나이(일)": cell(r["age_days"], "d"),
+                        "판정": (
+                            "—" if not r["daily"] or r["age_days"] is None
+                            else "⚠ 묵음" if r["age_days"] > FRESH_MAX_AGE[focus] else "정상"
+                        ),
+                    }
+                    for r in detail["fresh"]
+                ]),
+                hide_index=True,
+            )
+        else:
+            st.caption("상태 파일 없음.")
+    with fc[1]:
+        st.subheader("판본·모델·설정 구간")
+        st.caption(
+            "결정에 새겨진 프롬프트 판본·설정 판본·모델이 유지된 구간, 그리고 서킷이 열렸거나 "
+            "교훈이 실린 구간. 구간이 다르면 같은 조건의 표본이 아니다 — 위 차트의 점선이 이 경계다."
+        )
+        if detail["spans"]:
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "항목": s["field"],
+                        "값": "기록 전" if s["value"] is None else str(s["value"]),
+                        "시작": s["first_day"],
+                        "끝": s["last_day"],
+                        "결정 수": s["n"],
+                    }
+                    for s in detail["spans"]
+                ]),
+                hide_index=True,
+            )
+        else:
+            st.caption("결정 기록 없음.")
+
+    st.divider()
+    st.subheader("오프라인 평가 실행 (챗 경로)")
+    runs = eval_runs(ROOT / "data" / "eval" / "chat" / "runs")
+    if runs:
+        newest = runs[-1]["started_at"][:10]
+        idle = (UTC_TODAY - date.fromisoformat(newest)).days if newest else None
+        st.caption(
+            "동결 스냅샷 위에서 돌린 챗 품질 평가의 실행 기록 — 통과 수·게이트 위반·범주별 "
+            f"통과율. 마지막 실행 {newest}"
+            + (f"({idle}일 전)" if idle is not None else "")
+            + ". 그 뒤 프롬프트·모델이 바뀌었다면 아래 숫자는 지금의 시스템을 말하지 않는다. "
+            "**일간 결정 경로에는 이런 평가셋이 없다.**"
+        )
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "시작(UTC)": r["started_at"],
+                    "호출": r["calls"],
+                    "통과": r["passed"],
+                    "게이트 위반": ", ".join(f"{k} {v}" for k, v in sorted(r["gates"].items())) or "—",
+                    "지연 p50(s)": cell(r["latency_p50_s"], ".2f"),
+                    "범주별 통과율": " ".join(
+                        f"{k} {v:.0%}" for k, v in sorted(r["categories"].items()) if v is not None
+                    ),
+                    "프롬프트 판본": r["prompt_rev"] or "—",
+                    "미커밋 상태": "예" if r["git_dirty"] else "아니오",
+                }
+                for r in reversed(runs)
+            ]),
+            hide_index=True,
+        )
+    else:
+        st.caption("평가 실행 기록 없음.")
 
 
 # ── 관측 (에이전트가 그때 본 것 + 그 관측이 낳은 결정) ──
@@ -921,6 +1486,21 @@ with tab_ops:
         if usage["by_model"]:
             st.caption("모델별 누적 토큰 (in+out 내림차순)")
             st.dataframe(pd.DataFrame(usage["by_model"]), hide_index=True)
+        breakdown = usage_breakdown(LOG_DIR)
+        bc = st.columns(2)
+        for col, title, key, rows in (
+            (bc[0], "목적별 누적 (호출 수·토큰)", "목적", breakdown["by_purpose"]),
+            (bc[1], "시장별 누적 (호출 수·토큰)", "시장", breakdown["by_market"]),
+        ):
+            with col:
+                st.caption(title)
+                st.dataframe(
+                    pd.DataFrame([
+                        {key: r["key"], "호출": r["calls"], "in": r["in"], "out": r["out"]}
+                        for r in rows
+                    ]),
+                    hide_index=True,
+                )
     else:
         st.caption("아직 usage 로그 없음 — 다음 LLM 호출부터 `data/logs/USAGE/` 에 쌓인다.")
 

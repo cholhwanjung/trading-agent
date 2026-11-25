@@ -12,6 +12,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from adapters.base import DISCLOSURE_SOURCES, is_market_closed_error, is_market_weekend
 from eval.meta import load_arm_history
 from harness.jsonlog import iter_events
 
@@ -66,6 +67,11 @@ def read_recent_decisions(log_dir: Path, market: str, limit: int = 30) -> list[d
             # 정책 텍스트 판본 — 프롬프트·플레이북 개정의 전/후를 로그에서 가른다.
             # None = 판본 기록이 시작되기 전의 결정.
             "prompt_rev": d.get("prompt_rev"),
+            # 건강 패널용 — 결정 메타 원본. 필드가 시기별로 추가돼 왔으므로 '키가 없다'
+            # (그때는 기록하지 않았다)와 '값이 비었다'를 소비자가 직접 가른다.
+            "decision": d,
+            "run_day": str(rec.get("ts", ""))[:10],
+            "n_bars": rec.get("n_bars") or {},
         }
     return [rows[k] for k in sorted(rows)][-limit:]
 
@@ -765,3 +771,531 @@ def counterfactual_ledger(db_path: Path, market: str, limit: int = 60) -> list[d
         for e in entries
     ]
     return list(reversed(rows))[:limit]
+
+
+# ── 에이전트 건강 (성과와 별개로 '시스템이 제대로 돌았는가') ──
+#
+# 하루 한 번 결정하는 시스템에서는 오류'율'이 성립하지 않는다(표본이 하루 1건). 그래서
+# 여기 로더들은 비율이 아니라 **기대한 것이 실제로 거기 있는가**를 센다 — 그날 런이
+# 있었는가, 리스크 엔진이 배분을 얼마나 바꿨는가, 목표가 계좌에 닿았는가, 입력 채널이
+# 비지 않았는가. 전부 이미 남아 있는 로그·상태 파일에서 계산한다.
+
+RUN_BAD = frozenset({"error", "rejected", "degraded", "missing"})
+RUN_WARN = frozenset({"stalled", "late"})
+
+
+def _run_status(market: str, events: dict[str, list[dict]] | None, is_today: bool) -> dict:
+    """하루치 이벤트 → 런 상태. 일간 스텝이 표준출력에만 남기는 분류와 같은 규칙이다.
+
+    브로커 오류 원문은 싣지 않는다 — 요청 주소가 붙어 계좌 식별자가 섞여 나온다.
+    """
+    if not events:
+        # 오늘은 아직 실행 시각 전일 수 있다. 지난 날에 한 줄도 없으면 잡이 돌지 않은 것 —
+        # 주말·휴장일에도 잡은 돌아서 건너뛴 사실을 남긴다.
+        return {"status": "pending" if is_today else "missing", "detail": ""}
+    steps = events.get("daily_step")
+    if steps:
+        step = steps[-1]
+        if step.get("accepted"):
+            stalls = events.get("execution_stall")
+            if stalls:
+                return {"status": "stalled", "detail": str(stalls[-1].get("reason") or "")}
+            return {"status": "ok", "detail": ""}
+        degraded = step.get("execution_mode") == "degraded"
+        try:
+            ran_at = datetime.fromisoformat(str(step.get("ts")))
+        except ValueError:
+            ran_at = None
+        weekend = ran_at is not None and not degraded and is_market_weekend(market, ran_at)
+        if is_market_closed_error(step.get("error")) or weekend:
+            return {"status": "closed", "detail": "주문 거부(장 마감)"}
+        return {"status": "degraded" if degraded else "rejected", "detail": ""}
+    if events.get("daily_skip"):
+        return {"status": "closed", "detail": str(events["daily_skip"][-1].get("reason") or "")}
+    errors = events.get("daily_step_error") or []
+    return {"status": "error", "detail": str(errors[-1].get("error_type") or "") if errors else ""}
+
+
+def run_ledger(log_dir: Path, market: str, today: date, days: int = 30) -> list[dict]:
+    """최근 days 일의 일간 런 원장 — 하루 한 칸 {day, status, detail}, 오래된 날부터.
+
+    status: ok(주문까지 정상) · stalled(결정은 수리됐으나 한 건도 못 냄) · closed(주말·
+    휴장) · degraded(계좌 조회 실패로 실주문 생략) · rejected(장은 열렸는데 거부) ·
+    error(스텝이 예외로 끝남) · late(그날 몫의 결정이 날짜를 넘겨 실행됨) · missing(그날
+    기록이 한 줄도 없음) · pending(오늘, 아직). 날짜는 기록 시각(UTC)의 날짜 — 로그
+    파일명과 같은 축이다.
+
+    late 와 missing 을 가르는 이유: 기기가 자다 깨면 스케줄러가 밀린 런을 뒤늦게 돌린다.
+    결정은 났으므로 누락이 아니지만, 예정 시각의 시세가 아니라 몇 시간 뒤 시세로 집행됐다.
+    """
+    by_day: dict[str, dict[str, list[dict]]] = {}
+    for event in ("daily_step", "daily_skip", "daily_step_error", "execution_stall"):
+        for rec in iter_events(log_dir, market, event):
+            by_day.setdefault(str(rec.get("ts", ""))[:10], {}).setdefault(event, []).append(rec)
+    if not by_day:
+        return []
+    late: dict[str, str] = {}  # 결정 대상일 → 실제로 기록된 시각(날짜를 넘긴 것만)
+    for steps in (events.get("daily_step", []) for events in by_day.values()):
+        for step in steps:
+            asof, ts = str(step.get("asof_day", ""))[:10], str(step.get("ts", ""))
+            if asof and ts[:10] > asof:
+                late[asof] = ts[:16].replace("T", " ")
+    first = min(by_day)  # 기록이 시작되기 전의 날은 누락이 아니다
+    rows = []
+    for back in range(days - 1, -1, -1):
+        day = (today - timedelta(days=back)).isoformat()
+        if day < first:
+            continue
+        if day not in by_day and day in late:
+            rows.append({"day": day, "status": "late", "detail": f"{late[day]} UTC 에 실행"})
+        else:
+            rows.append({"day": day, **_run_status(market, by_day.get(day), is_today=back == 0)})
+    return rows
+
+
+def run_summary(ledger: list[dict], today: date) -> dict:
+    """런 원장 요약 — 마지막으로 판정된 런, 마지막 정상(ok) 런의 나이, 상태별 일수."""
+    judged = [r for r in ledger if r["status"] != "pending"]
+    last_ok = next((r["day"] for r in reversed(judged) if r["status"] == "ok"), None)
+    counts: dict[str, int] = {}
+    for r in judged:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {
+        "last": judged[-1] if judged else None,
+        "last_ok_day": last_ok,
+        "days_since_ok": (today - date.fromisoformat(last_ok)).days if last_ok else None,
+        "counts": counts,
+    }
+
+
+def _l1(a: dict[str, float], b: dict[str, float]) -> float:
+    """두 배분의 비중 절대차 합(나누지 않은 L1). 체결 괴리 로그와 같은 정의."""
+    return sum(abs(a.get(k, 0.0) - b.get(k, 0.0)) for k in set(a) | set(b))
+
+
+def risk_interventions(decisions: list[dict]) -> list[dict]:
+    """결정별 리스크 엔진 개입 — LLM 원안(weights_pre_risk) 대비 최종 배분의 거리와 사유.
+
+    l1 이 None 이면 그 결정에는 원안이 기록되지 않았다(초기 로그). rules 는 위반
+    문자열의 첫 토큰(max_weight·min_cash·turnover·mdd_circuit·forbidden_*).
+    """
+    rows = []
+    for r in decisions:
+        pre = r.get("weights_pre_risk")
+        rows.append({
+            "day": r["day"],
+            "l1": round(_l1(pre, r["weights"]), 6) if pre else None,
+            "rules": sorted({v.split()[0] for v in r["risk_violations"] if v}),
+            "circuit_open": bool(r["decision"].get("circuit_open")),
+            "mdd": r.get("mdd"),
+        })
+    return rows
+
+
+def risk_summary(rows: list[dict]) -> dict:
+    """개입 요약 — 원안이 기록된 결정 중 배분이 바뀐 비율·크기·사유별 일수."""
+    measured = [r for r in rows if r["l1"] is not None]
+    changed = [r for r in measured if r["l1"] > 1e-9]
+    by_rule: dict[str, int] = {}
+    for r in rows:
+        for rule in r["rules"]:
+            by_rule[rule] = by_rule.get(rule, 0) + 1
+    return {
+        "n": len(measured),
+        "n_changed": len(changed),
+        "mean_l1": sum(r["l1"] for r in changed) / len(changed) if changed else None,
+        "max_l1": max((r["l1"] for r in changed), default=None),
+        "by_rule": by_rule,
+    }
+
+
+def execution_chain(log_dir: Path, market: str) -> list[dict]:
+    """목표 → 체결 대사 — 런 날짜별 {intended, executed, drift_l1, dropped, stall, worst_gap}.
+
+    drift_l1 은 목표와 체결 뒤 실보유의 거리, dropped 는 종목별로 목표에 못 닿은 사유
+    (거래단위·예산 등), stall 은 주문을 한 건도 못 낸 사유, worst_gap 은 결정에 쓴
+    가격과 집행 시점 가격의 최대 괴리(shadow). 해당 기록이 없는 칸은 None.
+    """
+    rows: dict[str, dict] = {}
+
+    def row(rec: dict) -> dict:
+        day = str(rec.get("ts", ""))[:10]
+        return rows.setdefault(day, {
+            "day": day, "intended": None, "executed": None, "drift_l1": None,
+            "dropped": {}, "stall": None, "stall_days": None, "worst_gap": None,
+        })
+
+    for rec in iter_events(log_dir, market, "execution_fidelity"):
+        row(rec).update(
+            intended=rec.get("intended"), executed=rec.get("executed"),
+            drift_l1=rec.get("drift_l1"), dropped=rec.get("dropped") or {},
+        )
+    for rec in iter_events(log_dir, market, "execution_stall"):
+        row(rec).update(stall=rec.get("reason"), stall_days=rec.get("days"))
+    for rec in iter_events(log_dir, market, "execution_gap"):
+        row(rec).update(worst_gap=rec.get("worst_gap"))
+    return [rows[d] for d in sorted(rows)]
+
+
+def load_stall(state_dir: Path, market: str) -> dict | None:
+    """현재 집행 정지 상태 {reason, since}. 정지 중이 아니면 reason 이 None. 파일 없으면 None."""
+    path = state_dir / f"stall_{market}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def citation_check(decisions: list[dict]) -> list[dict]:
+    """결정별 인용 실재 검사 — 근거로 든 ID 가 그날 실제로 제공된 재료 안에 있는가.
+
+    status: cited(전부 제공 목록 안) · unknown(목록 밖 ID 를 인용) · uncited(재료는
+    있었는데 인용 없음) · no_material(인용할 신호·교훈이 없던 날) · unrecorded(제공
+    목록을 기록하기 전의 결정이라 대조 불가). 인용률은 no_material 을 빼고 읽어야 한다 —
+    신호 라이브러리가 없는 시장은 인용할 것이 없어서 0 이지 근거를 안 댄 것이 아니다.
+    """
+    rows = []
+    for r in decisions:
+        d = r["decision"]
+        cited = set(r["cited_signal_ids"]) | set(r["cited_memory_ids"])
+        if "alpha_signals_provided" not in d:
+            status, outside = "unrecorded", set()
+        else:
+            material = set(d.get("alpha_signals_provided") or []) | set(
+                d.get("retrieved_memory_ids") or []
+            )
+            outside = cited - material
+            status = (
+                "unknown" if outside
+                else "cited" if cited
+                else "uncited" if material
+                else "no_material"
+            )
+        rows.append({
+            "day": r["day"], "status": status, "n_cited": len(cited), "outside": sorted(outside),
+        })
+    return rows
+
+
+def revision_spans(decisions: list[dict]) -> list[dict]:
+    """판본·모델·설정과 표본 오염 구간을 연속 구간으로 — {field, value, first_day, last_day, n}.
+
+    prompt_rev·config_rev·model 은 값이 바뀔 때마다 새 구간이다(None = 기록 전).
+    circuit_open·memory_retrieved 는 참인 구간만 낸다 — 서킷이 배분을 대신 정했거나
+    교훈이 결정에 실린 날은 프롬프트·모델이 같아도 다른 조건의 표본이다. 구간 경계가
+    곧 시계열에 얹는 변경 표식이다.
+    """
+    def value(r: dict, field: str):
+        d = r["decision"]
+        if field == "circuit_open":
+            return bool(d.get("circuit_open"))
+        if field == "memory_retrieved":
+            return bool(d.get("retrieved_memory_ids"))
+        return d.get(field)
+
+    spans: list[dict] = []
+    for field in ("prompt_rev", "config_rev", "model", "circuit_open", "memory_retrieved"):
+        current: dict | None = None
+        for r in decisions:
+            v = value(r, field)
+            if current is not None and current["value"] == v:
+                current["last_day"], current["n"] = r["day"], current["n"] + 1
+                continue
+            current = {"field": field, "value": v, "first_day": r["day"], "last_day": r["day"], "n": 1}
+            spans.append(current)
+    flags = ("circuit_open", "memory_retrieved")
+    return [s for s in spans if s["field"] not in flags or s["value"] is True]
+
+
+def change_markers(spans: list[dict]) -> list[dict]:
+    """구간 경계 → 시계열 변경 표식 [{day, label}]. 각 필드의 첫 구간(기록 시작)은 뺀다."""
+    seen: set[str] = set()
+    marks = []
+    for s in spans:
+        flag = s["field"] in ("circuit_open", "memory_retrieved")
+        if s["field"] in seen or flag:
+            marks.append({"day": s["first_day"], "label": s["field"]})
+        seen.add(s["field"])
+    return sorted(marks, key=lambda m: m["day"])
+
+
+# 일간 주기 채널이 이 일수를 넘겨 묵으면 표시한다. 주식은 주말 이틀 + 휴장 하루 + 관측
+# 상한(t−1)을 감안한 달력일, 24시간 시장은 그 여유가 필요 없다. 긴 연휴에는 정상인데도
+# 켜질 수 있다 — 그때는 런 원장이 closed 로 찍혀 있어 구분된다.
+FRESH_MAX_AGE = {"CRYPTO": 2, "US": 4, "KR": 4}
+
+
+def freshness(state_dir: Path, obs_dir: Path, log_dir: Path, market: str, today: date) -> list[dict]:
+    """입력·shadow 채널별 최신 관측의 나이 — [{channel, asof, age_days, daily}].
+
+    daily=True 는 매 런마다 갱신돼야 하는 채널(나이 판정 대상), False 는 주기가 다르거나
+    조건부로만 갱신되는 채널(나이만 표시). 원천이 없는 채널은 행을 내지 않는다.
+    """
+    rows: list[dict] = []
+
+    def add(channel: str, asof, daily: bool) -> None:
+        text = str(asof)[:10] if asof else None
+        try:
+            age = (today - date.fromisoformat(text)).days if text else None
+        except ValueError:
+            age = None
+        rows.append({"channel": channel, "asof": text, "age_days": age, "daily": daily})
+
+    days = list_observation_days(obs_dir, market)
+    snap = (load_observation(obs_dir, market, days[0]) or {}) if days else {}
+    if days:
+        add("관측 스냅샷", days[0], True)
+        last_bars = [bars[-1].get("day") for bars in (snap.get("bars") or {}).values() if bars]
+        if last_bars:
+            add("봉(가장 늦은 종목의 마지막 봉)", min(str(d) for d in last_bars), True)
+        published = [n.get("published_at") for n in snap.get("news") or [] if n.get("published_at")]
+        if published:
+            add("뉴스·공시(최신 발행)", max(str(p) for p in published), False)
+
+    def state(name: str) -> dict:
+        path = state_dir / name
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+    regime = state("regime_latest.json").get(market) or {}
+    if regime:
+        add("국면 FSM", regime.get("asof"), True)
+    valuation = (state(f"index_valuation_{market}.json").get("value") or {}).get("asof")
+    if valuation:
+        add("지수 밸류에이션", valuation, False)
+    history = state(f"index_series_{market}.json").get("history") or []
+    if history:
+        add("지수 시계열", history[-1].get("day") if isinstance(history[-1], dict) else None, True)
+    jm = state(f"jm_{market}.json").get("trained_through")
+    if jm:
+        add("jump model 학습 종료일", jm, False)
+    watch = state(f"watch_{market}.json").get("ref_at")
+    if watch:
+        add("워처 기준가", watch, False)
+    return rows
+
+
+# 채널별로 '매 런마다 채워져 있어야 하는가'. 여기 없는 채널이 0 이면 그냥 빈 것이고(공시가
+# 없는 날, 교훈이 없는 시장), 여기 있는 채널이 0 이면 죽은 것이다. 시장마다 다른 이유:
+# 가상자산에는 재무·지수 배수가 없고, 순자산가치 괴리는 국내 ETF 만 원천이 있으며,
+# 국내 주식은 신호 라이브러리를 열지 않았다.
+CHANNEL_EXPECTED: dict[str, frozenset[str]] = {
+    "CRYPTO": frozenset({"bars", "features", "news", "budget", "alpha_signals"}),
+    "US": frozenset({
+        "bars", "features", "news", "budget", "alpha_signals", "fundamentals", "index_valuation",
+    }),
+    "KR": frozenset({
+        "bars", "features", "news", "budget", "fundamentals", "index_valuation", "etf_premium",
+    }),
+}
+CHANNELS = (
+    "bars", "features", "news", "disclosures", "news_injected", "disclosures_injected",
+    "fundamentals", "index_valuation", "etf_premium", "alpha_signals", "budget", "lessons",
+    "upcoming_events",
+)
+
+
+def channel_grid(log_dir: Path, obs_dir: Path, market: str, days: int = 14) -> list[dict]:
+    """입력 채널 도달 격자 — 최근 days 결정마다 채널별 건수. None = 그 결정에는 기록이 없다.
+
+    bars·features 는 값이 있는 종목 수, news·disclosures 는 **수집** 건수(관측 스냅샷),
+    news_injected·disclosures_injected 는 프롬프트에 **실제로 실린** 건수다. 수집됐다고
+    실린 것이 아니다 — 프롬프트는 건수 상한에서 자르므로 둘을 따로 본다. 실린 건수를
+    기록하지 않은 결정은 None 으로 남긴다(수집 건수로 메우지 않는다).
+    """
+    rows = []
+    for r in read_recent_decisions(log_dir, market, limit=days):
+        d = r["decision"]
+        snap = load_observation(obs_dir, market, r["day"]) or {}
+        news = snap.get("news")
+        injected = d.get("prompt_channels") or {}
+
+        def size(key: str) -> int | None:
+            return len(d.get(key) or ()) if key in d else None
+
+        def present(key: str) -> int | None:
+            return int(d.get(key) is not None) if key in d else None
+
+        rows.append({
+            "day": r["day"],
+            "bars": sum(1 for n in r["n_bars"].values() if n) if r["n_bars"] else None,
+            "features": (
+                sum(1 for v in (d.get("features") or {}).values() if v is not None)
+                if "features" in d else None
+            ),
+            "news": (
+                sum(1 for n in news if n.get("source") not in DISCLOSURE_SOURCES)
+                if news is not None else None
+            ),
+            "disclosures": (
+                sum(1 for n in news if n.get("source") in DISCLOSURE_SOURCES)
+                if news is not None else None
+            ),
+            "news_injected": injected.get("news"),
+            "disclosures_injected": injected.get("disclosures"),
+            "fundamentals": size("fundamentals"),
+            "index_valuation": present("index_valuation"),
+            "etf_premium": size("etf_premium"),
+            "alpha_signals": size("alpha_signals_provided"),
+            "budget": present("budget"),
+            "lessons": size("retrieved_memory_ids"),
+            "upcoming_events": size("upcoming_events"),
+        })
+    return rows
+
+
+def dead_channels(grid: list[dict], market: str) -> list[dict]:
+    """격자에서 죽은 칸만 — 채워져 있어야 하는 채널이 0 인 (day, channel)."""
+    expected = CHANNEL_EXPECTED.get(market, frozenset())
+    return [
+        {"day": row["day"], "channel": ch}
+        for row in grid
+        for ch in CHANNELS
+        if ch in expected and row.get(ch) == 0
+    ]
+
+
+# ── 에이전트 행동·평가 (건강 탭 후반) ──
+
+
+def usage_breakdown(log_dir: Path) -> dict:
+    """llm_usage → 목적별·시장별 호출 수와 토큰. 어디에 토큰이 쓰이는지를 가른다."""
+    by_purpose: dict[str, dict] = {}
+    by_market: dict[str, dict] = {}
+    for rec in iter_events(log_dir, "USAGE", "llm_usage"):
+        tin, tout = int(rec.get("in") or 0), int(rec.get("out") or 0)
+        for table, key in (
+            (by_purpose, rec.get("purpose") or "(미상)"),
+            (by_market, rec.get("for_market") or "(공통)"),
+        ):
+            row = table.setdefault(key, {"key": key, "calls": 0, "in": 0, "out": 0})
+            row["calls"] += 1
+            row["in"] += tin
+            row["out"] += tout
+
+    def ranked(table: dict[str, dict]) -> list[dict]:
+        return sorted(table.values(), key=lambda r: r["in"] + r["out"], reverse=True)
+
+    return {"by_purpose": ranked(by_purpose), "by_market": ranked(by_market)}
+
+
+def stage_moves(decisions: list[dict]) -> list[dict]:
+    """결정별 단계 이동량 — 교훈 블렌딩·토론 재결정·리스크 적용이 배분을 얼마나 옮겼는가.
+
+    값은 나누지 않은 L1. 0 = 그 단계가 있었지만 배분을 바꾸지 않았다(교훈 미적용·토론
+    미소집 포함), None = 그 결정에는 해당 기록이 없다. 효과가 아니라 **개입의 크기**다 —
+    옮긴 것이 옳았는지는 여기서 알 수 없다. tokens_in 은 그 결정의 입력 토큰 합.
+    """
+    rows = []
+    for r in decisions:
+        d = r["decision"]
+        influence, debate = d.get("influence") or {}, d.get("debate") or {}
+        memory = 0.0 if "influence" in d else None
+        if influence.get("applied"):
+            # 블렌딩은 두 배분의 볼록 결합이라 이동량은 배율 × 두 배분의 거리다
+            memory = influence["scale"] * _l1(influence["base_weights"], influence["mem_weights"])
+        moved = 0.0 if "debate" in d else None
+        if debate.get("proposed_before") and debate.get("allocation_after"):
+            moved = _l1(debate["proposed_before"], debate["allocation_after"])
+        pre = r.get("weights_pre_risk")
+        rows.append({
+            "day": r["day"],
+            "memory": None if memory is None else round(memory, 6),
+            "debate": None if moved is None else round(moved, 6),
+            "risk": round(_l1(pre, r["weights"]), 6) if pre else None,
+            "debated": bool(debate),
+            "tokens_in": (d.get("tokens") or {}).get("in"),
+        })
+    return rows
+
+
+def memory_ladder(decisions: list[dict]) -> dict:
+    """교훈이 결정에 닿는 사다리 — 회수됨 → 배분에 반영됨 → 근거로 인용됨(결정 수).
+
+    단마다 줄어드는 것이 정상이고, 어느 단에서 끊기는지가 정보다: 회수가 0 이면 쓸 교훈이
+    없는 것이고, 회수는 되는데 반영이 0 이면 신뢰도 게이트가 막은 것이다.
+    """
+    recorded = [r for r in decisions if "retrieved_memory_ids" in r["decision"]]
+    return {
+        "n": len(recorded),
+        "retrieved": sum(1 for r in recorded if r["decision"].get("retrieved_memory_ids")),
+        "applied": sum(
+            1 for r in recorded if (r["decision"].get("influence") or {}).get("applied")
+        ),
+        "cited": sum(1 for r in recorded if r["cited_memory_ids"]),
+    }
+
+
+def eval_runs(runs_dir: Path) -> list[dict]:
+    """오프라인 평가 실행 목록 — 오래된 것부터. 실행 폴더의 요약·매니페스트만 읽는다."""
+    rows = []
+    if not runs_dir.exists():
+        return rows
+    for run in sorted(p for p in runs_dir.iterdir() if (p / "summary.json").exists()):
+        summary = json.loads((run / "summary.json").read_text(encoding="utf-8"))
+        manifest_path = run / "manifest.json"
+        manifest = (
+            json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        )
+        rows.append({
+            "run_id": run.name,
+            "started_at": str(manifest.get("started_at") or "")[:16].replace("T", " "),
+            "calls": summary.get("calls"),
+            "passed": summary.get("passed"),
+            "gates": summary.get("gates") or {},
+            "latency_p50_s": summary.get("latency_p50_s"),
+            "latency_p95_s": summary.get("latency_p95_s"),
+            "categories": {
+                k: v.get("pass_rate") for k, v in (summary.get("categories") or {}).items()
+            },
+            "prompt_rev": manifest.get("chat_prompt_rev"),
+            "git_dirty": manifest.get("git_dirty"),
+        })
+    return rows
+
+
+# 결정 레코드가 사후에 재구성되려면 있어야 하는 필드 — 무엇을 보고(features), 어떤 판본·
+# 모델·설정으로 결정했고, 리스크 엔진 앞의 원안이 무엇이었는가.
+RECORD_REQUIRED = ("features", "model", "prompt_rev", "config_rev", "weights_pre_risk")
+
+
+def scorecard(
+    ledger: list[dict], decisions: list[dict], risk_rows: list[dict],
+    grid: list[dict], dead: list[dict], citations: list[dict],
+) -> list[dict]:
+    """결정론 점검표 — 점검마다 {check, bad, total, last_bad}. 판정자 없이 규칙만으로 센다.
+
+    비율이 아니라 **위반 건수와 마지막 위반일**을 낸다 — 하루 한 건짜리 표본에서 비율은
+    한 번의 실패로 크게 흔들려 추세를 말해 주지 못한다. 점검마다 창이 다르므로(런 원장은
+    달력일, 나머지는 결정 수) total 을 함께 읽는다.
+    """
+    def row(check: str, bad_days: list[str], total: int) -> dict:
+        return {"check": check, "bad": len(bad_days), "total": total,
+                "last_bad": max(bad_days) if bad_days else None}
+
+    judged = [r for r in ledger if r["status"] != "pending"]
+    accepted = [r for r in judged if r["status"] in ("ok", "stalled")]
+    # 서킷이 열린 날은 원안과 무관하게 엔진이 배분을 대신 정한다 — 원안의 한도 준수를 묻는
+    # 점검에서 뺀다.
+    measured = [r for r in risk_rows if r["l1"] is not None and not r["circuit_open"]]
+    # 필드는 시기별로 추가돼 왔다. 처음부터 없던 것은 결손이 아니고, **한 번 기록되기
+    # 시작한 필드가 다시 비면** 결손이다.
+    seen: set[str] = set()
+    incomplete = []
+    for r in decisions:
+        present = {k for k in RECORD_REQUIRED if r["decision"].get(k) is not None}
+        if seen - present:
+            incomplete.append(r["day"])
+        seen |= present
+    with_material = [c for c in citations if c["status"] in ("cited", "unknown", "uncited")]
+    cited = [c for c in citations if c["status"] in ("cited", "unknown")]
+    return [
+        row("런이 제때 돌았다",
+            [r["day"] for r in judged if r["status"] in RUN_BAD or r["status"] == "late"],
+            len(judged)),
+        row("주문이 나갔다", [r["day"] for r in accepted if r["status"] == "stalled"], len(accepted)),
+        row("LLM 원안이 한도 안이었다", [r["day"] for r in measured if r["l1"] > 1e-9], len(measured)),
+        row("입력 채널이 찼다", sorted({d["day"] for d in dead}), len(grid)),
+        row("인용한 ID 가 실재했다", [c["day"] for c in cited if c["status"] == "unknown"], len(cited)),
+        row("재료가 있으면 인용했다",
+            [c["day"] for c in with_material if c["status"] == "uncited"], len(with_material)),
+        row("결정 레코드가 완전했다", incomplete, len(decisions)),
+    ]
